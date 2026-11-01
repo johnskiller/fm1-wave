@@ -236,6 +236,34 @@ uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8
                         (float)smp->rate * (1.0f / 44100.0f));
 }
 
+uint32_t wv_note_on_grain(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                          uint32_t start, uint32_t end)
+{
+    uint32_t pick;
+    wv_voice *v;
+
+    if (!smp || !smp->data || !smp->len)
+        return 0xFFFFFFFFu;
+    if (end == 0 || end > smp->len)
+        end = smp->len;
+    if (start >= end)
+        start = 0;
+
+    pick = voice_alloc(s);
+    voice_begin(s, pick, note, vel, 0.0f);
+    v = &s->v[pick];
+    v->src = WV_SRC_GRAIN;
+    v->smp = smp;
+    /* The seed is the voice index and the note, so two voices on the same note and
+     * two notes on the same voice scatter differently, and a test that replays the
+     * same sequence gets the same cloud. */
+    /* loop: a granular note sustains. See wv_grains_start for why an unwrapped
+     * playhead is not a granular instrument. */
+    wv_grains_start(&v->gr, smp, start, end, wv_smp_inc(smp, (float)note), 1,
+                    (uint32_t)pick * 2654435761u ^ ((uint32_t)note << 8));
+    return pick;
+}
+
 void wv_note_off(wv_state *s, uint8_t note)
 {
     uint32_t i;
@@ -259,7 +287,8 @@ uint32_t wv_active(const wv_state *s)
 #define WV_ATK 0.0113f
 #define WV_REL 0.0012f
 
-void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master)
+static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
+                       float master, uint32_t from, uint32_t to)
 {
     uint32_t i, k;
     float mf = u7_to_f(s->morph) * (float)(WV_FRAMES - 1u);
@@ -267,16 +296,26 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
     float amt_t = u7_to_f(s->sh_amount);
     /* the SVF's damping: RES 0 is a plain low-pass, RES 127 rings hard */
     float damp = 2.0f - 1.85f * u7_to_f(s->res);
-    /* the parameter smoothing per sample, to reach the target in ~2 ms at 44.1 k */
+    /* The parameter smoothing per sample, to reach the target in ~2 ms at 44.1 k.
+     *
+     * These are LOCAL copies of the smoothed values, and voice_block does not write
+     * them back. That is what makes the two-core split sum to the same audio as one
+     * core: every voice range renders the same n samples, so every range has to see
+     * the same cut and amount at every sample — the same ramp, starting from the same
+     * place. If each range wrote back, the second half would advance the smoother a
+     * second time for the same n samples and the knobs would glide at twice the rate
+     * whenever the split was on. The caller advances the real values once per block. */
     const float zc = 0.0113f;
+    float cut_z = s->cut_z;
+    float amount_z = s->amount_z;
 
     for (k = 0; k < n; k++) {
         float g, sh, env, amp;
-        s->cut_z += (cut_t - s->cut_z) * zc;
-        s->amount_z += (amt_t - s->amount_z) * zc;
-        g = svf_g(s->cut_z);
+        cut_z += (cut_t - cut_z) * zc;
+        amount_z += (amt_t - amount_z) * zc;
+        g = svf_g(cut_z);
 
-        for (i = 0; i < WV_VOICES; i++) {
+        for (i = from; i < to; i++) {
             wv_voice *v = &s->v[i];
             float osel, coef, s1, s2, lp, hp, bp;
 
@@ -294,6 +333,13 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
                 v->phase += v->inc;
                 if (v->phase >= 1.0f)
                     v->phase -= 1.0f;
+            } else if (v->src == WV_SRC_GRAIN) {
+                /* The cloud renders its own output sample; the grain length is a
+                 * parameter, not the voice's, because the panel can change it while a
+                 * note is held (a held cloud re-tiles at the new length, which is the
+                 * point of being able to turn it). */
+                osel = wv_grains_next(&v->gr, v->smp, wv_grain_len(s->grain_size),
+                                      (float)s->spray);
             } else {
                 int fin = 0;
                 osel = wv_reader_next(&v->rd, v->smp, &fin);
@@ -305,7 +351,7 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
                     osel = 0.0f;
             }
 
-            sh = wv_shaper((uint32_t)(s->shape % WV_SHAPE_N), osel, s->amount_z);
+            sh = wv_shaper((uint32_t)(s->shape % WV_SHAPE_N), osel, amount_z);
 
             /* Zavalishin's topology-preserving SVF: stable at any g, no
              * coefficient that blows up when the corner goes near Nyquist */
@@ -322,32 +368,11 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
             out[k] += amp;
         }
 
-        /* Bus soft clip, then a hard clamp behind it.
-         *
-         * The hard clamp is not cosmetic: the platform hands this buffer straight
-         * to the ALNK DMA as int32 with 24 valid bits and nothing on the way down
-         * clips (main_fm1.c: render_block -> abuf). A sample past full scale there
-         * does not distort, it *wraps* — the loudest possible click.
-         *
-         * But clamping alone distorts too early: measured, eight voices under FOLD
-         * at full amount peak at 2.4x and a bare clamp clips 2-9% of samples. tanh
-         * fixes that in the only place it can be fixed cheaply, the bus (one call
-         * per sample, against eight voices' worth of work). It is ~identity below
-         * 0.5, so a solo note and a small chord are untouched and stay ~-16 dBFS,
-         * and it compresses the full-eight case to ~0.98 instead of shredding it. */
-        {
-            float b = fm_tanhf(out[k]);
-            if (b > 1.0f)
-                b = 1.0f;
-            else if (b < -1.0f)
-                b = -1.0f;
-            out[k] = b;
-        }
     }
 
     /* free the voices that finished releasing (outside the sample loop: a voice
      * that frees itself mid-block would leave a discontinuity in the block) */
-    for (i = 0; i < WV_VOICES; i++) {
+    for (i = from; i < to; i++) {
         wv_voice *v = &s->v[i];
         if (v->active && v->target == 0.0f && v->level < 0.0005f) {
             v->active = 0;
@@ -356,4 +381,140 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
             v->lpf_s2 = 0.0f;
         }
     }
+}
+
+/* Bus soft clip, then a hard clamp behind it. It runs ONCE, over the whole buffer,
+ * after all the voices that are going to write to it have written.
+ *
+ * The hard clamp is not cosmetic: the platform hands this buffer straight to the
+ * ALNK DMA as int32 with 24 valid bits and nothing on the way down clips
+ * (main_fm1.c: render_block -> abuf). A sample past full scale there does not
+ * distort, it *wraps* — the loudest possible click.
+ *
+ * But clamping alone distorts too early: measured, eight voices under FOLD at full
+ * amount peak at 2.4x and a bare clamp clips 2-9% of samples. tanh fixes that in the
+ * only place it can be fixed cheaply, the bus (one call per sample, against eight
+ * voices' worth of work). It is ~identity below 0.5, so a solo note and a small
+ * chord are untouched and stay ~-16 dBFS, and it compresses the full-eight case to
+ * ~0.98 instead of shredding it.
+ *
+ * It also cannot live inside voice_block: with the pool split across two cores each
+ * half would limit its own partial sum, and tanh(a) + tanh(b) != tanh(a + b) — the
+ * split would change the sound, not just the speed. */
+static void bus_limit(float *out, uint32_t n)
+{
+    uint32_t k;
+    for (k = 0; k < n; k++) {
+        float b = fm_tanhf(out[k]);
+        if (b > 1.0f)
+            b = 1.0f;
+        else if (b < -1.0f)
+            b = -1.0f;
+        out[k] = b;
+    }
+}
+
+/* Advance the smoothed parameters by one block. Called once per block by whichever
+ * entry point ran, never by voice_block: see the note there. */
+static void smooth_step(wv_state *s, uint32_t n)
+{
+    const float zc = 0.0113f;
+    float cut_t = cut_hz(s->cut);
+    float amt_t = u7_to_f(s->sh_amount);
+    uint32_t k;
+    for (k = 0; k < n; k++) {
+        s->cut_z += (cut_t - s->cut_z) * zc;
+        s->amount_z += (amt_t - s->amount_z) * zc;
+    }
+}
+
+void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
+                     float master, uint32_t from, uint32_t to)
+{
+    if (from >= WV_VOICES || from >= to)
+        return;
+    if (to > WV_VOICES)
+        to = WV_VOICES;
+    voice_block(s, b, out, n, master, from, to);
+}
+
+/* The job the second core runs. The platform hands it a single uint32, so the whole
+ * argument set has to be reachable from one: a file-static pointer to the block in
+ * flight is the only way to do that without inventing a queue. That is safe because
+ * the render is synchronous — the job is handed over and waited for inside one
+ * app_render call, so there is exactly one job in flight at any time, and the second
+ * core is only ever handed the top half of the pool. */
+static struct {
+    wv_state *s;
+    const wv_bank *b;
+    float *out;
+    uint32_t n;
+    float master;
+} job;
+
+static void job_half(void *arg)
+{
+    (void)arg;
+    voice_block(job.s, job.b, job.out, job.n, job.master, WV_VOICES / 2u, WV_VOICES);
+}
+
+/* The platform's signature: void (*)(uint32_t). */
+static void job_half_u32(uint32_t arg)
+{
+    (void)arg;
+    job_half(0);
+}
+
+void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
+                     int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
+                     int (*wait)(void), void (*sync)(void))
+{
+    if (cpu2 && run && wait) {
+        job.s = s;
+        job.b = b;
+        job.out = out;
+        job.n = n;
+        job.master = master;
+
+        /* Publish the job's argument block BEFORE handing it over. The platform's
+         * own barrier covers its mailbox words, not this struct, and the two cores
+         * share their caches: without this the second core can read a stale `job`
+         * and render the previous block's audio — which sounds like a stutter, not
+         * like a race. */
+        if (sync)
+            sync();
+
+        /* Hand the top half over first, then render the bottom half here, then wait.
+         * That order is the whole point: the two halves run at the same time. Waiting
+         * first would serialise them and cost more than one core, because the handover
+         * is not free. */
+        if (run(job_half_u32, 0u)) {
+            voice_block(s, b, out, n, master, 0u, WV_VOICES / 2u);
+
+            /* The wait can fail: the core was retired (cpu2_fallback) and the job
+             * dropped. It is never half-done in that case — a fault restarts the
+             * device without the fallback, and with it the job is dropped whole
+             * before it runs — so re-rendering the top half adds nothing to `out`.
+             * Without this the top four voices would simply be missing, and that is
+             * the difference between "slower" and "wrong". */
+            if (wait() != 0)
+                voice_block(s, b, out, n, master, WV_VOICES / 2u, WV_VOICES);
+            else if (sync)
+                sync();                 /* drain its writes to `out` before the bus */
+
+            smooth_step(s, n);
+            bus_limit(out, n);
+            return;
+        }
+    }
+
+    /* one core: exactly what wv_render does */
+    voice_block(s, b, out, n, master, 0u, WV_VOICES);
+    smooth_step(s, n);
+    bus_limit(out, n);
+}
+
+void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master)
+{
+    wv_render_split(s, b, out, n, master, 0, 0, 0, 0);
 }

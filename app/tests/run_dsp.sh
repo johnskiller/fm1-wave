@@ -19,7 +19,7 @@ fi
 # fuse either, or the tests check arithmetic the device cannot do
 FLAGS="-O2 -ffp-contract=off -std=c99 -Wall -Wextra -Wno-unused-parameter"
 INC="-I app/dsp -I platform/include -I $GEN"
-SRC="app/dsp/wv_dsp.c app/dsp/wv_sample.c app/dsp/wv_slice.c"
+SRC="app/dsp/wv_dsp.c app/dsp/wv_sample.c app/dsp/wv_slice.c app/dsp/wv_grain.c"
 
 echo "== dsp =="
 $CC $FLAGS $INC -o "$OUT/test_dsp"   app/tests/test_dsp.c   $SRC -lm
@@ -32,3 +32,11 @@ $CC $FLAGS $INC -o "$OUT/test_sample" app/tests/test_sample.c $SRC -lm
 echo "== slice =="
 $CC $FLAGS $INC -o "$OUT/test_slice"  app/tests/test_slice.c  $SRC -lm
 "$OUT/test_slice"
+
+echo "== grain =="
+$CC $FLAGS $INC -o "$OUT/test_grain"  app/tests/test_grain.c  $SRC -lm
+"$OUT/test_grain"
+
+echo "== split =="
+$CC $FLAGS $INC -o "$OUT/test_split"  app/tests/test_split.c  $SRC -lm
+"$OUT/test_split"

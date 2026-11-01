@@ -34,8 +34,12 @@ static uint8_t        slice_count;
 static uint8_t        smp_i;      /* which slot EN_PRESET picked, in SMPL */
 static uint8_t        slices_from; /* the slot the current chops came out of */
 
-/* SOURCE: which thing a key plays. SYNTH reads the wavetable, SMPL reads the pool. */
-static uint8_t src_synth = 1;
+/* SOURCE: which thing a key plays. SYNTH reads the wavetable, SMPL reads the pool as
+ * a sampler, GRAN reads the same pool as a grain cloud. Three sources, one switch:
+ * GRAN is the pool with a different reader, not a different instrument, so it shares
+ * the knob set and the key map. */
+enum { SRC_SYNTH, SRC_SMPL, SRC_GRAN };
+static uint8_t src = SRC_SYNTH;
 
 /* Held notes as the UI sees them, and the velocity each arrived with. The DSP gets
  * note on/off from here; nothing in the audio path reads plat_keys, because the
@@ -46,6 +50,10 @@ static uint8_t  bank_i;
 /* the panel's four live knobs, as 0..127 */
 static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
 static uint8_t k_morph = 0;
+/* granular: grain length and scatter. Same "pick the material" knob as SMPL uses;
+ * SPRAY takes EN_PRESET in GRAN, exactly as the spec assigns it. */
+static uint8_t k_grain = 64;      /* 0..127: 10..200 ms */
+static uint8_t k_spray = 0;       /* 0..127: 0 makes a grain voice a sample player */
 
 /* the waveform view: one peak per bucket, written by the audio interrupt */
 #define WF_W 240
@@ -59,6 +67,8 @@ static void ui_apply(void)
     dsp.shape = k_shape;
     dsp.sh_amount = k_amount;
     dsp.morph = k_morph;
+    dsp.grain_size = k_grain;
+    dsp.spray = k_spray;
 }
 
 /* --------------------------------------------------------------- audio --- */
@@ -139,9 +149,18 @@ static void play_note(uint8_t note, uint8_t vel)
 {
     int k;
 
-    if (src_synth || !smp_count) {
+    if (src == SRC_SYNTH || !smp_count) {
         float hz = 440.0f * fm_exp2f((float)((int)note - 69) / 12.0f);
         wv_note_on(&dsp, note, vel, hz / WAVE_HZ);
+        return;
+    }
+
+    /* GRAN: the whole slot as a cloud, pitched from its root so a grain voice is in
+     * tune with the same slot played as a sample. The chop-key map is SMPL's: a cloud
+     * over a single chop is a legitimate sound but a confusing default, so the keys
+     * stay melodic in GRAN and the material knob chooses the slot. */
+    if (src == SRC_GRAN) {
+        wv_note_on_grain(&dsp, &smp[smp_i], note, vel, 0, 0);
         return;
     }
 
@@ -189,22 +208,35 @@ static void input(void)
     if ((e = plat_enc(EN_K2)) != 0) k_res    = (uint8_t)clamp((int32_t)k_res + e * 4, 0, 127);
     if ((e = plat_enc(EN_K3)) != 0) k_shape  = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     if ((e = plat_enc(EN_K4)) != 0) k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
-    if ((e = plat_enc(EN_ALGO)) != 0) k_morph = (uint8_t)clamp((int32_t)k_morph + e * 8, 0, 127);
+    if (src != SRC_GRAN && (e = plat_enc(EN_ALGO)) != 0)
+        k_morph = (uint8_t)clamp((int32_t)k_morph + e * 8, 0, 127);
 
     /* SOURCE: SYNTH reads the wavetable, SMPL reads the sample pool. This is the
      * one switch that changes what a key does, so it lives next to the keys.
      * B_ENV is the free button on this panel; the ENV page it was meant for is not
      * built yet, so SOURCE gets it first and the page moves to a long press. */
     if (btn_pressed(btn, B_SEL))
-        src_synth = !src_synth;
+        src = (uint8_t)((src + 1u) % 3u);
 
     /* EN_PRESET is a different control depending on SOURCE (see docs/spec.md):
      * SYNTH picks the bank, SMPL picks the sample. One knob, two jobs, because the
      * panel has one knob and both jobs are "which material". */
-    if (src_synth) {
+    if (src == SRC_SYNTH) {
         if ((e = plat_enc(EN_PRESET)) != 0) {
             bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
             bank.frames = WV_BANKS[bank_i];
+        }
+    } else if (src == SRC_GRAN) {
+        int32_t dig;
+        /* EN_PRESET is SPRAY here (the spec's assignment) and the material picks the
+         * slot on EN_ALGO, which is MORPH's knob in SYNTH. One read per knob: reading
+         * EN_ALGO twice would spend the detent on the first call and always see 0 on
+         * the second, so MORPH would never move in GRAN. */
+        if ((e = plat_enc(EN_PRESET)) != 0)
+            k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
+        if ((dig = plat_enc(EN_ALGO)) != 0) {
+            if (smp_count)
+                smp_i = (uint8_t)((smp_i + (dig > 0 ? 1 : smp_count - 1)) % smp_count);
         }
     } else {
         if ((e = plat_enc(EN_PRESET)) != 0 && smp_count)
@@ -281,7 +313,7 @@ void app_frame(void)
     knob(76,  "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
     knob(112, "AMOUNT", (num(t, k_amount * 100 / 127), t), k_amount, 0);
     knob(148, "MORPH",  (num(t, k_morph * 100 / 127), t), k_morph, 0);
-    if (src_synth) {
+    if (src == SRC_SYNTH) {
         knob(184, "SYNTH", WV_BANK_NAME[bank_i], (int32_t)bank_i * 127 / (WV_BANK_COUNT - 1), 1);
     } else if (!smp_count) {
         knob(184, "SMPL", "NONE", 0, 0);
@@ -320,7 +352,7 @@ void app_init(void)
     held_prev = 0;
     btn_prev = 0;
     wf_fill = 0;
-    src_synth = 1;
+    src = SRC_SYNTH;
 
     /* The pool is flash, handed over by the platform with its length; plat_res
      * returns NULL on an app built without a resource region, which is not an error,

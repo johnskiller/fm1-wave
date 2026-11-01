@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include "wv_grain.h"
 #include "wv_sample.h"
 
 #define WV_VOICES      8u
@@ -30,7 +31,7 @@
 /* What a voice reads. A slice is not a separate source: it is a sample reader
  * with a start and an end, so the difference between a slice and a whole sample is
  * where the reader was pointed and whether it loops. */
-enum { WV_SRC_TABLE, WV_SRC_SAMPLE, WV_SRC_SLICE };
+enum { WV_SRC_TABLE, WV_SRC_SAMPLE, WV_SRC_SLICE, WV_SRC_GRAIN };
 
 /* Per-voice gain: 1/sqrt(8). Eight voices that do not correlate sum in power, so
  * this puts the expected peak near full scale instead of eight times over it. It
@@ -60,6 +61,10 @@ typedef struct {
      * one field instead of two parallel chains. */
     wv_reader rd;          /* position in the sample, in that slot's samples */
     const wv_sample *smp;  /* the slot being played, 0 for a table voice */
+    /* a granular voice reads the same slot as a sample voice but through a cloud of
+     * grains instead of one playhead. It is a voice field, not a second engine: the
+     * shaper, filter and VCA below are the same ones. */
+    wv_grains gr;
     uint8_t  active;
     uint8_t  note;
     uint8_t  vel;          /* 0..127, the VCA ceiling scales with it */
@@ -76,7 +81,8 @@ typedef struct {
     uint8_t  res;
     uint8_t  sh_amount;
     uint8_t  shape;        /* WV_SHAPE_* */
-    uint8_t  pad;
+    uint8_t  grain_size;   /* 0..127: grain length, 10..200 ms (wv_grain_len) */
+    uint8_t  spray;        /* 0..127: grain start scatter; 0 makes it a sample player */
     /* the block's smoothed values; turning a knob must not click */
     float    cut_z;
     float    amount_z;
@@ -131,6 +137,17 @@ uint32_t wv_note_on_sample(wv_state *s, const wv_sample *smp, uint8_t note, uint
 uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
                           uint32_t start, uint32_t end, int loop);
 
+/* Start a granular voice: a cloud over [start, end) of the slot, `size` 0..127 grain
+ * length, `spray` 0..127 scatter. The voice pitches like a sample (wv_smp_inc), so a
+ * cloud over a chop is in tune with the chop itself.
+ *
+ * SPRAY at 0 is not a special case in this function or in the cloud: the window
+ * tiling makes the cloud reproduce the material, so a note started with spray 0 is a
+ * sample player with a grain-length window on it. That is the property that lets the
+ * granular path be the sample path's fallback rather than a second feature. */
+uint32_t wv_note_on_grain(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                          uint32_t start, uint32_t end);
+
 /* Release a note: the voice fades out and frees itself. */
 void wv_note_off(wv_state *s, uint8_t note);
 
@@ -143,5 +160,31 @@ uint32_t wv_active(const wv_state *s);
  * what is there: the caller may mix several parts). `master` is 0..4096 as the
  * platform's master_q12. */
 void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master);
+
+/* Render one voice range of one block: [from, to) of the voice pool, all `n` frames.
+ *
+ * This is the split the second core takes. It is per *voice*, not per sample, for a
+ * reason that is not about performance: a voice's state (a grain cloud's four
+ * positions, a filter's two integrators, the VCA's ramp) is written by exactly one
+ * core for the whole block. Splitting by sample instead would have both cores touch
+ * every voice's floats every block, and the cross-core barrier around that is what
+ * makes dual-core audio expensive and fragile.
+ *
+ * The output buffer is still shared: `out` is cleared by the caller and each voice
+ * range adds its own sum into it. Two cores adding to different addresses in the same
+ * cache line is the one sharing this accepts, and it is why wv_render_split does the
+ * bus limiter itself, once, after both halves are in.
+ */
+void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
+                     float master, uint32_t from, uint32_t to);
+
+/* The whole render, optionally over two cores. With `cpu2` clear this is exactly
+ * wv_render (one core, one pass). With it set and a working second core, the voice
+ * pool is cut in half, both halves run, and the bus limiter lands after both.
+ * Falls back to one core whenever the second one will not take the job, so a unit
+ * that cannot run it loses throughput and nothing else. */
+void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
+                     int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
+                     int (*wait)(void), void (*sync)(void));
 
 #endif /* WV_DSP_H */

@@ -78,15 +78,35 @@ def hit(n, f0, f1, decay, seed, click=0.0):
 
 
 def tone(n, f):
-    """A sustained, mildly harmonic tone: something the pitch path can be heard on."""
-    e = env(n, 0.01, 0.0, 1.2)
+    """A genuinely sustained, mildly harmonic tone.
+
+    It must NOT decay, and that is a change: this used to fade to 5 % over its 1.2 s,
+    which was fine while the tone was only heard as a pitched sample (the VCA decides
+    when it ends) but wrong for the granular path, where the material's own envelope
+    is part of the instrument. A cloud over a decaying tone gets quieter as its
+    playhead walks into the tail, so sweeping SPRAY made the sound *fade* as well as
+    scatter, and it looked like a bug in the cloud. It was: the cloud was faithful to
+    material that was fading. Sustained material is what grain parameters can be
+    judged on.
+
+    The attack and the release are short but present: a tone that starts and ends at
+    full amplitude is a click, and a loop of it ticks once per pass.
+    """
+    a = int(0.01 * RATE)
+    r = int(0.01 * RATE)
     out = []
     for i in range(n):
         t = i / RATE
         v = math.sin(2 * math.pi * f * t)
         v += 0.35 * math.sin(2 * math.pi * 2 * f * t)
         v += 0.15 * math.sin(2 * math.pi * 3 * f * t)
-        out.append(v * e[i] * 0.6)
+        if i < a:
+            g = i / a
+        elif i > n - r:
+            g = (n - i) / r
+        else:
+            g = 1.0
+        out.append(v * g * 0.6)
     return out
 
 
@@ -125,7 +145,9 @@ def main(out_path):
 
     slots = [
         ("DEMO KIT", kit(), 53),          # C3-ish: the chops land on the low keys
-        ("DEMO TONE", tone(int(1.2 * RATE), 220.0), 57),
+        # 2 s: long enough that a cloud's playhead has material to walk through, and
+        # still only 44 KB at 11.025 kHz / 16-bit.
+        ("DEMO TONE", tone(int(2.0 * RATE), 220.0), 57),
     ]
 
     body = bytearray()

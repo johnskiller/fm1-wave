@@ -309,31 +309,69 @@ implementation between them.
 ### 5c. Granular — the third feature, and the one with the real bill
 
 Granular is the same data with a different reader: instead of one phase walking
-the sample, N overlapping grains each have their own position, envelope and
-pan.
+the sample, N overlapping grains each have their own position and window.
 
-**The bill, stated honestly: grains are voices.** A granular voice that layers
-8 grains costs what 8 oscillator voices cost. At 8 polyphonic voices × 8 grains
-the CPU is 64 oscillator-equivalents, which will not fit in 5.8 ms on one core.
+**The bill, stated honestly: grains are voices.** A grain is one read (one flash
+fetch, one window, one interpolation) — exactly the work an oscillator does. So
+the cost is `grains × held voices` oscillator-equivalents, and at 8 × 8 that is 64,
+which does not fit in a 5.8 ms block on one core.
 
-So granular is **per-voice grain count, with a hard total budget**: the voice
-allocator treats a grain as taking a unit of the budget (the platform's
-`units()` concept in Saadet is the same idea), and the grain count of a voice
-drops when more keys are held. Concretely:
+### The window is sin², and the overlap is exactly 2 — and that is arithmetic
 
-- **SYNTH mode**: 8 voices, no grains. Full polyphony.
-- **SMPL mode**: grain count × held voices ≤ budget. Start at **4 grains at 4
-  voices**, and let the allocator halve grains before it steals a voice —
-  dense texture and fewer notes beats clipped texture and more notes.
-- **SPRAY** (EN_PRESET) scatters grain start positions; at 0 the grains are
-  contiguous and SMPL behaves like an ordinary sample player, which is the
-  escape hatch if the budget does not stretch.
+`sin²(πt) + sin²(π(t+½)) = 1`. Two grains half a grain apart sum to *exactly* one
+at every sample: no table, no approximation, no gain compensation, no ripple.
+Any other overlap or a peak-normalised wavetable leaves a ripple that is audible
+as a slow tremolo whenever the grain rate beats against the pitch.
 
-Grain envelope: Hann, computed from a 256-entry quarter-table, not
-per-sample `sin`.
+So `WV_GRAIN_OVERLAP = 2` is not a taste, and the spawn hop is `grain length / 2`.
 
-**Grain shape is not in v1**: no per-grain filter, no per-grain pan in v1 (the
-mix is mono per voice until the part's stereo stage). Named, not forgotten.
+**The consequence is the escape hatch**: at SPRAY 0 the grains tile, every live
+grain reads the *same* source sample at the same instant, the windows sum to 1,
+and the cloud **is** the sample. Not approximately — measured worst error 1e-5
+against the material (`test_grain.c`). SPRAY therefore degrades granular into an
+ordinary sample player by construction rather than by a special case.
+
+One honest caveat: a note places **two** grains on its first sample (one at window
+phase ½, one at 0). With a single grain the note would start at window 0 — silence —
+and fade in over half a grain, which is a soft attack on every drum hit.
+
+### A granular note sustains
+
+The playhead wraps inside `[start, end)` when the note loops. Without the wrap a
+cloud over a 2 s sample goes silent after 2 s of holding a key — and it goes
+silent *earlier* the more SPRAY is on, because a scattered grain that lands past
+the end reads nothing. Both were observed before it was fixed; the second one
+looked like "spray kills the sound".
+
+Past the end of its material a grain reads **silence, not the last sample held**.
+Holding the last sample makes a windowed constant, and two windowed constants sum
+to a DC offset — a one-shot that does not decay but sits on the material's final
+value at full level. That was observed too.
+
+### Grain size and spray
+
+- **GRAIN** (0–127 → **10–200 ms**, exponential; the midpoint is the geometric
+  mean √(10·200) = 44.7 ms, not 105 ms).
+- **SPRAY** (0–127) scatters each grain's start over ±(spray/127) × half the slot.
+  The normalisation lives inside the cloud, not at the call site: passing a raw
+  0–127 scatters by 127 × len/2, so every grain clamps to the same two edges and
+  two different seeds produce identical clouds (which happened).
+- Measured at spray 0: the spectrum peaks at the material's own 219.5 Hz with a
+  1 Hz bandwidth (the analysis resolution). At spray 127 the peak wanders over
+  188–273 Hz and the bandwidth widens: that is the granular smear, and it is
+  exactly the energy that at spray 0 is zero.
+
+**Grain shape is not in v1**: no per-grain filter, no per-grain pan, no reverse
+grains (the reader supports `dir = -1`; the cloud does not use it yet).
+
+### The budget, and where it is spent
+
+- **SYNTH**: 8 voices, no grains. Full polyphony.
+- **GRAN**: 4 grains per voice (`WV_GRAINS`), so 2 sound at any instant and two
+  more cover a spawn landing on the sample another grain ends. 8 voices × 4 grains
+  = 32 reads per sample, against SYNTH's 8.
+- `WV_GRAINS` is the whole granular budget knob. Lowering it to 2 makes the cloud
+  exactly the tiling pair and nothing more.
 
 ---
 
@@ -400,6 +438,46 @@ the budget below), not the audio.
 
 If a gate fails, in order: cut grains, then voices, then move the shaper to the
 mix bus (one instance instead of eight), then `cpu2`.
+
+### The second core: yes, and the split is by voice, not by sample
+
+`fm1.toml` sets `cpu2 = true` and `cpu2_fallback = true`. The platform's second
+core (`plat_cpu2_run/wait/sync`, felucca-bsp's `fm1_cpu1.h`) is not an async
+worker: **the render hands it a job, does its own share, and waits for it inside
+the same block**. So it does not add a thread, it halves a block. That is why the
+split has to be a *partition* and not a pipeline — there is no second buffer and
+no place to put one.
+
+**Cut by voice, not by sample.** A voice's state is a pile of floats written
+every sample: four grain positions, two filter integrators, a VCA ramp. Splitting
+by sample would have both cores touch every voice's floats every block. Splitting
+by voice means each range's state has exactly one writer for the whole block, and
+the only cross-core data is the output buffer — where the ranges add into
+*different* addresses.
+
+**One shared thing had to move out**: the per-sample smoothing of CUT and AMOUNT.
+If each half advanced the same smoother, turning a knob would glide at twice the
+rate whenever the split was on. So `voice_block` reads a local copy and the caller
+advances the real value **once per block**. Same for the bus limiter: `tanh(a) +
+tanh(b) ≠ tanh(a+b)`, so each half must not limit its own partial sum. The limiter
+runs after both halves are in.
+
+**Verified, not assumed**: `test_split.c` renders the same eight-voice scene
+through one core and through two, and compares sample by sample — worst difference
+**1.19e-7** (float summation order), including a case with the knobs moving. Two
+fallbacks are tested too: a core that refuses the job, and a core that takes it and
+then reports it was retired. Both render the full block on one core, because a
+dropped job whose half is not re-rendered means four voices vanish — "slower", not
+"wrong", is the requirement.
+
+`cpu2_fallback = true` rather than the default: without it, any CPU1 misread
+**restarts the FM-1**, and a restart mid-set is worse than losing half the
+polyphony. With it the app keeps playing on one core until power-off, and the split
+path degrades to exactly the single-core path.
+
+**What is NOT measured**: that the split halves the time. That needs the device —
+the 8 ms job timeout, the 2816 B stack, and the fact that a job runs *from flash*
+while CPU0 reads the same flash. It is on the Gate B list.
 
 ---
 
