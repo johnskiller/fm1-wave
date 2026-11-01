@@ -77,21 +77,42 @@ Seven encoders. Grouped by function, so the pairs sit side by side on the panel.
 | EN_K2 | `EN_K2` | **RES** | 0–127 → damping 2.0 … 0.15 |
 | EN_K3 | `EN_K3` | **SHAPE** | 0–3 detented: SOFT / HARD / FOLD / SINE |
 | EN_K4 | `EN_K4` | **AMOUNT** | 0–127 → shaper drive 0 … 16× |
-| EN_PRESET | `EN_PRESET` | **SPRAY** | 0–127 → granular scatter (inert and greyed in SYNTH) |
+| EN_PRESET | `EN_PRESET` | **BANK** / **SPRAY** | SYNTH: bank 0–7, detented · SMPL: granular scatter 0–127 |
 
 **The pairs are adjacent**: CUT/RES are the filter, SHAPE/AMOUNT are the shaper.
 That is why CUT moved off `EN_PRESET` — a filter with its resonance two knobs
 away is a filter you operate by reaching across the panel.
 
-`EN_PRESET` becomes SPRAY because it is the one encoder that is **not live in
-both modes**: in SYNTH there is no granular, so the knob is inert. Putting the
-mode-dependent knob on the encoder that is already the odd one out (the preset
-position, unused by an instrument with no presets in v1) keeps EN_K1..K4
-meaning the same four things in both modes.
+### The one encoder that follows the mode
 
-### Toggle pages: ENV and BANK
+`EN_PRESET` is **BANK in SYNTH and SPRAY in SMPL**, because the two halves of
+the instrument want different things there:
 
-Two things do not fit on seven encoders. Both are a **toggle**: press the panel
+- In **SYNTH** the eight banks are a timbre sweep you audition fast, exactly
+  like MORPH — it belongs on a knob under a hand.
+- In **SMPL** there is no bank to sweep; what you play is the material itself,
+  and **SPRAY is the live control** (how far the grains scatter). Choosing
+  *which* sample is a load, not a sweep — it is on the material page (below).
+
+So the encoder is never dead: eight synth banks in one mode, grain scatter in
+the other. That is better than a greyed bar in SYNTH, which is what it was
+before this change.
+
+**This does not violate "a knob means one thing while you play"**: the knob
+changes exactly when **SOURCE** changes, and SOURCE is the one control that
+redefines what the instrument is made of. The screen's middle band already shows
+material in both modes, so what the knob is pointing at is on screen at the
+moment you touch it.
+
+**The cost, stated plainly**: the material picker is a live knob in SYNTH but a
+page action in SMPL. The justification is real (a sweep you play versus a load
+you choose) but it *is* asymmetric. If that asymmetry bothers you more than the
+dead knob did, the alternative is BANK on the material page in both modes and
+`EN_PRESET` = SPRAY always — then SYNTH greys that encoder again.
+
+### Toggle pages: ENV, and the material page
+
+Things that do not fit on the seven encoders are a **toggle**: press the panel
 button and the encoders become that page; press it again and they are the tone
 controls. A short label in the header says which page is up while it is up.
 
@@ -101,9 +122,12 @@ on the keys. Hold is also invisible: nothing on the panel says "you are in a
 page" until the bars change under your fingers.
 
 - **BTN_ENV** → **envelope page**: ATTACK, DECAY, SUSTAIN, RELEASE on K1..K4,
-  three encoders spare.
-- **BTN_BANK** → **bank page**: BANK, and the middle screen band shows the
-  candidates. In SMPL mode this page picks the loaded sample instead.
+  three encoders spare. Live in both modes.
+- **BTN_BANK** → **material page**: in SMPL, the samples in the resource region
+  (and grain size, window, overlap); in SYNTH, nothing — the bank is already on
+  a knob, so the button stays **dark** in SYNTH. A dark LED is the panel's own
+  way of saying "not in this mode", which is a convention the instrument
+  already uses elsewhere.
 
 The two pages are mutually exclusive (pressing one leaves the other), and
 **turning any encoder whose page is up does not leave the page** — you leave by
@@ -263,11 +287,11 @@ one second (candidates, current one marked), then returns. Transient overlay,
 no label: the content says what it is.
 
 **Band 3 — knobs.** Seven bars in panel order (SOURCE, MORPH, CUT, RES, SHAPE, AMOUNT,
-SPRAY), single-letter name and a filled bar. The one just turned highlights for 300 ms. **A numeric readout appears
+and the mode's own last knob: BANK or SPRAY), single-letter name and a filled bar. The one just turned highlights for 300 ms. **A numeric readout appears
 only next to the encoder being turned**, then goes away: six numbers you cannot
-read while playing are six pixels of noise. An encoder that does nothing in the
-current mode (SPRAY in SYNTH) has a greyed bar, not a hidden one — the panel is
-the same, always.
+read while playing are six pixels of noise. When a page is up (ENV, or the
+material page) the bars become that page's parameters — the bottom band always
+shows the seven things the seven encoders would do right now.
 
 ---
 
@@ -324,7 +348,8 @@ plain `cc` unit tests for the DSP with no platform at all
   envelope sums to a constant with 50% overlap (the classic overlap-add check);
   resampling a 1 kHz sine at 8 kHz reproduces it within a stated error.
 - **Host sim**: 8 keys allocate 8 voices and the 9th steals the oldest; each
-  encoder changes its own parameter and nothing else; SPRAY is inert in SYNTH;
+  encoder changes its own parameter and nothing else; EN_PRESET is BANK in SYNTH and
+  SPRAY in SMPL, and BTN_BANK's page is dark in SYNTH;
   the screen redraws the band that changed and not the others.
 - **On hardware**: both gates, and audio *heard*, not measured.
 
@@ -347,8 +372,8 @@ Named so they are decisions and not omissions:
 
 ## 11. Open questions
 
-1. **Pages**: ENV and BANK are toggles (§3) — settled. Open: does the header need the
-   page's name, or is the changed bar set enough of a signal?
+1. **Pages**: ENV is a toggle, BTN_BANK is SMPL-only (§3) — settled. Open: does the
+   header need the page's name, or is the changed bar set enough of a signal?
 2. **Granular budget**: 4 grains × 4 voices as the starting point — does that
    match the texture you want, or is a dense 8-grain single voice more the
    point?
