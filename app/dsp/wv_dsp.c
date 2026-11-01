@@ -128,44 +128,112 @@ void wv_init(wv_state *s)
     s->amount_z = 0.0f;
 }
 
-uint32_t wv_note_on(wv_state *s, uint8_t note, uint8_t vel, float inc)
+/* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
+ * both note-on paths, because "which voice" must not depend on what the voice is
+ * going to read. */
+static uint32_t voice_alloc(wv_state *s)
 {
     uint32_t i, pick = 0, oldest = 0xFFFFFFFFu;
 
     for (i = 0; i < WV_VOICES; i++)
         if (!s->v[i].active)
-            { pick = i; break; }
+            return i;
 
-    if (i == WV_VOICES) {                          /* all busy: the oldest note goes */
-        for (i = 0; i < WV_VOICES; i++)
-            if (s->v[i].age < oldest)
-                { oldest = s->v[i].age; pick = i; }
-    }
-
-    {
-        wv_voice *v = &s->v[pick];
-        int was = v->active;
-        /* the phases start a third of a cycle apart on a fresh voice, so two
-         * voices of the same note do not sum to a 6 dB peak on sample 0 */
-        if (!was)
-            v->phase = (float)pick * (1.0f / 3.0f);
-        v->inc = inc;
-        v->note = note;
-        v->vel = vel ? vel : 1;
-        /* Full velocity reaches a full VCA. Do NOT put a headroom factor here as
-         * well as in WV_VOICE_GAIN: that is how a solo note ended up at -19 dBFS
-         * when this was first written (two 6 dB cuts that neither knew about the
-         * other). Headroom is polyphony's problem, and WV_VOICE_GAIN owns it. */
-        v->target = u7_to_f(v->vel);
-        if (!was) {
-            v->lpf_s1 = 0.0f;
-            v->lpf_s2 = 0.0f;
-            v->level = 0.0f;
-        }
-        v->active = 1;
-        v->age = ++s->age;
-    }
+    for (i = 0; i < WV_VOICES; i++)
+        if (s->v[i].age < oldest)
+            { oldest = s->v[i].age; pick = i; }
     return pick;
+}
+
+/* The part of note-on both sources share: pitch, velocity, VCA, age. */
+static void voice_begin(wv_state *s, uint32_t pick, uint8_t note, uint8_t vel, float inc)
+{
+    wv_voice *v = &s->v[pick];
+    int was = v->active;
+
+    /* a fresh voice starts its phase a third of a cycle apart, so two voices of the
+     * same note do not sum to a 6 dB peak on sample 0 */
+    if (!was)
+        v->phase = (float)pick * (1.0f / 3.0f);
+    v->inc = inc;
+    v->note = note;
+    /* A zero velocity is not a quiet note, it is a missing reading. Velocity is a
+     * control input (the touch sensor), not the sample's amplitude, so a missing one
+     * falls back to a playable value rather than to 1/127 of one: `vel ? vel : 1` is
+     * how a chop ended up 42 dB down when the answer was "no touch data". */
+    v->vel = vel ? vel : 100;
+    /* Full velocity reaches a full VCA. Do NOT put a headroom factor here as well
+     * as in WV_VOICE_GAIN: that is how a solo note ended up at -19 dBFS when this
+     * was first written (two 6 dB cuts that neither knew about the other).
+     * Headroom is polyphony's problem, and WV_VOICE_GAIN owns it. */
+    v->target = u7_to_f(v->vel);
+    if (!was) {
+        v->lpf_s1 = 0.0f;
+        v->lpf_s2 = 0.0f;
+        v->level = 0.0f;
+    }
+    v->active = 1;
+    v->age = ++s->age;
+}
+
+uint32_t wv_note_on(wv_state *s, uint8_t note, uint8_t vel, float inc)
+{
+    uint32_t pick = voice_alloc(s);
+    voice_begin(s, pick, note, vel, inc);
+    s->v[pick].src = WV_SRC_TABLE;
+    s->v[pick].smp = 0;
+    return pick;
+}
+
+/* The common body of both sample note-ons. `inc` is the whole difference between
+ * a chop and a pitched sample, so it is a parameter and not a mode. */
+static uint32_t sample_voice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                             uint32_t start, uint32_t end, int loop, float inc)
+{
+    uint32_t pick;
+    wv_voice *v;
+
+    if (!smp || !smp->data || !smp->len)
+        return 0xFFFFFFFFu;
+    if (end == 0 || end > smp->len)
+        end = smp->len;
+    if (start >= end)
+        start = 0;
+
+    pick = voice_alloc(s);
+    /* a sample voice's position is its own, in the slot's samples: the reader owns
+     * it, and the engine's phase accumulator is not involved at all */
+    voice_begin(s, pick, note, vel, 0.0f);
+    v = &s->v[pick];
+    v->src = loop ? WV_SRC_SAMPLE : WV_SRC_SLICE;
+    v->smp = smp;
+    wv_reader_start(&v->rd, smp, start, inc);
+    wv_reader_range(&v->rd, start, end);
+    if (loop)
+        wv_reader_loop(&v->rd, start, end);
+    return pick;
+}
+
+uint32_t wv_note_on_sample(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                           uint32_t start, uint32_t end, int loop)
+{
+    if (!smp || !smp->data || !smp->len)
+        return 0xFFFFFFFFu;
+    return sample_voice(s, smp, note, vel, start, end, loop, wv_smp_inc(smp, (float)note));
+}
+
+uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                          uint32_t start, uint32_t end, int loop)
+{
+    if (!smp || !smp->data || !smp->len)
+        return 0xFFFFFFFFu;
+    /* "1x" is the slot's own rate against the engine's, not the literal 1.0: the
+     * reader's position is in the slot's samples and the engine renders at 44100, so
+     * an 11.025 kHz chop advances a quarter of a sample per output sample. Written as
+     * 1.0f (the first version) a 210 ms chop played in 52 ms — four times too fast,
+     * which sounds like a truncated sample rather than like a wrong rate. */
+    return sample_voice(s, smp, note, vel, start, end, loop,
+                        (float)smp->rate * (1.0f / 44100.0f));
 }
 
 void wv_note_off(wv_state *s, uint8_t note)
@@ -218,10 +286,24 @@ void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float mast
             coef = v->target > v->level ? WV_ATK : WV_REL;
             v->level += (v->target - v->level) * coef;
 
-            osel = wv_table_read(b, v->phase, mf);
-            v->phase += v->inc;
-            if (v->phase >= 1.0f)
-                v->phase -= 1.0f;
+            /* The one place the two sources differ. Everything after this line is
+             * shared, which is the whole reason a sample voice is a voice and not a
+             * second engine. */
+            if (v->src == WV_SRC_TABLE) {
+                osel = wv_table_read(b, v->phase, mf);
+                v->phase += v->inc;
+                if (v->phase >= 1.0f)
+                    v->phase -= 1.0f;
+            } else {
+                int fin = 0;
+                osel = wv_reader_next(&v->rd, v->smp, &fin);
+                /* A one-shot that ran out does not stop the voice: the VCA's
+                 * release is what ends it, and that is the note's release, not the
+                 * sample's end. A slice that ends early simply goes silent, which
+                 * for a drum hit is what "the hit is over" sounds like. */
+                if (fin)
+                    osel = 0.0f;
+            }
 
             sh = wv_shaper((uint32_t)(s->shape % WV_SHAPE_N), osel, s->amount_z);
 

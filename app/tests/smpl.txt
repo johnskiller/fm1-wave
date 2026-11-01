@@ -1,0 +1,76 @@
+# fm1-wave: the sample path, driven through the host simulator.
+#   app/build/host/wave_host app/tests/smpl.txt app/build/host
+#
+# What this checks: SOURCE reaches the sample reader, a chop's key plays that chop
+# and stops at the chop's end, the pool's absence is handled rather than crashed on,
+# and switching back plays the wavetable again. Sound quality is not asserted here —
+# that is app/tools/render_smpl.sh, which renders the same engine to a WAV.
+#
+# The MASTER is set to full: the simulator boots at 2048, and APP_GAIN(2048) is a
+# quarter of full scale, so leaving it at its default makes every level check measure
+# the panel's position instead of the engine.
+
+wait 600
+master 4096
+wait 100
+
+# SYNTH first, as a control: a key still plays the wavetable and goes out as MIDI
+key 7 down
+wait 150
+peakreset
+wait 200
+expect peak_db_min -45
+expect midi_out 1
+key 7 up
+wait 200
+
+# SOURCE = SMPL. B_SEL is the switch (the ENV page it was meant for is not built
+# yet, so SOURCE has that button first). The demo kit's four chops land on 53..56,
+# the bottom four keys.
+press SEL
+wait 80
+release SEL
+wait 300
+shot smpl-page.png
+
+# A chop. Its peak arrives in the first few milliseconds and then decays, so the
+# measurement window starts immediately: a peakreset 30 ms after the key would be
+# measuring the tail.
+key 0 down
+peakreset
+wait 60
+expect peak_db_min -40
+key 0 up
+wait 400
+
+# A brighter chop further up the kit
+key 2 down
+peakreset
+wait 60
+expect peak_db_min -40
+key 2 up
+wait 400
+
+# A key above the chops: no chop there, so it falls back to the whole slot at that
+# key's pitch. Still signal — no key is dead in SMPL.
+key 20 down
+wait 40
+peakreset
+wait 200
+expect peak_db_min -50
+key 20 up
+wait 300
+
+# Back to SYNTH: the same key is a wavetable note again
+press SEL
+wait 80
+release SEL
+wait 300
+key 7 down
+wait 100
+peakreset
+wait 200
+expect peak_db_min -45
+key 7 up
+wait 200
+shot synth-again.png

@@ -23,7 +23,14 @@
 
 #include <stdint.h>
 
+#include "wv_sample.h"
+
 #define WV_VOICES      8u
+
+/* What a voice reads. A slice is not a separate source: it is a sample reader
+ * with a start and an end, so the difference between a slice and a whole sample is
+ * where the reader was pointed and whether it loops. */
+enum { WV_SRC_TABLE, WV_SRC_SAMPLE, WV_SRC_SLICE };
 
 /* Per-voice gain: 1/sqrt(8). Eight voices that do not correlate sum in power, so
  * this puts the expected peak near full scale instead of eight times over it. It
@@ -42,16 +49,21 @@ enum { WV_SHAPE_SOFT, WV_SHAPE_HARD, WV_SHAPE_FOLD, WV_SHAPE_SINE, WV_SHAPE_N };
  * a note number: everything downstream wants the increment, and computing it
  * once at note-on keeps exp2 out of the render. */
 typedef struct {
-    float    phase;        /* 0..1, one cycle */
+    float    phase;        /* 0..1, one cycle (the table source) */
     float    inc;          /* pitch: turns per sample */
     float    level;        /* VCA, 0..1 */
     float    target;       /* VCA target (the envelope's block value) */
     float    lpf_s1;       /* SVF state */
     float    lpf_s2;
+    /* the sample source. A voice is playing either a table or a sample, never
+     * both, and the shaper/filter/VCA are shared: that is why wv_source exists as
+     * one field instead of two parallel chains. */
+    wv_reader rd;          /* position in the sample, in that slot's samples */
+    const wv_sample *smp;  /* the slot being played, 0 for a table voice */
     uint8_t  active;
     uint8_t  note;
     uint8_t  vel;          /* 0..127, the VCA ceiling scales with it */
-    uint8_t  pad;
+    uint8_t  src;          /* WV_SRC_* */
     uint32_t age;          /* for oldest-note stealing */
 } wv_voice;
 
@@ -96,11 +108,28 @@ float wv_shaper(uint32_t shape, float x, float amount);
 
 void wv_init(wv_state *s);
 
-/* Start a note. Returns the voice index used. Steals the oldest when all eight
- * are busy; the steal fades the old voice out over WV_STEAL_SAMPLES rather than
- * jumping (a stolen voice clicking is the most audible defect a poly synth has).
- * `inc` is the phase increment (freq / 44100), `vel` 1..127. */
+/* Start a table note. Returns the voice index used. Steals the oldest when all
+ * eight are busy; the steal fades the old voice out over WV_STEAL_SAMPLES rather
+ * than jumping (a stolen voice clicking is the most audible defect a poly synth
+ * has). `inc` is the phase increment (freq / 44100), `vel` 1..127. */
 uint32_t wv_note_on(wv_state *s, uint8_t note, uint8_t vel, float inc);
+
+/* Start a sample voice at `note`: it plays [start, end) of the slot, looping inside
+ * that range if `loop` (a held slice, or a wavetable-source), and once if not (a
+ * drum hit). `end` 0 means the slot's end. The increment comes from the slot's own
+ * rate and root (wv_smp_inc), so a slot at its root plays at 1x and an octave up is
+ * exactly 2x. Returns the voice index used, or 0xFFFFFFFF for a slot with no data. */
+uint32_t wv_note_on_sample(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                           uint32_t start, uint32_t end, int loop);
+
+/* A chop, at 1x. Same voice, same chain, but the increment is exactly 1: a slice is
+ * *played*, not detuned, so the key only chooses which chop. wv_note_on_sample
+ * pitches from the slot's root, which is right for a sample used as an instrument
+ * and wrong for a drum kit — a kit played chromatically is a kit at the wrong speed,
+ * and the first version of this shipped exactly that: the low keys halved the
+ * playback rate and the hits came out long and dull. */
+uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                          uint32_t start, uint32_t end, int loop);
 
 /* Release a note: the voice fades out and frees itself. */
 void wv_note_off(wv_state *s, uint8_t note);

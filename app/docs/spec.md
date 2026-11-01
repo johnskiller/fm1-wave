@@ -455,12 +455,32 @@ AMOUNT     985 / 2450 / 4587 / 5689 Hz as FOLD drive rises
 CUT@RES100 270 / 612 / 1252 Hz as the corner opens
 ```
 
-### 9c. Built: the app in the host simulator (`app/tests/play.txt`)
+### 9c. Built: the app in the host simulator (`app/tests/play.txt`, `app/tests/smpl.txt`)
 
 Wiring, not sound: a key reaches the engine and goes out as MIDI, a chord is
 louder than one note, and after release the output returns to silence. Plus a pass
 through the simulator's own recorder; the rendered chord measures 261.7 / 330.0 /
 391.9 Hz for keys 7 / 11 / 14 (C4 / E4 / G4).
+
+`smpl.txt` does the same for the sample path: SOURCE switches the pool in, a chop's
+key plays that chop, a key above the chops falls back to the whole slot at its own
+pitch, and switching back to SYNTH plays a wavetable note again. The demo pool is a
+generated kit and tone (`tools/make_demo_pool.py`), so these checks are about the
+reader, not about anyone's recordings.
+
+### 9c-bis. Built: the sample path to a WAV (`sh app/tools/render_smpl.sh`)
+
+5.6 s: the kit's four chops in order, then the tone at its root, an octave up and an
+octave down, then four chops and the tone at full velocity together. Measured on the
+rendered file, with the real reader and the real demo pool:
+
+```
+chops      4 slices, each 0.210 s except the last (0.029 s: its own captured tail)
+           mutual correlation -0.001 -> four different hits, not one repeated
+pitch      220.0 / 440.0 / 108.0 Hz at root / +12 / -12
+           (108, not 110, is the increment's integer truncation at 11.025 kHz)
+levels     whole file peak -5.2 dBFS, 0 samples at full scale
+```
 
 ### 9d. What these found
 
@@ -485,15 +505,44 @@ have shown:
    the bucket index divided an absolute position by 184 (a bucket width) instead of
    wrapping the column index — a 256-frame block landed in one or two columns.
    Both caught by decoding the simulator's PNG and counting lit pixels per column.
+6. **A chop ran to the end of the whole slot.** `wv_note_on_sample` was given a
+   start but no end, so a 0.21 s chop of a 0.84 s kit played the rest of the kit.
+   It does not sound like a bug; it sounds like the sampler ignoring the chop.
+   Caught by rendering the chop and measuring where it stopped (11886 samples
+   instead of the expected ~11891 — but the *first* measurement said 5999, which
+   was the probe's own 6000-sample buffer, i.e. the test was measuring itself).
+7. **A chop lost its tail.** The detector ended each slice at its first quiet
+   sample, and a drum's decay crosses any fixed threshold repeatedly on the way
+   down: a 0.18 s hit came out 0.029-0.050 s long. Fixed by making the slices
+   *tile* — each ends where the next begins — with the last one ending at its own
+   last audible sample. The old test asserted "slices do not overlap", which was
+   the wrong invariant; it now asserts that they tile.
+8. **The demo pool was rejected by the parser and nothing said so.** The generator
+   wrote 16-byte entries against the format's 20 (offset, len, rate, bits, root,
+   gain, name). The parser validates every entry before returning any, so the whole
+   pool came back as 0 slots — and the app, correctly, played the wavetable
+   instead. The symptom was "SOURCE does nothing". Two identical WAVs from two
+   different SOURCE states is what pointed at the pool rather than at the switch.
 
 ### 9e. Planned
 
 - envelope timing; a stolen voice never leaves a non-zero level (partly there)
-- a slot's declared rate and root honoured (no samples yet)
 - grain overlap-add sums to a constant
-- EN_PRESET is BANK in SYNTH and SPRAY in SMPL; BTN_BANK's page dark in SYNTH
+- EN_PRESET is BANK in SYNTH and SAMPLE in SMPL; BTN_EDIT re-chops the current slot
 - the screen redraws the band that changed and not the others
 - on hardware: both gates, and audio *heard*, not measured
+
+### 9f. The panel, as built (differs from §3 in one place)
+
+`B_SEL` toggles SOURCE. §3 gave SOURCE to `EN_SELECT` as a dead stop and the ENV
+page to `B_ENV`; the ENV page does not exist yet, so the switch that makes the
+sample path reachable took the first free button. When the ENV page is written it
+takes `B_ENV` back and SOURCE returns to `EN_SELECT`. Recorded here so the
+difference is a decision with an expiry, not a drift.
+
+`SOURCES` in the UI band shows what the keys are playing: the bank's name in SYNTH,
+the slot's name and its chop count in SMPL, and `NONE` when the resource region is
+missing or not this build's.
 
 ---
 

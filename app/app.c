@@ -12,13 +12,30 @@
 #include "fastmath.h"
 #include "touch.h"
 #include "wv_dsp.h"
+#include "wv_sample.h"
+#include "wv_slice.h"
 #include "wv_banks.h"
 
 #define WAVE_HZ   44100.0f
 #define BLK_MAX   256u
+#define SMP_MAX   8
 
 static wv_state dsp;
 static wv_bank  bank = { WV_BANKS[0] };
+
+/* The sample pool, as the platform handed it over. `pool` points into the resource
+ * blob, not a copy: the blob is 276 KB of flash and there is no RAM for a copy. */
+static const uint8_t *pool;
+static uint32_t       pool_len;
+static wv_sample      smp[SMP_MAX];
+static uint8_t        smp_count;
+static wv_slice        slices[WV_SLICE_MAX];
+static uint8_t        slice_count;
+static uint8_t        smp_i;      /* which slot EN_PRESET picked, in SMPL */
+static uint8_t        slices_from; /* the slot the current chops came out of */
+
+/* SOURCE: which thing a key plays. SYNTH reads the wavetable, SMPL reads the pool. */
+static uint8_t src_synth = 1;
 
 /* Held notes as the UI sees them, and the velocity each arrived with. The DSP gets
  * note on/off from here; nothing in the audio path reads plat_keys, because the
@@ -99,6 +116,49 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 
 /* ---------------------------------------------------------------- input --- */
 
+/* Slice map: the keys are 53..76 (NKEYS), the slices are numbered from SLICE_BASE
+ * upward, because a chop is played near the bottom of the keyboard where a drummer
+ * puts it and the top keys stay melodic. A slot with fewer slices than keys leaves
+ * the rest playing the whole sample at the right pitch, which is what a player
+ * expects when only four chops were made. */
+#define SLICE_BASE  53
+
+/* The platform reports buttons held, not pressed: plat_buttons() is a level. Every
+ * "toggle on the press" has to make its own edge, and forgetting to is how a button
+ * becomes a coin flip that lands while you hold it. */
+static uint32_t btn_prev;
+
+static int btn_pressed(uint32_t now, int b)
+{
+    return (now & (1u << b)) && !(btn_prev & (1u << b));
+}
+
+/* One place that decides what a key plays. Everything else in the input path is the
+ * same for both sources, which is why SOURCE is a switch and not a second engine. */
+static void play_note(uint8_t note, uint8_t vel)
+{
+    int k;
+
+    if (src_synth || !smp_count) {
+        float hz = 440.0f * fm_exp2f((float)((int)note - 69) / 12.0f);
+        wv_note_on(&dsp, note, vel, hz / WAVE_HZ);
+        return;
+    }
+
+    /* the slice under this key, 1x from its own start: a chop is played, not
+     * detuned, so `note` only decides which chop */
+    k = (int)note - SLICE_BASE;
+    if (k >= 0 && k < (int)slice_count) {
+        wv_note_on_slice(&dsp, &smp[slices_from], note, vel,
+                         slices[k].start, slices[k].end, 0);
+        return;
+    }
+
+    /* no chop under this key: the first slot, pitched from its own root, so a
+     * sample can still be played as an instrument */
+    wv_note_on_sample(&dsp, &smp[0], note, vel, 0, 0, 0);
+}
+
 static void input(void)
 {
     uint32_t i, keys = plat_keys(), btn = plat_buttons();
@@ -108,17 +168,17 @@ static void input(void)
      * build without APP_TOUCH still works */
     for (i = 0; i < NKEYS; i++) {
         uint32_t bit = 1u << i;
+        uint8_t note = (uint8_t)(i + 53);
         if ((keys & bit) && !(held_prev & bit)) {
             uint8_t vel = touch_vel(i);
-            float hz = 440.0f * fm_exp2f((float)((int)i + 53 - 69) / 12.0f);
-            wv_note_on(&dsp, (uint8_t)(i + 53), vel ? vel : 100, hz / WAVE_HZ);
+            play_note(note, vel ? vel : 100);
             /* the FM-1 as a keyboard as well as an instrument: the keys go out over
              * USB-MIDI and Bluetooth, so a DAW can record what is being played */
-            plat_midi_send(0x09u | 0x90u << 8 | (uint32_t)(i + 53) << 16
+            plat_midi_send(0x09u | 0x90u << 8 | (uint32_t)note << 16
                            | (uint32_t)(vel ? vel : 100) << 24, TO_USB | TO_BLE);
         } else if (!(keys & bit) && (held_prev & bit)) {
-            wv_note_off(&dsp, (uint8_t)(i + 53));
-            plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)(i + 53) << 16, TO_USB | TO_BLE);
+            wv_note_off(&dsp, note);
+            plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)note << 16, TO_USB | TO_BLE);
         }
     }
     held_prev = keys;
@@ -131,12 +191,34 @@ static void input(void)
     if ((e = plat_enc(EN_K4)) != 0) k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     if ((e = plat_enc(EN_ALGO)) != 0) k_morph = (uint8_t)clamp((int32_t)k_morph + e * 8, 0, 127);
 
-    /* EN_PRESET picks the bank; the bank's first frame is re-read next render */
-    if ((e = plat_enc(EN_PRESET)) != 0) {
-        bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
-        bank.frames = WV_BANKS[bank_i];
+    /* SOURCE: SYNTH reads the wavetable, SMPL reads the sample pool. This is the
+     * one switch that changes what a key does, so it lives next to the keys.
+     * B_ENV is the free button on this panel; the ENV page it was meant for is not
+     * built yet, so SOURCE gets it first and the page moves to a long press. */
+    if (btn_pressed(btn, B_SEL))
+        src_synth = !src_synth;
+
+    /* EN_PRESET is a different control depending on SOURCE (see docs/spec.md):
+     * SYNTH picks the bank, SMPL picks the sample. One knob, two jobs, because the
+     * panel has one knob and both jobs are "which material". */
+    if (src_synth) {
+        if ((e = plat_enc(EN_PRESET)) != 0) {
+            bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
+            bank.frames = WV_BANKS[bank_i];
+        }
+    } else {
+        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count)
+            smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
+        if (btn_pressed(btn, B_EDIT) && smp_count) {
+            /* EDIT in SMPL re-chops the current slot from its own material: the
+             * keys then play the chops. There is no chop editor on this panel, so
+             * detection is the editor. */
+            slice_count = (uint8_t)wv_slices_split(&smp[smp_i], 0.02f, 200,
+                                                  slices, WV_SLICE_MAX);
+            slices_from = smp_i;
+        }
     }
-    (void)btn;
+    btn_prev = btn;
 
     ui_apply();
 }
@@ -199,7 +281,16 @@ void app_frame(void)
     knob(76,  "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
     knob(112, "AMOUNT", (num(t, k_amount * 100 / 127), t), k_amount, 0);
     knob(148, "MORPH",  (num(t, k_morph * 100 / 127), t), k_morph, 0);
-    knob(184, "BANK",   WV_BANK_NAME[bank_i], (int32_t)bank_i * 127 / (WV_BANK_COUNT - 1), 0);
+    if (src_synth) {
+        knob(184, "SYNTH", WV_BANK_NAME[bank_i], (int32_t)bank_i * 127 / (WV_BANK_COUNT - 1), 1);
+    } else if (!smp_count) {
+        knob(184, "SMPL", "NONE", 0, 0);
+    } else {
+        /* the slot's name and how many chops it produced: the one number that says
+         * whether the keys below 53 are going to do anything interesting */
+        knob(184, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL",
+             (num(t, slice_count), t), (int32_t)smp_i * 127 / (smp_count ? smp_count : 1), 1);
+    }
     cv_blit(0, 112);
 
     /* the lights: the knob band has nothing to light, so this is a placeholder
@@ -227,7 +318,25 @@ void app_init(void)
     bank_i = 0;
     bank.frames = WV_BANKS[0];
     held_prev = 0;
+    btn_prev = 0;
     wf_fill = 0;
+    src_synth = 1;
+
+    /* The pool is flash, handed over by the platform with its length; plat_res
+     * returns NULL on an app built without a resource region, which is not an error,
+     * it just means no samples. A pool whose magic is wrong is treated the same way:
+     * absent, never half-read. */
+    pool = plat_res(&pool_len);
+    smp_count = pool ? (uint8_t)wv_smp_parse(pool, pool_len, smp, SMP_MAX) : 0;
+    smp_i = 0;
+    slice_count = 0;
+    /* Chop the first slot at boot so SMPL is playable the moment SOURCE is flipped.
+     * A slot that is a single hit finds one slice, which is the whole hit, which is
+     * right: one chop is still a chop. */
+    slices_from = 0;
+    if (smp_count && pool)
+        slice_count = (uint8_t)wv_slices_split(&smp[0], 0.02f, 200,
+                                               slices, WV_SLICE_MAX);
 }
 
 /* app.h asks this at boot (APP_BLE_AT_BOOT). This build has no BLE switch of its
@@ -241,6 +350,36 @@ void app_panic(void)
     ui_apply();
     held_prev = 0;
 }
+
+/* Say a short message: to the screen, and to a screen reader when one is
+ * listening. This is the platform's announce.c (app_say is in the contract, so an
+ * app that has anything to say about a state the screen cannot show — "no samples",
+ * "restored" — says it here rather than only on the LCD). */
+void app_say(const char *a, const char *b)
+{
+    char t[48];
+    int i = 0, k;
+
+    for (k = 0; a && a[k] && i < 23; k++)
+        t[i++] = a[k];
+    if (b && b[0]) {
+        t[i++] = ' ';
+        for (k = 0; b[k] && i < 23; k++)
+            t[i++] = b[k];
+    }
+    t[i] = 0;
+    ann_say(t, 0, ANN_NOW);
+}
+
+/* ------------------------------------------------------------ backup --- */
+
+/* Nothing streams while a note sounds, the panel has no unsaved state, and a
+ * restore only changes settings: the pool arrives by its own path (the installer
+ * writes the region, then the app is restarted by the update). */
+int  app_backup_playing(void)  { return wv_active(&dsp) != 0; }
+void app_backup_flush(void)    { }
+void app_backup_hold(int on)   { (void)on; }
+void app_backup_restored(void) { }
 
 void app_tick(void)
 {

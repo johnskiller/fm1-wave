@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: MPL-2.0
-# fm1-wave's DSP tests: the real app/dsp/wv_dsp.c under plain cc, no platform.
+# fm1-wave's DSP tests: the real app/dsp/*.c under plain cc, no platform.
 #   sh app/tests/run_dsp.sh
 # The banks are generated first if they are not there, so a clean clone runs this.
 set -e
@@ -17,9 +17,18 @@ fi
 
 # -ffp-contract=off: the AC79's FPU has no fused multiply-add, so the host must not
 # fuse either, or the tests check arithmetic the device cannot do
-$CC -O2 -ffp-contract=off -std=c99 -Wall -Wextra -Wno-unused-parameter \
-    -I app/dsp -I platform/include -I "$GEN" \
-    -o "$OUT/test_dsp" \
-    app/tests/test_dsp.c app/dsp/wv_dsp.c -lm
+FLAGS="-O2 -ffp-contract=off -std=c99 -Wall -Wextra -Wno-unused-parameter"
+INC="-I app/dsp -I platform/include -I $GEN"
+SRC="app/dsp/wv_dsp.c app/dsp/wv_sample.c app/dsp/wv_slice.c"
 
+echo "== dsp =="
+$CC $FLAGS $INC -o "$OUT/test_dsp"   app/tests/test_dsp.c   $SRC -lm
 "$OUT/test_dsp"
+
+echo "== sample =="
+$CC $FLAGS $INC -o "$OUT/test_sample" app/tests/test_sample.c $SRC -lm
+"$OUT/test_sample"
+
+echo "== slice =="
+$CC $FLAGS $INC -o "$OUT/test_slice"  app/tests/test_slice.c  $SRC -lm
+"$OUT/test_slice"
