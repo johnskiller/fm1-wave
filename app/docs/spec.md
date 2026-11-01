@@ -197,32 +197,80 @@ USB-MIDI after an update, read in place through `plat_res()` with a CRC-32
 header so a torn or foreign region is simply absent. That is the storage design
 already solved — no flash format to invent, no partitioning to get wrong.
 
-**What that buys, in seconds of audio at 8 kHz:**
+**What that buys, per slot, at each rate (16-bit, the default — see below):**
 
-| | 292 KB | usable (~250 KB) |
-|---|---|---|
-| 8-bit | 36.5 s | ~31 s |
-| 16-bit | 18.2 s | ~15 s |
+| rate | B/s | 1 slot of ~250 KB | 8 slots × 30 KB each | audio band |
+|---|---|---|---|---|
+| 8 kHz | 16,000 | 15.6 s | 1.9 s | 4 kHz |
+| 11.025 kHz | 22,050 | 11.3 s | 1.4 s | 5.5 kHz |
+| **22.05 kHz** | **44,100** | **5.7 s** | 0.7 s | **11 kHz** |
+| 44.1 kHz | 88,200 | 2.8 s | 0.3 s | 22 kHz |
 
-**8 kHz is the right rate and it is not a compromise.** These are wavetables,
-not a sampler: a 512-point single-cycle table at 8 kHz holds 256 harmonics,
-which is 4× more than the 256-point synth banks. The point of a sampled table
-is an odd spectrum, not a high sample rate. (If later it must be a *sampler*,
-that is a different feature with a different budget.)
+**16-bit is not negotiable; 8-bit is a colour, not a rate.**
+8-bit is `6.02 × 8 ≈ 48 dB` of SNR, and the place it fails is not loud material
+— it is a decaying envelope tail sitting around −48 dB, where the quantisation
+noise is all that is left. Undithered 8-bit is not hiss either, it is
+*correlated* distortion that sits on the harmonics: it reads as "muddy", not as
+"gritty". A per-slot 8-bit flag is a legitimate *timbre* (and costs a quarter of
+the space); the default is 16-bit.
 
-**Two ways a sample becomes a table, and they are different instruments:**
+**The rate is per slot, not one number for the build.** This is the decision
+that matters, and it is not a compromise between length and fidelity — it is a
+refusal to make one:
+
+- **A wavetable source** (extracted single cycle, §5b-1) wants a **low rate**:
+  it is read at 20× its own rate when a high note plays it, so every Hz of band
+  costs ~20 Hz at the top of the keyboard, and a 512-point table already holds
+  256 harmonics. 11.025 kHz here.
+- **Sliced material** wants a **high rate**: read at 1× with no transposition,
+  so its bandwidth is simply what you can hear. 22.05 kHz here, and 44.1 kHz
+  when the material *is* the sound.
+
+A build-wide constant cannot serve both, and picking one silently degrades the
+other. **11.025 kHz is the default** (÷4 of 44.1: an exact octave ratio, and its
+5.5 kHz band covers the 2.2 octaves a 27-key keyboard actually transposes) — but
+the slot header sets the rate, so the format does not need changing when the
+first 22.05 kHz slice arrives.
+
+**Storage: a pool, not fixed-size slots.** Fixed slots waste space on short
+material and cannot hold a long one. The region holds a **variable-length pool**
+with an offset table:
+
+```
+header   magic(4) + version(1) + count(1) + reserved(2)
+entry c × 16 B   { offset u32, len u32, rate u16, bits u8, root u8 }
+```
+
+Eight entries cost 128 B; the rest is samples, packed back to back, and a
+sample may span several entries' worth of the pool up to the whole thing. So
+"how many" and "how long" stop competing: one 8 s slice, or eight 1.4 s slices,
+or anything between — the user decides per sound, not the format.
+
+**Cap: 8 slots**, matching the 8 synth banks, so switching SOURCE keeps the
+same "eight things" under the same gesture.
+
+**Three ways a sample becomes playable material, and they are different instruments:**
 
 1. **Extracted single cycle** — find the pitch period, cut one cycle, resample
    to 512 points. Playable chromatically, sounds like a classic wavetable
    oscillator with someone else's timbre. Cheap at runtime (identical to a
    synth bank), and the analysis is a build-time/host-side job, not a device
-   job.
+   job. **Needs a low rate**: 100 Hz at 11.025 kHz is 110 points per period,
+   plenty to resample to 512; 500 Hz at the same rate is 22 points, and
+   resampling that is invention, not analysis. Extract from the low register.
 2. **The sample as a timeline** — the whole thing, read at variable speed. Now
    the "table" is a phrase, and playing a chord slides through it. This is what
    becomes granular.
+3. **Slices** — the sample cut into (or simply addressed in) segments, each
+   played at 1× from its own start, and each assignable to keys. **This is the
+   case that forces a high rate**, and it is why the rate lives in the slot
+   header rather than in the build: a slice is not transposed, so its band is
+   simply what the material has, and anything below 22.05 kHz is audible
+   missing top end on cymbals, breaths and consonants.
 
-**v1 takes both, because the second one is free once the granular reader
-exists.**
+**v1 takes all three.** (1) is a host-side tool; (2) and (3) are the same
+reader with different position control, so the second and third cost one
+implementation between them.
 
 ### 5c. Granular — the third feature, and the one with the real bill
 
@@ -346,7 +394,10 @@ plain `cc` unit tests for the DSP with no platform at all
   each shaper's curve monotonic where it should be and bounded to ±1; envelope
   hits its target time; a stolen voice never leaves a non-zero level; grain
   envelope sums to a constant with 50% overlap (the classic overlap-add check);
-  resampling a 1 kHz sine at 8 kHz reproduces it within a stated error.
+  a slot's declared rate and root are honoured (a 22.05 kHz slot played at its
+  root reads 1× with no transposition; the same slot an octave up reads 2×);
+  a slice's start offset lands on its first sample; resampling a 1 kHz sine at
+  each supported rate reproduces it within a stated error.
 - **Host sim**: 8 keys allocate 8 voices and the 9th steals the oldest; each
   encoder changes its own parameter and nothing else; EN_PRESET is BANK in SYNTH and
   SPRAY in SMPL, and BTN_BANK's page is dark in SYNTH;
@@ -364,6 +415,9 @@ Named so they are decisions and not omissions:
 - Per-grain filter and pan; stereo grains
 - Sample *recording* on the device — samples arrive over USB (the platform's
   resource path), not from the FM-1's own input
+- Rate conversion between slots' rates — each slot is read at its own rate; a
+  22.05 kHz slice and an 11.025 kHz table in the same voice do not have to
+  match, because only one is sounding at a time in v1
 - Unison / detune; filter envelope; velocity → cutoff
 - Presets, patch names, program change
 - Arpeggiator, sequencer (DriftSeq), MIDI thru / controller mode (fm1-ctrl)
@@ -377,7 +431,9 @@ Named so they are decisions and not omissions:
 2. **Granular budget**: 4 grains × 4 voices as the starting point — does that
    match the texture you want, or is a dense 8-grain single voice more the
    point?
-3. **Sample rate**: 8 kHz at 250 KB usable ≈ 31 s of 8-bit material. Enough?
+3. **Sample rate**: per-slot, 11.025 kHz default, 22.05 kHz for slices (§5b) —
+   settled in the format. Open: is 22.05 kHz enough for sliced cymbals, or does
+   the first slice that matters need 44.1 kHz (0.7 s per 30 KB slot)?
 4. **Banks 6–8**: which three timbres, after SAW→PULSE, RESO, HOLLOW, VOX, DIGI?
 5. **Scope**: post-mix output (proposed) or per-voice? Post-mix is what you
    hear; per-voice is a debugging view.
