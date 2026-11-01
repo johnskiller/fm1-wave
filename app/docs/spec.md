@@ -67,39 +67,52 @@ have.
 
 ## 3. Panel map
 
-Seven encoders, all live at once, no modal pages while playing.
+Seven encoders. Grouped by function, so the pairs sit side by side on the panel.
 
 | encoder | role | parameter | range |
 |---|---|---|---|
 | EN_SELECT | `EN_SELECT` | **SOURCE** | SYNTH / SMPL, detented — which oscillator this voice uses |
 | EN_ALGO | `EN_ALGO` | **MORPH** | 0–7 continuous: frame position (SYNTH) or grain position (SMPL) |
-| EN_PRESET | `EN_PRESET` | **CUT** | 0–127 → 30 Hz … 16 kHz, exponential |
-| EN_K1 | `EN_K1` | **RES** | 0–127 → damping 2.0 … 0.15 |
-| EN_K2 | `EN_K2` | **SHAPE** | 0–3 detented: SOFT / HARD / FOLD / SINE |
-| EN_K3 | `EN_K3` | **AMOUNT** | 0–127 → shaper drive 0 … 16× |
-| EN_K4 | `EN_K4` | **SPRAY** | 0–127 → granular scatter (0 in SYNTH: the knob is inert and its bar greyed) |
+| EN_K1 | `EN_K1` | **CUT** | 0–127 → 30 Hz … 16 kHz, exponential |
+| EN_K2 | `EN_K2` | **RES** | 0–127 → damping 2.0 … 0.15 |
+| EN_K3 | `EN_K3` | **SHAPE** | 0–3 detented: SOFT / HARD / FOLD / SINE |
+| EN_K4 | `EN_K4` | **AMOUNT** | 0–127 → shaper drive 0 … 16× |
+| EN_PRESET | `EN_PRESET` | **SPRAY** | 0–127 → granular scatter (inert and greyed in SYNTH) |
 
-**No modal pages in normal playing.** What each knob does never changes while
-you are playing.
+**The pairs are adjacent**: CUT/RES are the filter, SHAPE/AMOUNT are the shaper.
+That is why CUT moved off `EN_PRESET` — a filter with its resonance two knobs
+away is a filter you operate by reaching across the panel.
 
-### The bank/grain chooser, and the envelope
+`EN_PRESET` becomes SPRAY because it is the one encoder that is **not live in
+both modes**: in SYNTH there is no granular, so the knob is inert. Putting the
+mode-dependent knob on the encoder that is already the odd one out (the preset
+position, unused by an instrument with no presets in v1) keeps EN_K1..K4
+meaning the same four things in both modes.
 
-Two things do not fit on seven encoders. Both use **the same gesture: hold a
-panel button, the encoders become that page.** Release, they are the tone
-controls again. No mode word on screen, no permanent state — the bars show what
-the knobs do while held. This is the shift-key convention, not a mode.
+### Toggle pages: ENV and BANK
 
-- **Hold BTN_BANK** (a top-row button) → the encoders become the **bank/table
-  picker** (BANK, FRAME COUNT, …). The screen's middle band shows candidates.
-- **Hold BTN_ENV** → the encoders become the **envelope page** (ATTACK, DECAY,
-  SUSTAIN, RELEASE), three encoders spare.
+Two things do not fit on seven encoders. Both are a **toggle**: press the panel
+button and the encoders become that page; press it again and they are the tone
+controls. A short label in the header says which page is up while it is up.
+
+**Toggle, not hold.** Holding needs a hand, and the point of an envelope is to
+turn four knobs while playing — a hold gesture spends the hand that should be
+on the keys. Hold is also invisible: nothing on the panel says "you are in a
+page" until the bars change under your fingers.
+
+- **BTN_ENV** → **envelope page**: ATTACK, DECAY, SUSTAIN, RELEASE on K1..K4,
+  three encoders spare.
+- **BTN_BANK** → **bank page**: BANK, and the middle screen band shows the
+  candidates. In SMPL mode this page picks the loaded sample instead.
+
+The two pages are mutually exclusive (pressing one leaves the other), and
+**turning any encoder whose page is up does not leave the page** — you leave by
+pressing the button again, or by pressing PLAY. Leaving by timeout was
+considered and rejected: an envelope tweak with a pause in it should not silently
+revert to the tone page under your fingers.
 
 At power-on the envelope is A 5 ms, D 300 ms, S 0.7, R 250 ms: a sound on the
 first key press, not a silent instrument waiting to be configured.
-
-**If you would rather have no modals at all**, the fallback is a fixed
-single-purpose ENV encoder (release only, attack fixed at 5 ms) and no bank
-picker (banks cycle on a button). Strictly worse, never modal. Say which.
 
 ---
 
@@ -206,7 +219,7 @@ drops when more keys are held. Concretely:
 - **SMPL mode**: grain count × held voices ≤ budget. Start at **4 grains at 4
   voices**, and let the allocator halve grains before it steals a voice —
   dense texture and fewer notes beats clipped texture and more notes.
-- **SPRAY** (EN_K4) scatters grain start positions; at 0 the grains are
+- **SPRAY** (EN_PRESET) scatters grain start positions; at 0 the grains are
   contiguous and SMPL behaves like an ordinary sample player, which is the
   escape hatch if the budget does not stretch.
 
@@ -249,8 +262,8 @@ When **SOURCE** or the bank picker is turned, this band becomes the chooser for
 one second (candidates, current one marked), then returns. Transient overlay,
 no label: the content says what it is.
 
-**Band 3 — knobs.** Seven bars in panel order, single-letter name and a filled
-bar. The one just turned highlights for 300 ms. **A numeric readout appears
+**Band 3 — knobs.** Seven bars in panel order (SOURCE, MORPH, CUT, RES, SHAPE, AMOUNT,
+SPRAY), single-letter name and a filled bar. The one just turned highlights for 300 ms. **A numeric readout appears
 only next to the encoder being turned**, then goes away: six numbers you cannot
 read while playing are six pixels of noise. An encoder that does nothing in the
 current mode (SPRAY in SYNTH) has a greyed bar, not a hidden one — the panel is
@@ -334,7 +347,8 @@ Named so they are decisions and not omissions:
 
 ## 11. Open questions
 
-1. **Modals**: hold-to-edit BTN_BANK / BTN_ENV (§3), or the no-modal fallback?
+1. **Pages**: ENV and BANK are toggles (§3) — settled. Open: does the header need the
+   page's name, or is the changed bar set enough of a signal?
 2. **Granular budget**: 4 grains × 4 voices as the starting point — does that
    match the texture you want, or is a dense 8-grain single voice more the
    point?
