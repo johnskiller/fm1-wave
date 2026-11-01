@@ -1,0 +1,58 @@
+
+# fm1-wave: the first playable, driven through the host simulator.
+#   app/build/host/wave_host app/tests/play.txt app/build/host
+#
+# This checks the wiring, not the sound: the sound is app/tests/test_dsp.c and
+# app/tools/render_demo.c. Here: does a key reach the engine and go out as MIDI,
+# does a knob reach its parameter, and does the output buffer carry signal.
+
+wait 600
+
+# one key: a note, MIDI out, and signal in the output buffer
+key 7 down
+wait 100
+peakreset
+wait 200
+expect peak_db_min -40
+expect midi_out 1
+shot key-down.png
+
+# a second and a third key: polyphony, which the template could not do
+key 11 down
+wait 60
+shot two-keys.png
+key 14 down
+wait 60
+peakreset
+wait 200
+# a chord is louder than one note: the render mixes them
+expect peak_db_min -20
+shot chord.png
+
+key 7 up
+key 11 up
+key 14 up
+wait 200
+
+# the knobs reach their parameters (nothing to assert on the value yet: the app has
+# no "expect" of its own, so this checks that turning does not crash or wedge)
+turn K1 10
+turn K2 5
+turn K3 1
+turn K4 6
+turn ALGO 5
+turn PRESET 1
+wait 60
+shot panel.png
+
+# the sound, through the simulator's own recorder
+wav out:sim.wav
+key 7 down
+key 11 down
+key 14 down
+wait 800
+key 7 up
+key 11 up
+key 14 up
+wait 400
+wavstop

@@ -155,11 +155,13 @@ offset soft clip is not.
 | **fold** | triangle-fold `k·x` back into range | odd, chaotic | screaming, synth-like; the fold count rises with drive |
 | **sine** | `sin(k·x·π/2)` | odd | smooth but with ripples; the cheapest to compute here |
 
-`tanh` is the expensive one on this chip — no `tanhf` on a single-precision FPU
-without a decent library, so it needs either a polynomial approximation or a
-lookup table. A 1 KB LUT (512 entries, Q16, symmetric so half the table) with
-linear interpolation is the usual answer and is accurate enough: the shape is
-smooth, so interpolation error is tiny.
+`tanh` is the one that would be expensive if it had to be written here — the
+stock `tanhf` is a library call. **This platform already has it**: `fm_tanhf` in
+fastmath.h, a Taylor series to x^13 under |x| < 0.5 (which is where a clipper
+spends most of its samples, so it takes the cheap branch) and `fm_exp2f` above,
+saturating past 9. That is better than a LUT: no table, no interpolation error,
+and no 1 KB of flash. **Do not write a lookup table for this** unless a
+measurement says `fm_tanhf` is the bottleneck.
 
 Fold is the interesting one and the one worth getting right. Its transfer curve
 is a triangle wave, so it folds back every time the input crosses the range —

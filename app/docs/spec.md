@@ -63,6 +63,38 @@ filter, envelope and voice allocation are written once.
 crossfade — a stolen voice clicking is the most audible defect a poly synth can
 have.
 
+### Levels, and why the bus has a soft clip
+
+Not a detail: the platform hands `app_render`'s buffer straight to the ALNK DMA as
+int32 with 24 valid bits, and **nothing on the way down clips**. A sample past
+full scale there does not distort, it *wraps* — the loudest click the hardware can
+make. So the app owns the ceiling.
+
+Allocation, measured rather than assumed:
+
+```
+voice gain        1/sqrt(8)        eight uncorrelated voices sum in power
+a solo note       -16 .. -20 dBFS  (bank-dependent; OPEN3 is the quietest)
+eight at FOLD@127 +0.9 .. +2.4x    before the soft clip
+```
+
+Two decisions came out of measuring that:
+
+- **No headroom factor in the velocity map.** The first version had 6 dB there and
+  6 dB in the voice gain; neither knew about the other, and a solo note landed at
+  -25.5 dBFS end to end. Headroom is one problem with one owner.
+- **A tanh soft clip on the bus, then a hard clamp behind it.** A bare clamp at
+  full scale clipped 2-9% of samples in an eight-note chord and sounded like a bad
+  fuzzbox. `fm_tanhf` (already in `fastmath.h`; no lookup table needed) is ~identity
+  below 0.5, so single notes and small chords are untouched, and it brings the
+  eight-voice case to 0.92-0.99 with zero clipped samples. One call per sample
+  against eight voices' worth of work, so the cost is where it is cheapest.
+
+A solo note at -16 dBFS is quiet, and that is the price of 1/sqrt(8) rather than a
+limiter: a limiter would colour every note to protect the rare eight-note chord.
+If it turns out too quiet on the device, the answer is MASTER's travel, not the
+voice gain — see §11.
+
 ---
 
 ## 3. Panel map
@@ -147,7 +179,9 @@ Two knobs, per voice, **before** the filter.
 - **SHAPE**, detented, 4 positions, never morphed. Intermediate curves between
   clip and fold are just muddy, and a knob that sounds broken in the middle is
   worse than a knob with detents.
-  - `SOFT` `tanh` via a 512-entry Q16 LUT (this chip has no `tanhf`)
+  - `SOFT` `tanh` — the platform already ships `fm_tanhf` (fastmath.h: Taylor to
+    x^13 under 0.5, `fm_exp2f` above, saturating past 9). No LUT, no table, no
+    interpolation error.
   - `HARD` clamp
   - `FOLD` triangle fold — the widest spectrum, the one worth having
   - `SINE` `sin(k·x·π/2)`
@@ -386,23 +420,80 @@ Nothing else persists in v1: no presets, no per-bank settings, no names.
 
 ## 9. Tests
 
-Platform host simulator (`build.py app --host`) with scripted `.txt` tests, plus
-plain `cc` unit tests for the DSP with no platform at all
-(`app/tests/`, `sh app/tests/run.sh`):
+Three layers, and each answers a different question. What is written so far is
+marked; the rest is the plan.
 
-- **DSP**: table read at known phases; frame interpolation lands midway at 0.5;
-  each shaper's curve monotonic where it should be and bounded to ±1; envelope
-  hits its target time; a stolen voice never leaves a non-zero level; grain
-  envelope sums to a constant with 50% overlap (the classic overlap-add check);
-  a slot's declared rate and root are honoured (a 22.05 kHz slot played at its
-  root reads 1× with no transposition; the same slot an octave up reads 2×);
-  a slice's start offset lands on its first sample; resampling a 1 kHz sine at
-  each supported rate reproduces it within a stated error.
-- **Host sim**: 8 keys allocate 8 voices and the 9th steals the oldest; each
-  encoder changes its own parameter and nothing else; EN_PRESET is BANK in SYNTH and
-  SPRAY in SMPL, and BTN_BANK's page is dark in SYNTH;
-  the screen redraws the band that changed and not the others.
-- **On hardware**: both gates, and audio *heard*, not measured.
+### 9a. Built: the DSP alone (`sh app/tests/run_dsp.sh`)
+
+The real `app/dsp/wv_dsp.c` compiled by plain `cc`, no platform, 43 checks. Every
+check is written to fail on a plausible mistake, and several did (see §9d):
+
+- table read at known phases, wrap at 1.25 and -0.75, morph clamping past the
+  last frame, the read bounded to ±1
+- each shaper curve is bounded, odd, and monotonic on -1..1 (fold is not
+  monotonic outside it, which is the point); the four are distinct at x = 0.5;
+  fold turns around past its peak where hard clip pins
+- amount 0 leaves the signal alone; more amount drives harder
+- eight keys take eight voices; the ninth steals the oldest; note-off releases
+  only its own voice
+- A4 renders at 441 Hz by zero-crossing count; the buffer stays bounded; a
+  released voice frees itself; no voices means no output at all
+- **the invariant that makes MORPH a timbre knob**: frames in a bank have equal
+  RMS within 1.5 dB
+
+### 9b. Built: a WAV from the real DSP (`sh app/tools/render_demo.sh`)
+
+17.7 s: MORPH across a bank, the four shapes, AMOUNT swept, CUT swept under RES,
+all eight banks, and an eight-note chord at the worst setting. Its purpose is to
+be listened to — and to be *measured*, because listening and measurement catch
+different bugs. Spectral centroid per step, measured on the rendered file:
+
+```
+MORPH      1193 -> 932 Hz, monotonic, pitch constant at 220.5 Hz
+SHAPE      SOFT 2716 / HARD 2929 / FOLD 5683 / SINE 3145 Hz centroid
+AMOUNT     985 / 2450 / 4587 / 5689 Hz as FOLD drive rises
+CUT@RES100 270 / 612 / 1252 Hz as the corner opens
+```
+
+### 9c. Built: the app in the host simulator (`app/tests/play.txt`)
+
+Wiring, not sound: a key reaches the engine and goes out as MIDI, a chord is
+louder than one note, and after release the output returns to silence. Plus a pass
+through the simulator's own recorder; the rendered chord measures 261.7 / 330.0 /
+391.9 Hz for keys 7 / 11 / 14 (C4 / E4 / G4).
+
+### 9d. What these found
+
+Recorded because each one was a real defect that a reading of the code would not
+have shown:
+
+1. **FOLD inverted the signal.** The triangle was centred on 0 instead of +2, so
+   the curve was -f(x): a phase inversion dressed up as a fold. Caught by "is odd"
+   plus "is monotonic" — the obvious fold test (does it turn around) passed.
+2. **MORPH was a volume knob.** OPEN3 swung 12.8 dB from frame 0 to frame 7,
+   because a formant climbing the harmonic series gets spikier at equal partial
+   count. Whole-bank peak normalisation cannot see this; per-frame RMS equalisation
+   fixes it (now 0.0 dB spread). Caught by measuring the rendered demo.
+3. **A solo note was at -19 dBFS.** Two separate 6 dB headroom factors, in the
+   velocity map and in the voice gain, neither aware of the other. The demo
+   measured -25.5 dBFS end to end.
+4. **Eight voices clipped 2-9% of samples** at full amount, and the platform does
+   not clip on the way to the DMA — it *wraps*. Fixed with a tanh bus soft clip:
+   0.92-0.99 peak, zero clipping, and a solo note unchanged.
+5. **The scope never appeared.** `cv_begin` without `cv_blit`: the band was drawn
+   and never shown. Then, once shown, it occupied five columns out of 240, because
+   the bucket index divided an absolute position by 184 (a bucket width) instead of
+   wrapping the column index — a 256-frame block landed in one or two columns.
+   Both caught by decoding the simulator's PNG and counting lit pixels per column.
+
+### 9e. Planned
+
+- envelope timing; a stolen voice never leaves a non-zero level (partly there)
+- a slot's declared rate and root honoured (no samples yet)
+- grain overlap-add sums to a constant
+- EN_PRESET is BANK in SYNTH and SPRAY in SMPL; BTN_BANK's page dark in SYNTH
+- the screen redraws the band that changed and not the others
+- on hardware: both gates, and audio *heard*, not measured
 
 ---
 

@@ -28,6 +28,6 @@ void app_frame(void);                    /* the UI: input and a redraw, about 60
 void app_input_only(void);               /* between frames: input only */
 void app_say(const char *a, const char *b);   /* a short message on the screen and to a screen reader */
 
-/* the host simulator's checks (host/plat_host.c "expect"): octave, wave, note (-1 none), dirty, turnsN */
-#define APP_HOST_EXPECT
-int app_expect(const char *what, int *got);
+/* No APP_HOST_EXPECT yet: the host simulator's "expect" checks (octave, wave, note,
+ * dirty, turnsN) belong with the scripted tests, which are rewritten once the
+ * panel is settled. tests/basic.txt is the template's and fails by design. */

@@ -3,8 +3,10 @@ name = "wave"              # APP_NAME is in app.h; this names the build's files
 id_prefix = "FM-1_94"          # package identity (each firmware its own): dev FM-1_1100, releases FM-1_11XXYYZZ
 usb_manufacturer = "fm1-base"
 usb_product = "FM1-WAVE"
-o2 = []                        # separate units compiled at -O2 (an app's DSP)
+o2 = ["dsp/wv_dsp.c"]          # the DSP at -O2: it runs in the audio interrupt
 words = "words.tsv"
+gen = ["tools/gen_wv_banks.py build/gen/wv_banks.h"]  # the 8 banks, int16, at build time
+include = ["dsp", "build/gen"]  # wv_dsp.h, and the generated wv_banks.h
 ble = true                     # Bluetooth MIDI (--no-ble builds without it)
 ble_central = true             # and the FM-1 connects to Bluetooth MIDI devices too
 # the site (tools/make_site.py, tools/publish_site.sh)
