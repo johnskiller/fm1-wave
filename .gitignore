@@ -1,0 +1,7 @@
+build/
+web/words/
+
+# host simulator output
+*.png
+*.wav
+midi_out.txt
