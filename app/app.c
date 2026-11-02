@@ -411,62 +411,140 @@ static char *sel_time(uint8_t v, int which)
 
 /* ─── the source indicator ────────────────────────────────────────────────── */
 
-/* SOURCE has three states and B_SEL's lamp has two, so the screen says it. Two
- * channels, both cheap and both readable from playing distance:
+/* SOURCE has three states and B_SEL's lamp has two, so the screen says it -- the way
+ * a colour-coded mixer does: the whole screen takes the source's colour, text and
+ * all, and the source's shape is drawn once at the bottom. Which source is live is
+ * then visible from across the room without reading anything.
  *
- *   1. the whole screen's background carries the source's tint. The scope band is a
- *      canvas, and a canvas is its background: changing it costs one argument, and
- *      it is the only signal here visible without looking directly at the screen.
- *   2. three icons at the bottom, one lit. Twenty-one pixels tall, in the band below
- *      the knobs that nothing else uses.
+ * This replaces a tint on the scope band alone. That version was real (three distinct
+ * near-blacks on the first canvas) and invisible, because two thirds of the screen --
+ * the knob band and the strip -- stayed black and took the eye. Covering every canvas
+ * is not a bigger version of that tint, it is a different signal: the panel stops
+ * looking neutral and starts looking like the instrument is in one of three modes.
  *
- * The tints are the palette's own two brightest steps, not invented greys: a colour
- * on this screen has to keep meaning "value, part, alarm" (gfx.c), so the tint is
- * dim (it is a background, not a value) and the icon is bright.
+ * WHERE THE COLOURS COME FROM. The palette (gfx.c) is five steps: three neutral greys
+ * that carry structure, two that carry the theme's hue. There is no second hue in it
+ * to give, and palette_set() runs once at boot from APP_PALETTE, so the theme cannot
+ * follow the source. But cv_begin's background and cv_text's colour are raw RGB565,
+ * not palette indices, so the app can colour its own screen without the platform
+ * owning three palettes. That is the whole trick.
  *
- * What each icon is: the shape of what a key will read that source — a table's
- * stacked frames, one sample's transient and decay, grains scattered over a slot.
- * Not three letters, for a reason that survives contact with this panel: the knob
- * band is full of text and none of it is read at a glance, it is read when the hand
- * is already on a knob. A source indicator has to answer "what am I about to play"
- * from across the room, and a shape does that where three letters do not. */
-static uint16_t src_bg(void)
+ * The hues are the palette's own highlight steps (gfx.c PALETTES: green 150,255,175;
+ * amber 255,184,70; cyan 150,225,255), so SYNTH's curve is the same amber the rest of
+ * the instrument uses for a value and stepping through sources does not teach a second
+ * colour language. What changes per source is which role the hue plays:
+ *
+ *   SYNTH  dark ground   + amber ink    the default, and the easiest to read
+ *   SMPL   amber ground  + amber ink    the same two colours, roles swapped
+ *   GRAN   cyan ground   + cyan ink     the ground itself carries the mode
+ *
+ * So the screen carries two independent facts -- the ground and the ink -- and either
+ * one answers "which source". Nothing is inverted into unreadability: white is the
+ * platform's one accent ("what is being touched"), so it is kept for the dark grounds
+ * and GRAN gets a near-white cyan instead.
+ *
+ * Each source keeps a distinct shape, drawn ONCE in the strip. It used to be three
+ * icons with two dimmed, which is decoration in the one place the eye rests: only one
+ * source is ever live. All three shapes are the same idea -- what a key reads -- and
+ * differ only in how continuous that is, which is exactly the musical difference:
+ *
+ *   SYN   a saw: one cycle, continuous, the table being scanned
+ *   SMP   a hit and its decay: a waveform that exists once and then fades
+ *   GRN   a sine under scattered dots: the same waveform, broken into pieces
+ *
+ * The first version drew "three stacked steps" for SYNTH on the reasoning that a table
+ * has eight frames. But a table read for one note is one waveform: the frames are what
+ * MORPH chooses between, not what SOURCE selects. That icon described the data layout
+ * instead of the sound. The saw describes the sound. */
+typedef struct {
+    uint16_t bg;      /* the screen's ground, every canvas */
+    uint16_t track;   /* rules and empty bars -- structure, never content */
+    uint16_t ink;     /* names, units: read at a glance */
+    uint16_t ink_hi;  /* values and curves */
+    uint16_t acc;     /* the accent: what is being touched */
+} src_skin_t;
+
+static src_skin_t sk;   /* set once per frame from src_skin(), read by the painters */
+
+static src_skin_t src_skin(void)
 {
-    /* A tint per source: neutral, cool, warm. The palette's steps are greys plus a
-     * hue, so the "neutral" case is the untinted line colour and the other two are
-     * the dim step at two strengths -- different enough to see at a glance, close
-     * enough that no reading is needed. */
-    if (src == SRC_SMPL) return C_LINE;      /* the darkest tint */
-    if (src == SRC_GRAN) return C_DIM;       /* one step up */
-    return C_BLACK;                          /* SYNTH: no tint at all */
+    src_skin_t k;
+
+    if (src == SRC_SMPL) {
+        /* inverted: the two colours SYNTH uses, roles swapped. The ground is the amber
+         * step pulled down until white sits on it -- the palette step itself is meant
+         * as ink on black, and as a ground it would swallow the labels. */
+        k.bg     = RGB(52, 34, 6);
+        k.track  = RGB(30, 20, 4);
+        k.ink    = RGB(232, 136, 30);
+        k.ink_hi = RGB(255, 184, 70);
+        k.acc    = C_WHITE;
+    } else if (src == SRC_GRAN) {
+        /* cyan as the ground, and the ink stays inside the hue: a cyan curve on dim
+         * cyan says "grains" before a single label is read. White would fight it. */
+        k.bg     = RGB(8, 38, 52);
+        k.track  = RGB(4, 22, 30);
+        k.ink    = RGB(60, 180, 235);
+        k.ink_hi = RGB(150, 225, 255);
+        k.acc    = RGB(205, 245, 255);
+    } else {
+        /* SYNTH keeps the platform's own palette: it is the default, and the theme is
+         * the wearer's choice -- overriding it here would fight GLOBAL's THEME. */
+        k.bg     = C_BLACK;
+        k.track  = C_LINE;
+        k.ink    = C_GRAY;
+        k.ink_hi = C_HI;
+        k.acc    = C_WHITE;
+    }
+    return k;
 }
 
-static void src_icons(void)
+/* The source's shape, in the strip. A polyline rather than rects, because the thing
+ * being drawn is a curve and a curve is what the scope above shows: the same visual
+ * language, one scale down. */
+static void src_icon(const src_skin_t *k)
 {
-    int32_t i;
-    for (i = 0; i < 3; i++) {
-        int32_t x = 40 + i * 60, y = 10;      /* in the strip's own canvas: y 180 on screen */
-        uint16_t c = (i == (int32_t)src) ? C_HI : C_LINE;
-        if (i == 0) {
-            /* SYN: three stacked steps, a table of frames */
-            int32_t k;
-            for (k = 0; k < 3; k++)
-                cv_rect(x + k * 5, y + 14 - k * 6, 22, 4, c);
-        } else if (i == 1) {
-            /* SMP: one hit and its decay */
-            int32_t k;
-            cv_rect(x, y, 4, 21, c);
-            for (k = 0; k < 8; k++) {
-                int32_t h = 18 - k * 2;
-                if (h > 0)
-                    cv_rect(x + 4 + k * 3, y + 21 - h, 2, h, c);
-            }
+    /* the strip's own canvas is 240x60 (y 180 on screen); the icon sits centred */
+    int32_t x0 = 78, y0 = 10, w = 84, h = 40;
+    int32_t mid = y0 + h / 2, amp = h / 2 - 1;
+    int32_t i, px = 0, py = 0;
+
+    for (i = 0; i < w; i++) {
+        float t = (float)i / (float)(w - 1);
+        float v;
+        int32_t y;
+
+        if (src == SRC_SYNTH) {
+            /* saw: two cycles, so both the ramp and the drop are visible. The drop is
+             * the discontinuity the table is read across, and it is the shape whose
+             * MORPH the ear most easily follows. */
+            float ph = t * 2.0f;
+            v = 2.0f * (ph - fm_floorf(ph)) - 1.0f;
+        } else if (src == SRC_SMPL) {
+            /* one hit and its decay: a waveform that exists once */
+            v = fm_sin_turns(t * 3.0f) * (1.0f - t * 0.9f);
         } else {
-            /* GRN: grains scattered over a span */
-            int32_t k;
-            cv_rect(x, y + 18, 32, 2, c);
-            for (k = 0; k < 5; k++)
-                cv_rect(x + k * 7, y + (k & 1 ? 2 : 8), 4, 7, c);
+            /* the sine GRAN is built from, before the grains break it up */
+            v = fm_sin_turns(t * 2.0f);
+        }
+        y = mid - (int32_t)(v * (float)amp);
+        if (i == 0) {
+            cv_rect(x0, y, 2, 2, k->ink_hi);
+        } else {
+            cv_line(px, py, x0 + i, y, k->ink_hi);
+        }
+        px = x0 + i;
+        py = y;
+    }
+
+    if (src == SRC_GRAN) {
+        /* grains: a fixed scatter over the same span. Deterministic on purpose -- a
+         * random icon would shimmer every frame, and shimmer is what a fault looks
+         * like. Eleven dots at two heights either side of the curve. */
+        for (i = 0; i < 11; i++) {
+            int32_t gx = x0 + (i * 23 + 7) % w;
+            int32_t gy = mid + (((i * 37) % 7) - 3) * (amp / 3);
+            cv_rect(gx, gy, 3, 3, k->ink);
         }
     }
 }
@@ -474,12 +552,12 @@ static void src_icons(void)
 /* one knob column: its name, its value, and a bar that follows the value */
 static void knob(int32_t x, const char *name, const char *val, int32_t v127, int lit)
 {
-    uint16_t c = lit ? C_HI : C_GRAY;
+    uint16_t c = lit ? sk.ink_hi : sk.ink;
     cv_text(x, 6, &FONT_XS, name, c);
-    cv_text(x, 26, &FONT_XS, val, lit ? C_WHITE : C_DIM);
-    cv_rect(x, 48, 30, 6, C_LINE);
+    cv_text(x, 26, &FONT_XS, val, lit ? sk.acc : sk.ink);
+    cv_rect(x, 48, 30, 6, sk.track);
     if (v127 > 0)
-        cv_rect(x, 48, 30 * v127 / 127, 6, lit ? C_HI : C_GRAY);
+        cv_rect(x, 48, 30 * v127 / 127, 6, lit ? sk.ink_hi : sk.ink);
 }
 
 void app_frame(void)
@@ -490,9 +568,11 @@ void app_frame(void)
 
     input();
 
+    sk = src_skin();
+
     /* the scope redraws every frame: it is the one thing on screen that must not
      * look frozen while a note is held */
-    cv_begin(240, 112, src_bg());
+    cv_begin(240, 112, sk.bg);
     {
         /* Read the ring backwards from where the audio has got to, so the newest
          * sample is at the right edge: a scope that scrolls the other way reads as
@@ -503,7 +583,7 @@ void app_frame(void)
         int32_t lo, hi, peak;
 
         /* a centre line, so silence reads as a flat line and not as nothing */
-        cv_rect(0, 56, 240, 1, C_LINE);
+        cv_rect(0, 56, 240, 1, sk.track);
 
         /* the frame's own peak, for the vertical gain: one pass, before drawing */
         peak = 0;
@@ -555,9 +635,9 @@ void app_frame(void)
             if (hi - lo < 1) {
                 /* a quiet or steady column is a dot, not a gap: a scope that drops
                  * columns looks broken */
-                cv_rect(x, 56 - hi, 1, 1, C_HI);
+                cv_rect(x, 56 - hi, 1, 1, sk.ink_hi);
             } else {
-                cv_line(x, 56 - hi, x, 56 - lo, C_HI);
+                cv_line(x, 56 - hi, x, 56 - lo, sk.ink_hi);
             }
         }
     }
@@ -565,7 +645,7 @@ void app_frame(void)
 
     /* A canvas drawn and never blitted is a canvas drawn for nothing: each band
      * ends in a blit (gfx.c), so the knob band needs its own cv_begin and blit. */
-    cv_begin(240, 68, C_BLACK);
+    cv_begin(240, 68, sk.bg);
     if (env_page) {
         /* The ENV page: the same four bars in the same four positions, so the hand
          * does not move — only what they mean. Time in ms/s as text, because "37" on
@@ -606,8 +686,8 @@ void app_frame(void)
     cv_blit(0, 112);
 
     /* the source strip, in the band below the knobs that nothing else uses */
-    cv_begin(240, 60, C_BLACK);
-    src_icons();
+    cv_begin(240, 60, sk.bg);
+    src_icon(&sk);
     cv_blit(0, 180);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
