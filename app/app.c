@@ -68,10 +68,40 @@ static uint8_t k_spray = 0;       /* 0..127: 0 makes a grain voice a sample play
 static uint8_t env_page;
 static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 
-/* the waveform view: one peak per bucket, written by the audio interrupt */
-#define WF_W 240
-static volatile uint8_t  wf_peak[WF_W];
-static volatile uint16_t wf_fill;
+/* ─── the scope ─────────────────────────────────────────────────────────────
+ *
+ * The screen is 240 columns and the band is 112 px. Two decisions decide whether
+ * the result looks like a waveform or like a filled rectangle, and the first
+ * version of this got both wrong:
+ *
+ * 1. **A column is a min and a max, not a peak of |x|.** The old code stored
+ *    |x|'s maximum per column and drew it mirrored about the centre, which for any
+ *    harmonically rich signal puts nearly every column at full height: a saw, or
+ *    anything through the shaper, becomes a solid block. A column has to remember
+ *    which way the signal was going, so it keeps both extremes and draws the line
+ *    between them.
+ *
+ * 2. **The window is ~2.7 cycles of the note, not 21.8 ms of anything.** This is
+ *    the part that decides whether a shape can be read at all. With 240 columns and
+ *    a fixed time window, the cycles a shape occupies is set by the window, and 22 ms
+ *    spent on a 220 Hz note after the shaper gives 4.8 cycles over 240 columns: an
+ *    eleven-column cycle whose vertical extent is a smear of four samples, which is
+ *    why it read as a filled band. 120 samples is 2.7 ms and 2 samples per column,
+ *    so a 220 Hz note is 54 columns a cycle and its shape is legible; the top of the
+ *    keyboard (784 Hz) is 15 columns a cycle, still readable.
+ *
+ *    A shorter window is what a musical scope wants, and it is the opposite of the
+ *    usual intuition: a long window is for finding a level, a short one is for seeing
+ *    a shape. This screen is showing a shape.
+ *
+ * The reader takes a snapshot of the write index and reads *backwards* from it, so
+ * a block arriving mid-read cannot tear the picture: the worst case is that the
+ * frame shows data one block old. */
+#define WF_W   240
+#define WF_SPAN 768                      /* samples held: 3 windows' worth, so the reader never wraps mid-frame */
+#define WF_VIEW 384                      /* samples on screen: 8.7 ms, 1.6 columns per sample */
+static volatile int8_t  wf_buf[WF_SPAN];
+static volatile uint16_t wf_idx;
 
 static void ui_apply(void)
 {
@@ -122,23 +152,19 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         lr[2 * i + 1] = s;
     }
 
-    /* The scope, and the arithmetic is the whole thing: 256 frames in a block,
-     * 240 columns on screen. One block cannot fill the screen, so the position is
-     * carried between blocks (wf_fill) and only wraps after 240 blocks — 1.4 s of
-     * 44.1 kHz, which is ~5 px per cycle of a 220 Hz note: one cycle of two to
-     * three columns. That is enough to see the shape, which is all a scope here is
-     * for. (The first version divided the *absolute* position by 184, so a block
-     * landed in one or two columns and the screen showed five vertical lines.) */
+    /* The scope's ring: one write per sample, -127..127. Clamped rather than
+     * scaled, because the DSP already bounds its output; a sample that needed
+     * clamping is a defect to see, not a level to hide. */
     for (i = 0; i < n; i++) {
-        uint32_t pos = (uint32_t)wf_fill + i;
-        uint16_t b = (uint16_t)(pos % WF_W);
-        uint8_t p = (uint8_t)(fm_fabsf(mono[i]) * 127.0f);
-        if (p > 127)
-            p = 127;
-        if (p > wf_peak[b])
-            wf_peak[b] = p;
+        float v = mono[i] * 127.0f;
+        int32_t q = (int32_t)v;
+        if (q > 127)
+            q = 127;
+        if (q < -127)
+            q = -127;
+        wf_buf[wf_idx] = (int8_t)q;
+        wf_idx = (uint16_t)((wf_idx + 1u) % WF_SPAN);
     }
-    wf_fill = (uint16_t)((wf_fill + n) % WF_W);
 }
 
 /* ---------------------------------------------------------------- input --- */
@@ -468,15 +494,71 @@ void app_frame(void)
      * look frozen while a note is held */
     cv_begin(240, 112, src_bg());
     {
+        /* Read the ring backwards from where the audio has got to, so the newest
+         * sample is at the right edge: a scope that scrolls the other way reads as
+         * noise. `end` is sampled once; a block landing mid-read costs at most one
+         * stale block, not a torn frame. */
+        uint16_t end = wf_idx;
         int32_t x;
+        int32_t lo, hi, peak;
+
+        /* a centre line, so silence reads as a flat line and not as nothing */
+        cv_rect(0, 56, 240, 1, C_LINE);
+
+        /* the frame's own peak, for the vertical gain: one pass, before drawing */
+        peak = 0;
+        for (x = 0; x < (int32_t)WF_VIEW; x++) {
+            uint16_t at = (uint16_t)((end + WF_SPAN - 1u - (uint32_t)x) % WF_SPAN);
+            int32_t v = wf_buf[at];
+            if (v < 0)
+                v = -v;
+            if (v > peak)
+                peak = v;
+        }
+        if (peak < 24)
+            peak = 24;
+
         for (x = 0; x < WF_W; x++) {
-            int32_t p = (int32_t)wf_peak[x];
-            int32_t h = p * 52 / 127;
-            if (h > 0)
-                cv_line(x, 56 - h, x, 56 + h, C_HI);
-            else
-                cv_rect(x, 56, 1, 1, C_LINE);
-            wf_peak[x] = 0;
+            /* column x is VIEW*(x) .. VIEW*(x+1) back from the newest sample, divided
+             * by 240. Both are fixed-point in samples-per-column: 384/240 = 1.6, so
+             * a column spans one or two samples. */
+            uint32_t a = (uint32_t)x * WF_VIEW / WF_W;
+            uint32_t b = (uint32_t)(x + 1) * WF_VIEW / WF_W;
+            int32_t k;
+            lo = 127;
+            hi = -127;
+            if (b <= a)
+                b = a + 1;
+            for (k = (int32_t)a; k < (int32_t)b; k++) {
+                /* `end` is newest-first going backwards, wrapped into the ring */
+                uint32_t back = WF_VIEW - 1u - (uint32_t)k;
+                uint16_t at = (uint16_t)((end + WF_SPAN - 1u - back) % WF_SPAN);
+                int32_t v = wf_buf[at];
+                if (v < lo)
+                    lo = v;
+                if (v > hi)
+                    hi = v;
+            }
+            /* Vertical gain. A fixed 127->50 px mapping is the obvious choice and it
+             * is what made this unreadable: one voice at full velocity is 0.21 of the
+             * DSP's full scale (eight voices share the headroom, see WV_VOICE_GAIN),
+             * so a single note drew 27 counts = 10 px in a 112 px band. Measuring the
+             * frame's own peak and filling the band is what a scope with an auto-gain
+             * does, and it is the right thing here because the question is "what shape
+             * is this", not "what level is this" -- MASTER and the peak are elsewhere.
+             *
+             * Floor of 24 counts (~ -14 dBFS) so silence does not amplify its own
+             * dither into a full-height block, and a ceiling so a loud eight-voice
+             * chord cannot clip the drawing into a square wave. */
+            lo = lo * 50 / peak;
+            hi = hi * 50 / peak;
+            if (hi - lo < 1) {
+                /* a quiet or steady column is a dot, not a gap: a scope that drops
+                 * columns looks broken */
+                cv_rect(x, 56 - hi, 1, 1, C_HI);
+            } else {
+                cv_line(x, 56 - hi, x, 56 - lo, C_HI);
+            }
         }
     }
     cv_blit(0, 0);                 /* without this the band is drawn and never shown */
@@ -604,7 +686,8 @@ void app_init(void)
     bank.frames = WV_BANKS[0];
     held_prev = 0;
     btn_prev = 0;
-    wf_fill = 0;
+    wf_idx = 0;
+    memset((void *)wf_buf, 0, sizeof wf_buf);
     src = SRC_SYNTH;
 
     /* The pool is flash, handed over by the platform with its length; plat_res
