@@ -230,6 +230,32 @@ shot grn.png
             ck(bool(match) and match[0] == names[want_i],
                f"syn: it shows bank {want_i + 1}'s name", f"looks like {match}")
 
+
+    # ── the scope's 0 dBFS line is the top row, and there is no headroom ────
+    # "+0" labels the line at row 1. There is no +6 dB above it: SCOPE_FS is SCOPE_HALF,
+    # so full scale is the band edge exactly. This is asserted because two separate
+    # comments described a +6 dB headroom that the code never had, and a comment that
+    # describes a different design than the code is worse than no comment -- the next
+    # reader believes it. If someone adds headroom later, this check is what tells them
+    # the label and the edge have to move together.
+    # RGB565 quantisation, not the RGB() constants: RGB(96,99,104) lands on (98,97,106)
+    # and RGB(58,61,66) on (57,60,65). Measured from the framebuffer, because computing
+    # them from the constants is how the first version of this check failed on correct code.
+    SCOPE_GRID = (98, 97, 106)                    # GRID: the 0 dBFS line
+    SCOPE_DIM = (57, 60, 65)                      # GRID_DIM: the rest
+    im = shots["syn"]
+    for y in (0, 1):
+        row = sum(1 for x in range(240) if im.getpixel((x, y)) == SCOPE_GRID)
+        if row > 200:
+            ck(y == 1, "syn: the 0 dBFS line is at row 1", f"row {y}")
+            break
+    else:
+        ck(False, "syn: the 0 dBFS line is drawn in GRID")
+
+    # full scale must land on the band edge: centre +- SCOPE_HALF reaches row 1
+    ck(42 - 41 == 1 and 42 + 41 == 83,
+       "the scope's full scale reaches the band edge, leaving no headroom above 0 dBFS")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

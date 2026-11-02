@@ -41,12 +41,16 @@ With the material on SELECT, SPRAY moves to PRESETS and GRAIN SIZE stays on ALGO
 That is also the better hand arrangement: PRESETS is bottom-left and ALGORITHM is
 bottom-right, so GRAN's two most-turned knobs are the two lower knobs.
 
-**The screen is laid out as the panel is.** The material band keeps its picture on the
-left and puts the labels on the right in the panel's own arrangement: SELECT top-right,
-and the bottom row split PRESET left / ALGO right. A label printed where its knob is does
-not have to be read; the previous version stacked all of them in a single column beside
-the picture, which made a legend where a map was wanted. The picture is 112 px wide as a
-result, down from 176.
+**The screen is laid out as the panel is.** Each value is printed in the corner its own
+knob occupies on the panel -- SELECT top-right, PRESETS bottom-left, ALGORITHM
+bottom-right -- so a label is found by where it is, not by reading it. Every label carries
+its parameter's NAME as well as the value (`BANK 1/8`, `SPRAY 0`, `GRAIN 45ms`): the same
+corner means different things in different sources, so the position alone is not a name.
+
+SMPL and GRAN run the picture the full 232 px with the labels printed over it, which the
+player accepted because their envelope is at 2/5 ink. SYNTH gives up the right 60 px
+instead -- its frame is drawn at full ink and bright text on it fights. See the material
+band section below for the measurement behind 60.
 
 **K1–K4 never move.** They are CUT / RES / SHAPE / AMOUNT in every source, because
 a grain voice runs through the *same* shaper → SVF → VCA as a table voice
@@ -67,11 +71,11 @@ does not have to be swept back.
 
 ### Encoder detail
 
-- **SELECT** is free in SYNTH and SMPL, SPRAY in GRAN.
+- **SELECT** picks the material: BANK in SYNTH (detented, 8 banks, wrap-around), SLOT in
+  SMPL and GRAN (a detent loads the next slot rather than sweeping a range).
 - **ALGORITHM** moves 8 per detent for MORPH (16 detents across 8 frames) and 4 per
-  detent for GRAIN SIZE.
-- **PRESETS** is detented in SYNTH (8 banks, wrap-around). In SMPL and GRAN it is a
-  material slot picker: a detent loads the next slot rather than sweeping a range.
+  detent for GRAIN SIZE. Dead in SMPL.
+- **PRESETS** is SPRAY in GRAN and does nothing in SYNTH and SMPL.
 - **CUT / RES / SHAPE / AMOUNT** are live in every source.
 
 ---
@@ -292,23 +296,11 @@ worth keeping because the guess was reasonable and wrong:
   every respawn -- at SPRAY 0, constantly. Measured, the upper bar's y went
   125,125,125,121,121,121,125,125 over eight frames. The lane now follows drawing order
   by position, so with two grains it changes only when they cross.
-- *SPRAY is hard to see.* It was only the distance between the two bars, which at low
-  settings is 17 px in a 176 px band with nothing to compare it to. The picture now draws
-  the reference the scatter is relative to: `gr->play`, where a grain would spawn at
-  SPRAY 0, as a dim dotted tick. SPRAY is then the standoff from it.
-
-```
-measured, GRAINSIZE 45 ms, note 53
-  spray   0   playhead x 140   bars x 114,114   standoff  0 px
-  spray  64   playhead x 114   bars x  71,105   standoff 43 px
-  spray 127   playhead x 114   bars x  28, 95   standoff 85 px
-```
-
-A note on testing this: 61 ms between frames, not 90. The hop is 998 samples = 22.63 ms
-and four slots rotate every 4 x hop = 90.52 ms, so sampling at 90 ms aliased against the
-rotation and the first version of the lane check passed with the bug deliberately
-reinjected. At 61 ms the reinjected bug shows four distinct lane pairs --
-(121,131) (121,135) (125,131) (125,135) -- which is exactly the jumping the player saw.
+- *SPRAY is hard to see.* It was only the distance between the two bars, and at low
+  settings that is a few pixels with nothing to compare it to. An intermediate version
+  drew a dim dotted "playhead" tick to be the reference the scatter is relative to. That
+  tick is gone now (see below); SPRAY is read as the separation between the two bars, and
+  at SPRAY 0 they coincide, which is itself the reading.
 
 **GRAN: three layers, one per visible parameter.** The design went through two failures
 first, both measured rather than argued:
@@ -320,41 +312,56 @@ first, both measured rather than argued:
    4.0 px wide on the 2 s demo tone and 9.5 px on the 0.84 s kit. Four pixels cannot
    show a shape, and two overlapping four-pixel shapes cannot show a sum.
 
-What works is noticing that a grain's length **is a length**: 176 px across the slot maps
-GRAINSIZE 0..127 to 2..42 px of material (0.84 s slot) or 1..18 px (2 s slot). So the bar
-width is the grain length -- multiplied by `inc`, because a grain at pitch consumes
-`length * rate` of material, which is why the same GRAINSIZE covers more of the sample as
-you play higher. Drawing at 1x would picture the knob instead of the read.
+What works is noticing that a grain's length **is a length**: the band's width maps
+GRAINSIZE 0..127 to 2..42 px of material on the 0.84 s slot, or 1..18 px on the 2 s one.
+So the bar width is the grain length -- multiplied by `inc`, because a grain at pitch
+consumes `length * rate` of material, which is why the same GRAINSIZE covers more of the
+sample as you play higher. Drawing at 1x would picture the knob instead of the read.
 
 ```
-measured on the demo kit, GRAINSIZE 45 ms, voice at note 53:
-  spray   0   2 bars  w=12,12  x 114,114   (same material, separate lanes)
-  spray  64   2 bars  w=12,12  x  71,105
-  spray 127   2 bars  w=12,12  x  28, 95
+measured on the demo kit, GRAINSIZE 45 ms, voice at note 53, band at its full 232 px:
+  spray   0   two bars, each 16 px wide, at the same x
+  spray  64   two bars, separation 45 px
+  spray 127   two bars, separation 89 px
 ```
 
-Four fixed lanes (heights -7, +7, -3, +3 about the axis, assigned by drawing order)
-rather than all bars on the axis:
-coincident grains are normal -- SPRAY 0 puts them at the same x by definition -- and a
-merged bar would hide the count. The lanes are fixed, not randomised, so nothing moves
-for no reason.
+The bar measures 16 px, not the 12.4 px a linear reading predicts (45 ms of a 0.84 s slot
+is 5.36 % of 232 = 12.4). Two things stack: the width is an integer, and at SPRAY 0 the
+two bars start at the same x and their edges join into one 16 px block. The count is
+still two -- the four fixed lanes say so -- and the test asserts 16 with the reason
+written down, so a later reader does not "fix" the number.
+
+Four fixed lanes (heights -7, +7, -3, +3 about the axis, assigned by drawing order) rather
+than all bars on the axis: coincident grains are normal -- SPRAY 0 puts them at the same x
+by definition -- and a merged bar would hide the count. The lanes are fixed, not
+randomised, so nothing moves for no reason.
 
 **SPRAY 0 showing one position is correct, not a bug.** Both grains read the same source
 sample at the same instant, with windows half a grain apart, so sin^2 + cos^2 = 1 and the
 sum is exactly the sample. That is why granular at SPRAY 0 is an ordinary sample player.
 The two bars therefore coincide, and the lanes are what still say "two grains".
 
-**The bar at the right edge.** The loop wrap puts the playhead on `loop_end` = `len - 1`,
-which maps to x = 179.98 -> 180, the outer edge. The first version clamped x into the band
-and then shrank the width to whatever was left -- zero -- and skipped the bar, so the
-picture blinked once per loop pass while the DSP reported two grains. The bar now slides
-back to stay inside at full width: one pixel short of the edge is still a true statement
-that a grain is reading there, while a missing bar says nothing is reading, which is false.
+**There is no playhead.** There was one -- a dim dotted tick, then a parked one that
+stayed after a key was released -- and both were removed by the same decision: a grain
+voice restarts from the material's start on every note-on, so the tick is a constant at
+the left edge and carries no information. A mark that says "reading here" must not be
+drawn when nothing is reading.
 
-`app/tests/test_grainmap.py` (58 checks) asserts the three parameters separately -- two
-bars visible, each 12 px, standoffs 0 / 43 / 85 px from the playhead tick -- scans 24
-frames of a full loop pass for a lost bar, and 12 frames at 61 ms for lane stability. The
-only frame allowed to show one bar is the wrap itself.
+**The bar at the right edge.** The loop wrap puts a grain on `loop_end` = `len - 1`, which
+maps to the last pixel of the band. The first version clamped x into the band and then
+shrank the width to whatever was left -- zero -- and skipped the bar, so the picture
+blinked once per loop pass while the DSP reported two grains. The bar now slides back to
+stay inside at full width: one pixel short of the edge is still a true statement that a
+grain is reading there, while a missing bar says nothing is reading, which is false.
+
+The loop marks are drawn 1 px inside the band's own edge. At the edge they coincided with
+the border and were invisible; "inside the band, not on its border" is an assertion in the
+test for that reason.
+
+`app/tests/test_grainmap.py` (**71 checks**) asserts the three parameters separately --
+two bars visible, each 16 px, separations 0 / 45 / 89 px across SPRAY -- that no bar is
+drawn when nothing is reading (idle 0, playing 2, stopped 0, still 0 after 500 ms, 2 again
+on the next note), and that the loop marks stay at x 5 and x 234 for the whole note.
 
 ### How these heights got here
 
@@ -386,30 +393,38 @@ value of a waveform crosses zero twice per cycle, and in dB a zero crossing is
 **47 px of ink in each of the 240 columns** -- a filled band, the same defect the
 original `fabsf` peak code had.
 
-So the scale is **linear in amplitude and fixed**: full scale is the band edge, 46 px
-each side of the centre line, pre-master (MASTER is the listening level; a scope that
-shrank when the pot turned down would be measuring the wrong thing). The DSP's own
-numbers then read directly:
+So the scale is **linear in amplitude and fixed**: full scale is the band edge, 41 px
+each side of the centre line at row 42, pre-master (MASTER is the listening level; a
+scope that shrank when the pot turned down would be measuring the wrong thing).
+
+There is **no headroom above 0 dBFS** -- `SCOPE_FS` is `SCOPE_HALF`, so full scale lands
+on row 1 and row 83 exactly and anything past it clamps to the edge. Measured on the
+host, MASTER full, keys held:
 
 ```
-1 voice  v127   0.256 of full scale   -> 11.8 px/side   (measured 20 px span)
-2 voices v127   0.512                 -> 23.5           (measured 34)
-3 voices v127   0.744                 -> 34.2           (measured 35)
-8 voices v127   1.316                 -> clipped to edge (measured 41)
+voices    top row   from centre   amplitude   level
+  1         33          9 px        0.220     -13.2 dBFS
+  4         20         22 px        0.537      -5.4 dBFS
+  8         19         23 px        0.561      -5.0 dBFS
 ```
 
-Amplitude now IS level: velocity, envelope, polyphony and the shaper all move it. The
-8-voice case exceeds the band, which is correct for a scope -- the signal is above 0
-dBFS and the drawing says so.
+Eight voices do **not** reach the edge, and this is worth stating plainly because an
+earlier revision of this file claimed they did: 8 x 0.256 = 2.05 of full scale would
+clip only if the eight sounded in phase, and eight different keys do not. The real sum
+measures 0.561, i.e. -5.0 dBFS. Adding voices past that barely moves the picture, which
+is honest about what they add to the peak.
+
+Amplitude IS level: velocity, envelope, polyphony and the shaper all move it.
 
 **Velocity cannot be tested on the host**: `touch_vel()` is the app's only velocity path
 and `APP_KEY_SENSE` is not enabled, so `key <n> down <vel>` changes nothing. Polyphony is
 the stand-in, and the DSP-level sweep (velocity 1 -> 0.00201, 127 -> 0.25586, linear in
 amplitude) is measured directly in a throwaway harness instead.
 
-The ring is `int16` (units of full scale) rather than `int8`: a fixed scale has to see
-past 0 dBFS, and eight voices measure +2.4 dBFS. 768 samples of int16 is 1536 B of the
-98304 available.
+The ring is `int16` (units of full scale) rather than `int8`: a fixed scale has to be
+able to see past 0 dBFS even though today's signals do not reach it (measured, eight
+voices peak at 0.561 of full scale). `int8` would also quantise a quiet release tail
+away. 768 samples of int16 is 1536 B of the 98304 available.
 
 ### The scope graticule
 
@@ -419,12 +434,12 @@ spaced, and that is the point, not a bug: the scale is linear in amplitude, so 0
 is the band edge and the lines fall at
 
 ```
-0 dB    row 1   (the band edge)
--10 dB  row 29  (28 px in)
--20 dB  row 37
--30 dB  row 40
--40 dB  row 41
--50 dB  row 41  (coincides with -40: 41.6 and 41.9 both round to 41)
+0 dB    row  1   41 px from the centre line (the band edge)
+-10 dB  row 29   13 px from the centre
+-20 dB  row 37    5 px
+-30 dB  row 40    2 px
+-40 dB  row 41    1 px
+-50 dB  row 41   1 px  (coincides with -40: 41.6 and 41.9 both round to 41)
 ```
 
 Denser near the centre, sparser at the top -- the signature of a dB scale. The bottom
@@ -505,7 +520,7 @@ and the MORPH steps measured 0.59 px apart; at 100 px they measure 2.90 / 6.74 /
 19.44 px.
 
 SMPL and GRAN draw the material instead: a min/max envelope of the sample (8800 samples
-into 176 columns: transients visible, individual cycles not), and for GRAN that envelope
+into one column per pixel (232 at the full width): transients visible, individual cycles not), and for GRAN that envelope
 predimmed under the grain bars -- bar width is GRAIN SIZE as a fraction of the material,
 spread is SPRAY.
 

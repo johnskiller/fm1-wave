@@ -1177,11 +1177,11 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * what the instrument produces -- velocity, envelope, polyphony, shaper, filter. */
 #define SCOPE_FS ((float)SCOPE_HALF)   /* full scale reaches the band edge */
 
-/* the graticule: a scope is not a plot, it has a screen. The horizontal lines are the
- * dB markers of the linear scale (full scale = 0 dBFS, a line every 10 dB to -50),
- * the vertical ones are quarters of the window. They are a neutral grey, not a skin
- * colour, because they must sit under all three skins -- a graticule tinted by the
- * source would be content, and a graticule is the glass. */
+/* the graticule: a scope is not a plot, it has a screen. The horizontal lines mark
+ * fixed dB values on an amplitude-linear axis (0 dBFS at the band edge, then every
+ * 10 dB down to -50), the vertical ones are quarters of the window. They are a neutral
+ * grey, not a skin colour, because they must sit under all three skins -- a graticule
+ * tinted by the source would be content, and a graticule is the glass. */
 /* Two levels, and both had to be raised: the dim one was RGB(36,38,42), only 7 units of
  * luminance above the darkest ground -- measured, effectively invisible, so the vertical
  * lines and five of the six dB markers did not read as a grid at all. A graticule that
@@ -1320,7 +1320,7 @@ void app_frame(void)
             }
         }
 
-        /* ── the vertical scale: fixed, in dBFS ──────────────────────────────────
+        /* ── the vertical scale: fixed, LINEAR IN AMPLITUDE ─────────────────────
          *
          * This was a per-frame peak normaliser, and the measurement that condemned it
          * is that velocity 20, 60 and 127 all drew 63 px: a scope that auto-gains is
@@ -1328,17 +1328,24 @@ void app_frame(void)
          * down by the material picture. So the question here is the scope's own --
          * how loud, and when -- and a fixed scale answers it.
          *
-         * The scale is linear in dB, from SCOPE_DB_TOP down to SCOPE_DB_BOT, mapped
-         * onto the half-height each side of the centre. A linear-in-dB axis is what
-         * makes velocity read as a step: the DSP's velocity curve is linear in
-         * amplitude (measured: 0.00201 at velocity 1 up to 0.25586 at 127), so on a
-         * dB axis those equal amplitude steps arrive as a curve, and on a linear axis
-         * the same notes would all crowd the top.
+         * Fixed does not mean a dB axis, and this is the trap that the comment here
+         * used to describe: the trace's instantaneous value crosses zero twice a cycle,
+         * and in dB a zero crossing is -infinity, so a dB-mapped trace plunges to the
+         * floor at every crossing and the picture becomes a filled band.
          *
-         * +6 dB at the top because eight voices at full velocity measure +2.4 dBFS of
-         * full scale (1.316); the headroom bar is drawn against 0 dBFS so that number
-         * has somewhere to go. -54 dB at the bottom: quiet enough for the tail of a
-         * release, and shallow enough that 60 dB of range still uses the height.
+         * So the mapping is amplitude-proportional: fs_px() scales by SCOPE_FS, which
+         * is SCOPE_HALF, so full scale lands on the band edge exactly (y 1 and y 83
+         * around the centre at 42) and there is NO headroom above 0 dBFS -- a signal
+         * past full scale clamps to the edge. The graticule's horizontal lines ARE at
+         * dB values, but they are placed by the same amplitude mapping, which is why
+         * they crowd towards the centre: -10 dB sits 13 px in, -30 dB 2 px in, and
+         * -40 and -50 both round to the same row.
+         *
+         * Measured on the host with MASTER at full and every voice at velocity 127:
+         * one note peaks at -13.2 dBFS (9 px from centre), four at -5.4 dBFS, eight at
+         * -5.0 dBFS. So a full chord does not reach the edge today; an earlier version
+         * of this comment claimed it did (+2.4 dBFS) and that was never what the code
+         * did either.
          *
          * The columns keep their min/max: a period can span a whole cycle in fewer
          * columns than it has samples, so a column is a range of the signal and not a

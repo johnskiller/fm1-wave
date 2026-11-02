@@ -101,60 +101,57 @@ voice gain — see §11.
 
 > **What is actually wired is in [`panel-map.md`](panel-map.md)** — that file is
 > the authority on current assignments, including which buttons are free and what
-> each one could carry. This section is the design intent.
+> each one could carry. This section is the design intent; §9f records where the
+> built panel differs from it.
 
 Seven encoders. Grouped by function, so the pairs sit side by side on the panel.
 
-| encoder | role | parameter | range |
-|---|---|---|---|
-| EN_SELECT | `EN_SELECT` | **—** / **SPRAY** | free · GRAN: grain scatter 0–127 |
-| EN_ALGO | `EN_ALGO` | **MORPH** | 0–7 continuous: frame position. **Same position in all three modes** |
-| EN_K1 | `EN_K1` | **CUT** | 0–127 → 30 Hz … 16 kHz, exponential |
-| EN_K2 | `EN_K2` | **RES** | 0–127 → damping 2.0 … 0.15 |
-| EN_K3 | `EN_K3` | **SHAPE** | 0–3 detented: SOFT / HARD / FOLD / SINE |
-| EN_K4 | `EN_K4` | **AMOUNT** | 0–127 → shaper drive 0 … 16× |
-| EN_PRESET | `EN_PRESET` | **BANK** / **SLOT** | SYNTH: bank 0–7, detented · SMPL and GRAN: material slot |
+| encoder | panel | SYNTH | SMPL | GRAN |
+|---|---|---|---|---|
+| EN_SELECT | SELECT | **BANK** 0–7 | **SLOT** | **SLOT** |
+| EN_PRESET | PRESETS | — | — | **SPRAY** 0–127 |
+| EN_ALGO | ALGORITHM | **MORPH** 0–127 | *(dead)* | **GRAIN SIZE** 10–200 ms |
+| EN_K1 | KNOB 1 | **CUT** | CUT | CUT |
+| EN_K2 | KNOB 2 | **RES** | RES | RES |
+| EN_K3 | KNOB 3 | **SHAPE** | SHAPE | SHAPE |
+| EN_K4 | KNOB 4 | **AMOUNT** | AMOUNT | AMOUNT |
+
+- **CUT** 0–127 → 30 Hz … 16 kHz, exponential
+- **RES** 0–127 → damping 2.0 … 0.15
+- **SHAPE** 0–3 detented: SOFT / HARD / FOLD / SINE
+- **AMOUNT** 0–127 → shaper drive 0 … 16×
 
 **The pairs are adjacent**: CUT/RES are the filter, SHAPE/AMOUNT are the shaper.
-That is why CUT moved off `EN_PRESET` — a filter with its resonance two knobs
-away is a filter you operate by reaching across the panel.
+K1–K4 do not move in any source.
 
-### The one encoder that follows the mode
+### The three mode knobs follow the panel, not the function
 
-`EN_PRESET` is **BANK in SYNTH and SLOT in the sample modes**, because the two
-halves of the instrument want different things there:
+The physical panel is a 2×2 block left of the screen:
 
-- In **SYNTH** the eight banks are a timbre sweep you audition fast, exactly
-  what a detented encoder is for.
-- In **SMPL / GRAN** the slots are material you *choose* rather than sweep, so
-  they are a list, not a range. Turning the knob is how you load the next one.
+```
+    MASTER   SELECT        (top row)
+    PRESETS  ALGORITHM     (bottom row)
+```
 
-### SPRAY: why it moved to `EN_SELECT`, and not onto `EN_PRESET`
+MASTER is a pot (`plat_master()`, 0–4096) and is not on screen. The other three
+are encoders, and each one's job was chosen so that **the same corner of the
+screen always means the same knob**:
 
-The first version put SPRAY on `EN_PRESET` and the material slot on `EN_ALGO`.
-That read well on paper — "which material" is one job, so give it one knob in
-both sample modes — and it was wrong in the hand, for two reasons:
+- **SELECT, top right** — which material is loaded. BANK in SYNTH, SLOT in the
+  two sample modes. All three ask the same question.
+- **ALGORITHM, bottom right** — MORPH in SYNTH, GRAIN SIZE in GRAN, dead in SMPL.
+- **PRESETS, bottom left** — SPRAY in GRAN, nothing in SYNTH or SMPL.
 
-1. **MORPH lost its knob in GRAN.** `EN_ALGO` is MORPH everywhere else. Moving it
-   means that switching SOURCE moves a control the player had just learned the
-   position of.
-2. **A control that moves is worse than a control that is off.** A dead knob is
-   visible and stable; a knob that does something else in the next mode gets
-   turned by accident.
+**MORPH is dead in SMPL, and that is why the knob is not given a job there.**
+MORPH indexes a wavetable frame; SMPL reads no wavetable. A dead knob is visible
+and stable; a knob that does something else next mode gets turned by accident.
+The screen agrees by leaving that corner empty rather than printing a value that
+predicts nothing.
 
-So SPRAY takes **`EN_SELECT`**, which is free while SOURCE lives on `B_SEL`, and
-nothing changes position between modes:
-
-| | EN_SELECT | EN_ALGO | EN_PRESET |
-|---|---|---|---|
-| SYNTH | — | MORPH | BANK |
-| SMPL | — | MORPH | SLOT |
-| GRAN | **SPRAY** | MORPH | SLOT |
-
-The cost is honest: SPRAY is a 0–127 range on a 32-detent knob, and it sits at
-the far end of the row from the material it scatters over. If a later panel
-revision gives GRAN its own page (the material page already has room), SPRAY
-belongs there with GRAIN SIZE, and `EN_SELECT` goes back to being free.
+An earlier version had BANK/SLOT on PRESETS and SPRAY on SELECT. It was wrong in
+the hand and wrong on the screen: the knob labelled SELECT did nothing in two of
+three modes, and the knob labelled PRESETS was choosing the bank. Position is the
+name, so the name has to match the position.
 
 ### Toggle pages: ENV, and the material page
 
@@ -286,10 +283,15 @@ with an offset table:
 
 ```
 header   magic(4) + version(1) + count(1) + reserved(2)
-entry c × 16 B   { offset u32, len u32, rate u16, bits u8, root u8 }
+entry c × 20 B   { offset u32, len u32, rate u16, bits u8, root u8,
+                   gain i16 (Q8), name[6] }
 ```
 
-Eight entries cost 128 B; the rest is samples, packed back to back, and a
+`offset` is absolute from the start of the blob, and `gain` is per slot because
+banks and samples have different crest factors — measured, the eight synth banks
+differ by 4.3 dB from each other, so samples differ by more; it is set by ear.
+
+Eight entries cost 176 B; the rest is samples, packed back to back, and a
 sample may span several entries' worth of the pool up to the whole thing. So
 "how many" and "how long" stop competing: one 8 s slice, or eight 1.4 s slices,
 or anything between — the user decides per sound, not the format.
@@ -392,41 +394,75 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
 
 ## 6. Screen (240 × 240)
 
-Three bands. No mode words, no label for a value that is not on screen.
+Three bands, heights derived from what each has to draw, with a compile-time
+`#error` if they do not sum to 240. No mode word, no label for a value that is not
+on screen.
 
 ```
 ┌────────────────────────────────────────┐  y 0
-│        real-time waveform scope        │  240 × 112
-├────────────────────────────────────────┤  y 112
-│  ▁▃▅ ▂▄▆ ▃▅▇ ▄▆█ ▅▇█ ▆██ ▇██ ███       │  240 × 64
-│   current table's frames, MORPH marked │
+│  real-time scope  84 px, fixed scale   │
+│  graticule: 5 verticals, 6 dB lines    │
+├────────────────────────────────────────┤  y 84
+│  material            92 px             │
+│  SYNTH: the table frame + 60 px column │
+│  SMPL/GRAN: envelope (+ grain bars)    │
 ├────────────────────────────────────────┤  y 176
-│ B▏▁▂▃  M▏▁▂▃  C▏▁▂▃  R▏▁▂▃  S▏▁▂▃       │  240 × 64
-│ A▏▁▂▃  P▏▁▂▃                            │
+│  CUT   RES   SHAPE   AMOUNT            │  64 px
 └────────────────────────────────────────┘  y 240
 ```
 
-**Band 1 — scope.** The actual post-mix output, peak-held: captured in
-`app_render` into a 240-sample ring (one sample per 184 rendered samples, peak
-kept so transients survive), drawn in `app_frame`. Silence draws a flat line —
-silence is real data and is not dressed up.
+**Band 1 — scope, y 0..83.** The actual post-mix output, captured in
+`app_render` into a 768-sample `int16` ring (384 visible = 8.7 ms), drawn in
+`app_frame`.
 
-**Band 2 — the material.** The current table as waveform thumbnails with the
-MORPH position marked. In SYNTH mode that is the 8 frames of the bank; **in
-SMPL mode it is the sample's envelope with the grain window drawn over it** —
-so the band always answers "what am I playing and where in it am I", in both
-modes, with no mode word.
+The vertical scale is **fixed and linear in amplitude**, pre-master: full scale
+(0 dBFS) is the band edge at row 1 and row 83 around the centre at row 42, and
+there is **no headroom above 0 dBFS** — anything louder clamps to the edge. A dB
+axis is wrong for a *trace*: the value crosses zero twice a cycle and in dB a zero
+crossing is -infinity, so the trace plunges to the floor every crossing (measured:
+47 px of ink in all 240 columns).
 
-When **SOURCE** or the bank picker is turned, this band becomes the chooser for
-one second (candidates, current one marked), then returns. Transient overlay,
-no label: the content says what it is.
+The graticule's horizontal lines mark fixed dB values placed through the same
+amplitude mapping, which is why they crowd towards the centre:
 
-**Band 3 — knobs.** Seven bars in panel order (SOURCE, MORPH, CUT, RES, SHAPE, AMOUNT,
-and the mode's own last knob: BANK or SPRAY), single-letter name and a filled bar. The one just turned highlights for 300 ms. **A numeric readout appears
-only next to the encoder being turned**, then goes away: six numbers you cannot
-read while playing are six pixels of noise. When a page is up (ENV, or the
-material page) the bars become that page's parameters — the bottom band always
-shows the seven things the seven encoders would do right now.
+```
+  0 dBFS  row  1   41 px from centre  (the band edge; labelled "+0")
+ -10 dB   row 29   13 px
+ -20 dB   row 37    5 px
+ -30 dB   row 40    2 px
+ -40 dB   row 41    1 px
+ -50 dB   row 41    1 px  (coincides with -40)
+```
+
+Measured, MASTER full, every key at velocity 127: one note peaks at -13.2 dBFS
+(9 px from centre), four at -5.4, eight at -5.0. A full chord does not reach the
+edge — 8 × 0.256 = 2.05 only if the notes were in phase, and eight keys are not.
+
+The trace triggers on the newest rising zero crossing and pins it to the right
+edge, so a held note does not swim. Columns keep min/max, because a column can
+span more than one sample.
+
+**Band 2 — material, y 84..175.** What is being read, and by how much.
+
+- **SYNTH** — the current wavetable frame, 172 px wide (x 4..175), drawn at full
+  ink. The right-hand 60 px is a clean column for three lines: `BANK 1/8`, the
+  bank's **name** (`SAW SQR`, `RESO`, `HOLLOW`, `VOX`, `DIGI`, `OPEN1..3`), and
+  `MORPH 37`. The picture gives up the width because a frame drawn at full ink
+  and bright text on top of it fight; 60 px is the widest label (`MORPH 100`,
+  54 px) plus slack.
+- **SMPL** — the slot's min/max envelope across the full 232 px, filled, at 2/5
+  ink, with the slot name and `SLOT 2/2` over it.
+- **GRAN** — the same envelope dimmed as the background, plus one bar per grain:
+  **bar width = GRAIN SIZE** as a fraction of the material, **bar position =
+  where the grain is reading**, **spread across four lanes = SPRAY**. Labels are
+  `SLOT 2/2` (top right), `SPRAY 0` (bottom left), `GRAIN 45ms` (bottom right).
+
+Every corner label names its parameter. A position is only a name when it is the
+same name in every mode, and the top right is BANK in SYNTH but SLOT elsewhere.
+
+**Band 3 — knobs, y 176..239.** Four knobs, each a name, a value and a bar.
+`CUT / RES / SHAPE / AMOUNT` normally; `A / D / S / R` while the ENV page is up.
+No encoder numbers: the position is the name. The one just turned highlights.
 
 ---
 
@@ -640,36 +676,45 @@ rendered audio rather than against fields:
 
 ### 9e-bis. Built: the panel map (`app/tests/panel.txt`)
 
-49 assertions in the host simulator, through `app_expect`. They expect **exact**
-values, not bounds, because every encoder is relative and one detent is known.
-They check all seven encoders in all three sources, the ENV page's takeover and
-return, that a page's edits do not leak into the tone controls, and that GRAN's
-`EN_ALGO` moves GRAIN SIZE without moving MORPH.
+**71 assertions** in the host simulator, through `app_expect`. They expect
+**exact** values, not bounds, because every encoder is relative and one detent is
+known. They cover all seven encoders in all three sources, the ENV page's
+takeover and return, that a page's edits do not leak into the tone controls,
+BANK/SLOT on `EN_SELECT`, SPRAY on `EN_PRESET`, and GRAIN SIZE on `EN_ALGO`
+without moving MORPH.
 
 Confirmed the script can fail: putting MORPH back on `EN_ALGO` in GRAN produces
 three failures naming `grain`. A test that cannot fail is not a test.
 
+Two more suites guard the screen, and both were rewritten after they passed the
+bugs they were written for:
+
+- `app/tests/test_screen.py`, **32 checks** — band geometry, filled envelope,
+  SYNTH's label column, the bank name line, every corner label carrying a name,
+  and the 0 dBFS line sitting on row 1.
+- `app/tests/test_grainmap.py`, **71 checks** — lane separation against SPRAY,
+  bar width against GRAIN SIZE, and "no read, no mark" for the grain bars.
+
 ### 9f. The panel, as built
 
-`docs/panel-map.md` is the authority on this and is checked by `panel.txt`; this
-section only records where the built panel differs from §3's intent.
+`docs/panel-map.md` is the authority and is checked by `panel.txt`; this section
+records where the built panel differs from §3's intent.
 
-§3 gave SOURCE to `EN_SELECT` as a detented stop. It is on `B_SEL` instead, and
-**that is now the intended arrangement, not a stopgap**: a three-state switch on a
+§3 once gave SOURCE to `EN_SELECT` as a detented stop. It is on `B_SEL` instead,
+and **that is the intended arrangement, not a stopgap**: a three-state switch on a
 button plus an on-screen indicator costs one button, while a detented encoder for
-the same thing spends a knob that GRAN needs for SPRAY. The earlier version of this
-section said SOURCE would return to `EN_SELECT` when the ENV page was written; the
-page now exists and SOURCE did not return, because the button plus the screen turned
-out to be the better trade. `EN_SELECT` carries SPRAY in GRAN and is free otherwise.
+the same thing spends a knob GRAN needs for SPRAY. `B_SEL` cycles SYNTH → SMPL →
+GRAN and the whole screen changes colour with it (amber / green / blue-white).
 
-The one place §3 is genuinely overridden is `EN_ALGO` in GRAN, where it is GRAIN
-SIZE rather than MORPH. The reason is arithmetic and is argued in panel-map.md: GRAN
-needs seven controls, the panel has seven encoders, and MORPH is the only one of the
-seven that a grain voice never reads. K1-K4 do not move in any source.
+The mode knobs are where §3 and the built panel agree, after one correction the
+player made by looking at the panel: SELECT chooses the material (BANK or SLOT)
+and is top right; ALGORITHM is MORPH or GRAIN SIZE and is bottom right; PRESETS
+is SPRAY and is bottom left, GRAN only. The earlier assignment had the knob
+labelled SELECT doing nothing in two modes.
 
-`SOURCES` in the UI band shows what the keys are playing: the bank's name in SYNTH,
-the slot's name and its chop count in SMPL, and `NONE` when the resource region is
-missing or not this build's.
+**MORPH in GRAN is the one genuine override**: `EN_ALGO` is GRAIN SIZE there
+rather than MORPH, because a grain voice never reads the wavetable. K1–K4 do not
+move in any source.
 
 ---
 
