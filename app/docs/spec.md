@@ -99,6 +99,10 @@ voice gain — see §11.
 
 ## 3. Panel map
 
+> **What is actually wired is in [`panel-map.md`](panel-map.md)** — that file is
+> the authority on current assignments, including which buttons are free and what
+> each one could carry. This section is the design intent.
+
 Seven encoders. Grouped by function, so the pairs sit side by side on the panel.
 
 | encoder | role | parameter | range |
