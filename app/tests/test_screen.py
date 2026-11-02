@@ -137,8 +137,10 @@ shot grn.png
         # and the band's own contents must be at their full height: the table picture is
         # MAT_WAVE tall, so its ink has to span most of it -- this is what 108 -> 84 broke
         if name == "syn":
+            # the whole band: the trace is tallest at the left and decays to the right, so
+            # measuring a slice that stops short of the notes' decay underestimates it
             wave = [y for y in range(SCOPE_H, SCOPE_H + MAT_H)
-                    if any(im.getpixel((x, y)) != mat_bg for x in range(4, 180))]
+                    if any(im.getpixel((x, y)) != mat_bg for x in range(4, 236))]
             ck(bool(wave) and (wave[-1] - wave[0] + 1) >= MAT_WAVE - 4,
                "syn: the table picture uses its full height",
                f"{wave[-1] - wave[0] + 1 if wave else 0} px of {MAT_WAVE}")

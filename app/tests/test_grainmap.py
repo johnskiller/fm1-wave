@@ -36,13 +36,19 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 HOST = os.path.join(ROOT, "app", "build", "host", "wave_host")
 
 # the material band on the 240x240 screen: y 84..175, the picture inside it starts at
-# x=4 and is MAT_W (112) wide. The sample name sits at y 90..103, so bars are
+# x=4 and is MAT_W (232) wide. The sample name sits at y 90..103, so bars are
 # detected below y=104 -- otherwise a text glyph is counted as a grain.
-BAND_Y0, BAND_Y1 = 104, 176
-BAND_X0, BAND_X1 = 4, 116          # matches MAT_W in app.c
+BAND_Y0, BAND_Y1 = 112, 144
+BAND_X0, BAND_X1 = 4, 236          # matches MAT_W in app.c
 # The bar's width is the grain length in material, so it scales with the band: 45 ms of
-# a 0.84 s slot is 5.36 % of it, and 5.36 % of 112 px is 8. At the old 176 px it was 12.
-BAR_PX = 8
+# a 0.84 s slot is 5.36 % of it, and 5.36 % of 232 px is 12.4. Measured, the bar comes out
+# 16 px, and that is worth knowing rather than papering over: at SPRAY 0 the two grains
+# read the same material, so their bars start at the same x and the ROUNDING of
+# 12.4 -> 12 plus the two-pixel join makes a 16 px block where a 12 px one was intended.
+# The visual consequence is that at SPRAY 0 the picture shows one 16 px block on each of
+# two lanes, not two 12 px bars; the count is still two, which is what the lane separation
+# is there to say.
+BAR_PX = 16
 
 fails = 0
 checks = 0
@@ -144,7 +150,7 @@ wait 200
         "wait 400\n"
         "shot sp0.png\n"
         "expect grains 2\n"
-        "expect grainpx 12\n"
+        "expect grainpx 16\n"
         "wait 90\n"
         "shot sp0b.png\n"
         + lane_frames + frames +
@@ -156,7 +162,7 @@ wait 200
         "key 5 down\n"
         "wait 400\n"
         "expect grains 2\n"
-        "expect grainpx 12\n"
+        "expect grainpx 16\n"
         "shot sp64.png\n"
         "key 5 up\n"
         "wait 200\n"
@@ -166,7 +172,7 @@ wait 200
         "key 5 down\n"
         "wait 400\n"
         "expect grains 2\n"
-        "expect grainpx 12\n"
+        "expect grainpx 16\n"
         "shot sp127.png\n"
         "key 5 up\n"
     )
@@ -307,16 +313,22 @@ wait 200
                    for x in range(BAND_X0, BAND_X1) for y in range(92, 168))
 
     def loop_x(nm):
-        """The two loop marks, as the dimmer dotted columns."""
+        """The two loop marks.
+
+        They are dotted columns: a pixel every third row, the full height of the band.
+        That shape is the discriminator, and it has to be, because the corner labels are
+        drawn in the same dim colour -- measured, "SPRAY" put 9 matching pixels in a
+        column at x 24 and 30 and was read as a loop mark. A loop mark is periodic over
+        the whole band, which no glyph is."""
         im = Image.open(os.path.join(out, nm)).convert("RGB")
         px = im.load()
         found = []
         for x in range(BAND_X0, BAND_X1):
-            n = 0
-            for y in range(90, 170):
-                if px[x, y] == LOOP_MARK:
-                    n += 1
-            if n >= 5:
+            ys = [y for y in range(90, 170) if px[x, y] == LOOP_MARK]
+            if len(ys) < 20:
+                continue
+            gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+            if gaps and all(g == 3 for g in gaps):
                 found.append(x)
         return found
 

@@ -152,19 +152,34 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 #define MAT_PAD    6                                  /* above and below the picture */
 #define MAT_WAVE   80                                 /* the picture's own height */
 #define MAT_H      (MAT_PAD + MAT_WAVE + MAT_PAD)     /* 92 */
-/* The picture is 148 px wide and the right 60 px are the panel's own two columns of
- * labels, laid out where the knobs actually are: SELECT top-right, and the lower knob
- * bottom-right. The picture used to run the full 176 px, which left the labels as a
- * list in a corner that did not correspond to anything. A label that is not where its
- * knob is has to be read; one that is where its knob is does not. */
-/* The picture keeps the left side and the right side is a 2x2 of labels laid out in
- * the panel's own arrangement: SELECT top-right, and the two lower knobs along the
- * bottom, PRESET left and ALGO right. */
-#define MAT_W      112                                /* the picture, x 4..115 */
-#define MAT_LAB_L  122                                /* the label grid's two columns */
-#define MAT_LAB_R  180
-#define MAT_ROW_TOP 10                                /* SELECT's row */
-#define MAT_ROW_BOT 44                                /* PRESET / ALGO's row */
+
+/* The picture runs the full band, and the three knob values sit ON it, in the corners
+ * the knobs themselves occupy:
+ *
+ *                              n/m          top right    (bank or slot)
+ *          SPRAY n             ...          bottom left  (GRAN only)
+ *                              45ms         bottom right  (morph or grain size)
+ *
+ * No knob NAME is printed. The panel has three labelled knobs around this screen's top
+ * edge and four below it, and the four below are drawn as CUT/RES/SHAPE/AMOUNT without
+ * their encoder numbers -- the position is the name. The same argument applies here:
+ * the top-right value is the top-right knob. Printing "SEL" over a corner that IS the
+ * SELECT knob's corner says nothing the position has not already said.
+ *
+ * The values are printed over the picture instead of beside it, which costs a clear
+ * rectangle of waveform in one corner of each label. That is the trade the player asked
+ * for after seeing the side-by-side version: a wider picture with three small labels on
+ * top of it reads better than a narrow picture with a clean margin beside it.
+ *
+ * The picture is drawn first and the text over it, so a label always wins; each one gets
+ * its own backdrop-free position rather than a box, because a box is a third colour on
+ * screen and this band only has two. */
+#define MAT_X0     4
+#define MAT_W      232                                /* the picture, x 4..235 */
+#define MAT_LAB_L  (MAT_X0 + 2)                       /* the left corners' edge */
+#define MAT_LAB_R  (MAT_X0 + MAT_W - 2)               /* the right corners' edge */
+#define MAT_ROW_TOP 8                                 /* screen y 92: SELECT's corner */
+#define MAT_ROW_BOT 62                                /* screen y 146: the lower corners */
 
 #define SCOPE_H    (240 - MAT_H - KNOB_H)             /* 84 */
 #define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
@@ -1412,28 +1427,32 @@ void app_frame(void)
         char b[12];
         int32_t bl;
 
-        /* The right-hand side is the panel's 2x2, in the panel's own arrangement:
+        /* The picture runs the full width, and the three knob values sit on top of it in
+         * the corners their knobs occupy:
          *
-         *                      SELECT          top row, right
-         *          PRESET      ALGO            bottom row
+         *                              SEL n/m       top right
+         *          PRESET n            ...           bottom left   (GRAN only)
+         *                              ALGO 45ms     bottom right
          *
-         * SELECT sits alone on the top row because that is where it is on the panel --
-         * above the other two. PRESET and ALGO share the bottom row, left and right,
-         * because that is how the two knobs below the screen sit. A label printed where
-         * its knob is does not need to be decoded; the previous version stacked all of
-         * them in one column beside the picture, which made a legend instead of a map.
+         * No knob NAME is printed. The four knobs below this band are drawn as CUT, RES,
+         * SHAPE, AMOUNT with no encoder numbers, because the position is the name. The
+         * same holds up here: the value in the top-right corner belongs to the top-right
+         * knob. Printing "SEL" over the SELECT knob's own corner adds nothing.
          *
-         * A source draws only what it HAS, and the empty space is the message: SMPL has
-         * one knob, so it draws one label and the bottom row stays blank, which says
-         * there is nothing else to turn.
+         * The values are printed over the picture rather than beside it, and the cost is
+         * one clear rectangle of waveform per label. The player asked for this after
+         * seeing the side-by-side version: a full-width picture with three small labels
+         * on it reads better than a narrow picture with a clean margin beside it.
          *
-         * The picture keeps the left side at MAT_W. It is narrower than the 176 px it
-         * used to have, and that is the real cost of putting the labels where the knobs
-         * are rather than listing them beside the band. */
+         * Drawn picture first, text second, so a label always wins. No boxes behind the
+         * text -- a box is a third colour in a band that only has two. */
+        const int32_t ytop = MAT_ROW_TOP;
+        const int32_t ybot = MAT_ROW_BOT;
+
         if (!smp_count && src != SRC_SYNTH) {
-            cv_text(4, 46, &FONT_XS, "NO SAMPLES", sk.ink);
+            cv_text(MAT_X0 + 2, 46, &FONT_XS, "NO SAMPLES", sk.ink);
         } else if (src == SRC_SYNTH) {
-            src_shape(&sk, 4, MAT_PAD, MAT_W, MAT_WAVE);
+            src_shape(&sk, MAT_X0, MAT_PAD, MAT_W, MAT_WAVE);
         } else if (src == SRC_GRAN) {
             /* the voice the cloud is most likely to be heard from: the newest one. With
              * several keys down the picture shows one voice's cloud, and the newest is
@@ -1447,56 +1466,66 @@ void app_frame(void)
                     gr = &dsp.v[vi].gr;
                 }
             }
-            src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, MAT_W, MAT_WAVE, gr);
-            cv_text(6, MAT_PAD + 1, &FONT_XS,
-                    smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+            src_grain_map(&sk, &smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE, gr);
         } else {
-            env_line(&smp[smp_i], 4, MAT_PAD, MAT_W, MAT_WAVE, 0, smp[smp_i].len,
+            env_line(&smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE, 0, smp[smp_i].len,
                      dim(sk.ink, 2, 5));
-            cv_text(6, MAT_PAD + 1, &FONT_XS,
-                    smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
         }
+        if (src != SRC_SYNTH && smp_count)
+            cv_text(MAT_X0 + 2, MAT_PAD + 1, &FONT_XS,
+                    smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", dim(sk.ink_hi, 3, 5));
 
-        /* ── SELECT, top right ──
-         * The same knob in every source: which thing is loaded. */
-        cv_text(MAT_LAB_R - 6, MAT_ROW_TOP, &FONT_XS, "SEL", sk.ink);
+        /* ── the three values, in their knobs' corners ── */
+
+        /* SELECT: top right. Bank or slot depending on the source, which is the same
+         * question either way -- which material is loaded. */
         if (src == SRC_SYNTH) {
             bl = 0;
-            b[bl++] = 'B'; b[bl++] = 'K'; b[bl++] = ' ';
             b[bl++] = (char)('0' + (bank_i + 1) % 10);
             b[bl++] = '/';
             b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
             b[bl] = 0;
-            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 15, &FONT_XS, b, sk.ink_hi);
+            cv_text(MAT_LAB_R - 7 * bl, ytop, &FONT_XS, b, sk.ink_hi);
         } else if (smp_count) {
             bl = 0;
-            b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'T'; b[bl++] = ' ';
             b[bl++] = (char)('0' + (smp_i + 1) % 10);
             b[bl++] = '/';
             b[bl++] = (char)('0' + (smp_count % 10));
             b[bl] = 0;
-            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 15, &FONT_XS, b, sk.ink_hi);
+            cv_text(MAT_LAB_R - 7 * bl, ytop, &FONT_XS, b, sk.ink_hi);
         }
-        if (src == SRC_SYNTH)
-            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink);
 
-        /* ── the bottom row: PRESET left, ALGO right, where those two knobs are ── */
+        /* PRESET: bottom left, GRAN only. SPRAY is the only thing on this knob. */
+        if (src == SRC_GRAN) {
+            char *v = pct(k_spray);
+            int32_t n = 0;
+            while (v[n])
+                n++;
+            cv_text(MAT_LAB_L, ybot, &FONT_XS, v, sk.ink_hi);
+            cv_text(MAT_LAB_L + 7 * n + 4, ybot, &FONT_XS, "SPRAY", dim(sk.ink, 3, 5));
+        }
+
+        /* ALGO: bottom right. MORPH in SYNTH (and dead in SMPL, so not drawn), GRAIN
+         * SIZE in GRAN. */
         if (src == SRC_SYNTH) {
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT, &FONT_XS, "ALGO", sk.ink);
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 15, &FONT_XS, "MORPH", sk.ink);
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 30, &FONT_XS, pct(k_morph), sk.ink_hi);
+            char *v = pct(k_morph);
+            bl = 0;
+            while (v[bl])
+                bl++;
+            cv_text(MAT_LAB_R - 7 * bl, ybot, &FONT_XS, v, sk.ink_hi);
         } else if (src == SRC_GRAN) {
-            cv_text(MAT_LAB_L, MAT_ROW_BOT, &FONT_XS, "PRESET", sk.ink);
-            cv_text(MAT_LAB_L, MAT_ROW_BOT + 15, &FONT_XS, "SPRAY", sk.ink);
-            cv_text(MAT_LAB_L, MAT_ROW_BOT + 30, &FONT_XS, pct(k_spray), sk.ink_hi);
-
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT, &FONT_XS, "ALGO", sk.ink);
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 15, &FONT_XS, "SIZE", sk.ink);
-            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 30, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
+            char *v = sel_time(k_grain, 3);
+            bl = 0;
+            while (v[bl])
+                bl++;
+            cv_text(MAT_LAB_R - 7 * bl, ybot, &FONT_XS, v, sk.ink_hi);
         }
+
         if (env_page)
-            cv_text(4, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
+            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
     }
+    cv_blit(0, SCOPE_H);
+
     cv_blit(0, SCOPE_H);
 
     cv_blit(0, SCOPE_H);
@@ -1610,7 +1639,7 @@ int app_expect(const char *what, int *got)
                 if (dsp.v[vi].active && dsp.v[vi].age == newest)
                     for (int32_t q = 0; q < (int32_t)WV_GRAINS; q++)
                         if (dsp.v[vi].gr.g[q].on) {
-                            *got = (int)((float)176.0f * dsp.v[vi].gr.g[q].pos
+                            *got = (int)((float)MAT_W * dsp.v[vi].gr.g[q].pos
                                          / (float)smp[smp_i].len);
                             break;
                         }
@@ -1631,7 +1660,7 @@ int app_expect(const char *what, int *got)
                     const wv_grains *g = &dsp.v[vi].gr;
                     float g1 = g->g[0].on ? g->g[0].dt : g->g[1].dt;
                     if (g1 > 0.0f)
-                        *got = (int)((1.0f / g1) * g->rate / ((float)smp[smp_i].len / 176.0f));
+                        *got = (int)((1.0f / g1) * g->rate / ((float)smp[smp_i].len / (float)MAT_W));
                 }
         return 1;
     }
