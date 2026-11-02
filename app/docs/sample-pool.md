@@ -53,9 +53,18 @@ the file is a drone, not a voice — worth knowing before it is on the instrumen
         --slot "VOX:/abs/path/vox_11025.wav:R11025/50"
 
 `NAME:path:R<rate>/<root>` — the rate must be one the reader honours, the root is
-the MIDI note the material actually sounds at. The packer normalises gain per slot
-(it printed `gain 0.89` here) and refuses to write a pool that overruns the region,
-with the overshoot in bytes.
+the MIDI note the material actually sounds at. The packer normalises every slot to
+-1 dBFS and refuses to write a pool that overruns the region, with the overshoot in
+bytes.
+
+`/G<n>` is a listening correction on top of that normalisation, per slot, because
+banks and samples have different crest factors (wv_sample.h). It is written to the
+entry's gain field and applied by the reader at playback. What is **not** written
+there is the normalisation itself: the samples already carry it, and the reader
+multiplies by that field again, so storing it would normalise twice. A quiet source
+is where that shows — a pad peaking at 0.162 got a 5.51x field on top of 0.89-peak
+samples and came out 4.9x over full scale, which the bus limiter turned into a
+soft-clipped wall.
 
 `make_demo_pool.py` only writes when the file is missing, so a packed pool survives
 `build.py` runs. Delete `app/build/gen/samples.bin` to get the demo pool back.

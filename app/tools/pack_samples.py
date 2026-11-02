@@ -227,7 +227,14 @@ def parse_slot(spec, limit_peak=True):
         fade = min(64, len(y) // 4)
         for i in range(fade):
             y[len(y) - fade + i] *= 1.0 - (i + 1.0) / fade
-    return name, y, rate, root, k * gain
+    # `k` has already been applied to the samples above, so it must NOT also be
+    # written to the gain field: the reader multiplies by that field at playback
+    # (wv_sample.c: v * gain / 256), and writing k there normalises twice. Measured
+    # on a pad whose peak was 0.162: k = 5.51, so the reader emitted 0.891 * 5.51 =
+    # 4.91 -- 4.9x over full scale, and the bus limiter turned the whole thing into
+    # a soft-clipped wall. A loud source hides it (k ~ 0.89 is -1 dB) which is why
+    # the demo pool, whose gain field is a flat 256, never showed it.
+    return name, y, rate, root, gain
 
 
 def main():
