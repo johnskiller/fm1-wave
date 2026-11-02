@@ -143,8 +143,37 @@ each canvas is a fixed-size pool and the bands are different heights):
 ```
 
 **Row A** is `CUT RES SHAPE AMOUNT`, or `ATTACK DECAY SUSTAIN RELEASE` on the ENV
-page. **Row B** is the encoder whose meaning follows the source (`MORPH`, or
-`GRAIN SIZE` in GRAN), the `SOURCE` selector, and the bank/slot title.
+page. **Row B** is the three encoder positions, each cell where its knob is:
+
+```
+  cell 1  EN_PRESET   BANK (SYNTH) / SLOT (SMPL, GRAN)   + index bar
+  cell 2  EN_SELECT   SPRAY in GRAN; empty otherwise
+  cell 3  EN_ALGO     MORPH (SYNTH, SMPL) / GRAIN SIZE (GRAN)
+```
+
+The physical knob order is the screen's order, which is the rule this panel has kept
+since the first layout:
+
+```
+MASTER     SELECT        (upper pair, screen's left)
+PRESETS    ALGORITHM     (lower pair)
+```
+
+`MASTER` is a pot, not an encoder -- `plat_master()` returns 0..4096 and it reaches the
+render as the gain, so no cell is spent on it. BANK and MORPH were the other way round
+in the first two-row layout, which put BANK on the side ALGORITHM is not; the code
+cannot tell (the platform records matrix ids, ALGORITHM 1 and PRESETS 6, not
+left/right), so the order comes from the panel in front of the player.
+
+Cell 2 used to hold a SOURCE selector. That was the strip's icon written out in three
+more words -- the icon names the source, and the ground and ink say it twice more --
+so it cost a cell that GRAN could use. SPRAY moved there from the SOURCE cell. In
+SYNTH and SMPL the cell is empty, including on the ENV page: the strip already says
+`ENV PAGE`, and saying it in both places drew the identical string twice.
+
+**The strip** (200..240) is the source icon in the left corner and, on the right, only
+what the panel cannot show any other way: `ENV PAGE` while the page is up, or
+`NO SAMPLES` if the sample sources have no material.
 
 Why two rows: seven encoders across 240 px is 34 px each, and `AMOUNT` at FONT_XS
 measures 43 px — measured on the host by scanning the label rows for ink runs, it ran

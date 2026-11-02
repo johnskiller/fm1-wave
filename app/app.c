@@ -376,10 +376,6 @@ static void input(void)
 
 static const char *const SHAPE_NAME[WV_SHAPE_N] = { "SOFT", "HARD", "FOLD", "SINE" };
 
-/* The three sources, named the way the screen names them. The order is SRC_*, so a
- * detented readout and an icon strip can both index it directly. */
-static const char *const SRC_NAME[3] = { "SYN", "SMP", "GRN" };
-
 static void num(char *b, int32_t v)
 {
     char t[8];
@@ -850,84 +846,97 @@ void app_frame(void)
 
     cv_begin(240, 76, sk.bg);
     {
-        /* row B, cell 1: the knob whose meaning follows the source. GRAIN SIZE in
-         * GRAN, MORPH otherwise -- MORPH is read only by the table path (see
-         * wv_dsp.c), so in GRAN it is the one encoder that does nothing audible and
-         * the one that can be lent out. Its label carries the source's name so the
-         * lending is visible rather than something to remember. */
-        int32_t k;
-        if (src == SRC_GRAN) {
-            knob(4, 6, 72, "GRAIN SIZE", sel_time(k_grain, 3), k_grain, 1);
-        } else {
-            knob(4, 6, 72, "MORPH", pct(k_morph), k_morph, 0);
-        }
+        /* ROW B, in the order the knobs sit on the panel. Each cell is where its knob
+         * is, which is the rule this panel has kept since the first layout:
+         *
+         *   cell 1  EN_PRESET   BANK (SYNTH) / SLOT (SMPL, GRAN)
+         *   cell 2  EN_SELECT   SPRAY in GRAN; nothing to set otherwise
+         *   cell 3  EN_ALGO     MORPH (SYNTH, SMPL) / GRAIN SIZE (GRAN)
+         *
+         * BANK and MORPH used to be the other way round, which put BANK on the side
+         * ALGORITHM is not. The platform does not record a knob's left/right, only its
+         * matrix id (ALGORITHM 1, PRESETS 6), so this order comes from the panel in
+         * front of the player, not from the code. Swapping the two cell bodies back is
+         * the whole revert.
+         *
+         * Cell 2 held a SOURCE selector until now. That was the strip's icon said again
+         * in three more words -- the icon names the source, the ground and the ink say
+         * it twice more -- and it cost a cell that GRAN can use. SPRAY moved here from
+         * the SOURCE cell: it is the last GRAN-only control, and an empty cell between
+         * two knobs is honest about there being nothing to set, which is exactly what
+         * SYNTH and SMPL are.
+         */
 
-        /* row B, cell 2: SOURCE. Not an encoder -- B_SEL owns it (three states on a
-         * two-state lamp, which is why the screen carries it) -- so this cell is
-         * drawn as a selector: the three names, the live one bright and underlined.
-         * That is the one place on this panel where the screen is the control's only
-         * readout, and drawing it as text rather than as a bar says so. */
-        cv_text(84, 6, &FONT_XS, "SOURCE", sk.ink);
+        /* cell 1: BANK (table) or SLOT (sample). A number and a name, because "3/8"
+         * says where you are and "SAW SQR" says what it is. */
         {
-            int32_t x = 84;
-            for (k = 0; k < 3; k++) {
-                int32_t on = (k == (int32_t)src);
-                int32_t w = 3 * 6 + (k == 1 ? 2 : 0);
-                cv_text(x, 30, &FONT_XS, SRC_NAME[k], on ? sk.ink_hi : sk.track);
-                if (on)
-                    cv_rect(x, 41, w, 2, sk.ink_hi);
-                x += 24;
+            char b[12];
+            int32_t bl = 0;
+            b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
+            b[bl++] = (char)('0' + (bank_i + 1) % 10);
+            b[bl++] = '/';
+            b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
+            b[bl] = 0;
+            if (src != SRC_SYNTH) {
+                b[0] = 'S'; b[1] = 'L'; b[2] = 'O'; b[3] = 'T';
+                bl = 5;
+                b[bl++] = (char)('0' + (smp_count ? (smp_i + 1) % 10 : 0));
+                b[bl++] = '/';
+                b[bl++] = (char)('0' + (smp_count % 10));
+                b[bl] = 0;
+            }
+            cv_text(4, 6, &FONT_XS, b, sk.ink);
+            if (src == SRC_SYNTH)
+                cv_text(4, 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
+            else if (!smp_count)
+                cv_text(4, 30, &FONT_XS, "NONE", sk.track);
+            else
+                cv_text(4, 30, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+            /* the bar is the bank/slot index, so the cell reads like the knobs above */
+            cv_rect(4, 40, 72, 8, sk.track);
+            {
+                int32_t n = (src == SRC_SYNTH) ? (int32_t)bank_i
+                            : (smp_count ? (int32_t)smp_i : 0);
+                int32_t mx = (src == SRC_SYNTH) ? (int32_t)WV_BANK_COUNT - 1
+                            : (smp_count ? (int32_t)smp_count - 1 : 1);
+                int32_t fw;
+                if (mx < 1)
+                    mx = 1;
+                fw = (n + 1) * 72 / (mx + 1);
+                if (fw > 72) fw = 72;
+                if (fw < 1) fw = 1;
+                cv_rect(4, 40, fw, 8, sk.ink_hi);
             }
         }
 
-        /* row B, cell 3: the title -- what this box currently is, in the one string
-         * that answers "what am I playing". Bank name, slot name, or that the samples
-         * are missing, which is the only failure this build can be in at boot. */
-        /* Named, not just printed: a bare "SAW SQR" sitting one cell right of SOURCE
-         * reads as SOURCE's value. The label is the source's own word for it -- BANK
-         * for a table, SLOT for a sample -- and the strip below carries the index
-         * ("BANK 3/8"), so the two are the same fact at two precisions. */
-        cv_text(166, 6, &FONT_XS, env_page ? "ENV PAGE" : (src == SRC_SYNTH ? "BANK" : "SLOT"),
-                sk.ink);
-        if (src == SRC_SYNTH)
-            cv_text(166, 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
-        else if (!smp_count)
-            cv_text(166, 30, &FONT_XS, "NONE", sk.track);
+        /* cell 2: SPRAY, GRAN only. Empty otherwise, page or not: the strip already
+         * says ENV PAGE, and saying it here as well was the same fact twice on one
+         * screen -- measured, both drew the identical string. An empty cell between
+         * two knobs is honest; a repeated one is noise. */
+        if (src == SRC_GRAN)
+            knob(84, 6, 72, "SPRAY", pct(k_spray), k_spray, 1);
+
+        /* cell 3: MORPH, or GRAIN SIZE when the table path is not sounding */
+        if (src == SRC_GRAN)
+            knob(164, 6, 72, "GRAIN SIZE", sel_time(k_grain, 3), k_grain, 1);
         else
-            cv_text(166, 30, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+            knob(164, 6, 72, "MORPH", pct(k_morph), k_morph, 0);
     }
     cv_blit(0, 124);
 
     /* the mode strip: the source's shape in the corner, and the positions that have
      * no encoder to be drawn next to. B_ENV's page and B_SEL's source both live here
      * because the panel has no spare lamps for either. */
+    /* the mode strip: the source's shape, and what the panel cannot show any other way.
+     * BANK and SLOT used to live here and have moved up into row B, where the encoder
+     * that changes them is. What is left here is the source icon (the only thing that
+     * says which engine without being read) and the page marker. */
     cv_begin(240, 40, sk.bg);
     src_icon(&sk);
-    {
-        char b[12];
-        /* bank, right-aligned: "BANK 3/8" rather than a bar, because a bar cannot say
-         * which of eight and the number is the thing worth knowing */
-        int32_t bl = 0, k;
-        b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
-        if (WV_BANK_COUNT > 9u) { b[bl++] = (char)('0' + (bank_i + 1) / 10 % 10); }
-        b[bl++] = (char)('0' + (bank_i + 1) % 10);
-        b[bl++] = '/';
-        b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
-        b[bl] = 0;
-        cv_text(70, 14, &FONT_XS, b, sk.ink);
-
-        if (src != SRC_SYNTH && smp_count) {
-            /* slot index, the same shape of information for the sample sources */
-            bl = 0;
-            b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'O'; b[bl++] = 'T'; b[bl++] = ' ';
-            b[bl++] = (char)('0' + (smp_i + 1) % 10);
-            b[bl++] = '/';
-            b[bl++] = (char)('0' + (smp_count % 10));
-            b[bl] = 0;
-            cv_text(150, 14, &FONT_XS, b, sk.ink);
-        }
-        (void)k;
-    }
+    if (env_page)
+        cv_text(112, 14, &FONT_XS, "ENV PAGE", sk.ink_hi);
+    else if (!smp_count && src != SRC_SYNTH)
+        cv_text(112, 14, &FONT_XS, "NO SAMPLES", sk.ink);
     cv_blit(0, 200);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
