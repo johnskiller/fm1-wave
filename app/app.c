@@ -1276,6 +1276,10 @@ static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least on
 
 static uint32_t dbg_mhz;            /* 0 = not measured */
 static uint8_t  dbg_mhz_ok = 1;     /* 0 = the reading is not a known clock */
+/* Why row 3 is blank, when it is: the measurement has four ways to end and they mean
+ * different things on the device. Shown as a short tag so a single flash says which. */
+enum { DBG_ST_NONE, DBG_ST_OK, DBG_ST_NOMOVE, DBG_ST_NOTICK, DBG_ST_ODD };
+static uint8_t  dbg_state;
 static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least once */
 
 #define DBG_SPAN_US 2000u           /* long enough that one cycle of error is 0.05% */
@@ -1286,8 +1290,24 @@ static void dbg_measure_clock(void)
     uint32_t c0, c1, t0, t1, n;
     float m;
 
-    if (!fm1_perf_cycles_run())
-        return;                     /* the counter does not move: nothing to measure with */
+    /* The counter needs enabling, and fm1_perf.h never says so: it only reads. JieLi's
+     * own cpu_effic_init (SDK cpu/wl82/debug.c) does corex2(0)->DBG_CON |= 0x7 before it
+     * reads the same registers ("enable if_inv_en of_inv_en ex_inv_en"), and without that
+     * the counters stay at zero -- which is exactly what the device showed: an empty row.
+     * The platform exposes the same write as fm1_perf_stalls_enable().
+     *
+     * DBG_CON bit 0-2 only gate the three stall counters; JieLi's debug.c uses bits 17-18
+     * for its message ring, which this does not touch. The upstream comment warns the
+     * bits "may also arm fault exceptions", which is why the enable is paired with the
+     * run check below: if arming them stopped the core, the device would restart and
+     * this code would never run again -- and a debug readout that can hang the
+     * instrument is not worth having, so it is the first thing checked after boot. */
+    fm1_perf_stalls_enable(1);
+
+    if (!fm1_perf_cycles_run()) {
+        dbg_state = DBG_ST_NOMOVE;  /* enabled but still not counting */
+        return;
+    }
     c0 = fm1_perf_cycles();
     t0 = plat_ticks24();
     do {
@@ -1296,22 +1316,26 @@ static void dbg_measure_clock(void)
     c1 = fm1_perf_cycles();
 
     /* ticks are 1/24 us:  MHz = cycles / us */
-    if (t1 == t0)
+    if (t1 == t0) {
+        dbg_state = DBG_ST_NOTICK;
         return;
+    }
     m = (float)(c1 - c0) * 24.0f / (float)(t1 - t0);
 
     for (n = 0; n < sizeof MPU_CLKS / sizeof MPU_CLKS[0]; n++) {
         float d = m - (float)MPU_CLKS[n];
         if (d > -20.0f && d < 20.0f) {
             dbg_mhz = MPU_CLKS[n];
+            dbg_state = DBG_ST_OK;
             return;
         }
     }
-    /* Not a known clock. Show it marked rather than hide it: on the device this means
-     * the counter's unit is not what fm1_perf.h says it is, and the number is the only
-     * evidence of that. */
+    /* Counting, but not a clock this chip runs at: show the number marked, because on
+     * the device that means the counter's unit is not 1 per core clock and the figure is
+     * the only evidence of it. */
     dbg_mhz = (uint32_t)(m + 0.5f);
     dbg_mhz_ok = 0;
+    dbg_state = DBG_ST_ODD;
 #endif
 }
 
@@ -1362,15 +1386,27 @@ static void dbg_draw(const src_skin_t *k)
     *q = 0;
     cv_text(1, 16, &FONT_T, r, k->ink_hi);
 
-    /* row 3: "360M" */
+    /* row 3: the clock, or why there is none. "ck?" would be a mystery; "ckX" with the
+     * tag is a diagnosis, and one flash of the firmware should be enough to settle it.
+     *   (nothing)  the measurement did not run at all
+     *   360M       the counter counts and the reading is a clock this chip runs at
+     *   360M?      it counts, but the figure is not a known clock
+     *   ckNo       the counter was enabled and still does not move
+     *   ckNt       the 24 MHz tick did not advance across the span */
+    q = r;
     if (dbg_mhz) {
-        q = r;
         num(t, (int32_t)dbg_mhz);
         for (const char *p = t; *p; )
             *q++ = *p++;
         *q++ = 'M';
         if (!dbg_mhz_ok)
             *q++ = '?';
+    } else if (dbg_state == DBG_ST_NOMOVE) {
+        *q++ = 'c'; *q++ = 'k'; *q++ = 'N'; *q++ = 'o';
+    } else if (dbg_state == DBG_ST_NOTICK) {
+        *q++ = 'c'; *q++ = 'k'; *q++ = 'N'; *q++ = 't';
+    }
+    if (q != r) {
         *q = 0;
         cv_text(1, 28, &FONT_T, r, k->ink_hi);
     }
