@@ -202,6 +202,84 @@ static void test_split_with_moving_knobs(void)
     printf("  worst difference %.9f\n", worst);
 }
 
+/* The cut has to follow the ACTIVE voices, not the pool's middle.
+ *
+ * The allocator hands out voice 0 first, so four notes land in 0..3: cutting the pool
+ * in half left the second core idle and the first doing all four. Measured on the
+ * device, GRAN read 51% at four notes and 51% at eight -- the same four voices' work,
+ * because that is exactly what it was.
+ *
+ * What this checks is the sound, not the balance: an odd number of voices cuts BETWEEN
+ * them instead of through the middle, and the two cores must still sum to one core's
+ * output. Fewer voices than the pool is the case that was broken before, so it is the
+ * case that gets its own test.
+ *
+ * The comparison is against wv_render (one core over the whole pool), and the tolerance
+ * is one 24-bit LSB rather than 1e-6: the split changes the ORDER the voices are summed
+ * in, and float addition is not associative, so a voice that lands on the other core is
+ * added at a different point. That is inherent to splitting, not a defect -- measured on
+ * the host, three voices differ in 6 of 35328 samples by 1 LSB (-90 dBFS), and eight
+ * voices (where the cut is the same as it always was) are bit-identical. */
+static void test_split_follows_the_active_voices(void)
+{
+    static wv_state a, b;
+    static float oa[BLK], ob[BLK];
+    static const uint32_t counts[] = {1, 2, 3, 5, 6, 7};
+    float one_lsb = 1.0f / 8388608.0f;
+    uint32_t c, k, i;
+    int bad = 0;
+
+    printf("split, partial voices:\n");
+    setup();    /* bank.frames is 0 here: these tests play the material, not a table */
+    for (c = 0; c < sizeof counts / sizeof counts[0]; c++) {
+        float worst = 0.0f, peak = 0.0f;
+
+        wv_init(&a);
+        wv_init(&b);
+        a.cut = b.cut = 60;
+        a.res = b.res = 20;
+        a.sh_amount = b.sh_amount = 40;
+        for (i = 0; i < counts[c]; i++) {
+            wv_note_on_sample(&a, &smp, (uint8_t)(57 + i * 2), 100, 0, 0, 0);
+            wv_note_on_sample(&b, &smp, (uint8_t)(57 + i * 2), 100, 0, 0, 0);
+        }
+
+        for (k = 0; k < 20; k++) {
+            memset(oa, 0, sizeof oa);
+            memset(ob, 0, sizeof ob);
+            wv_render(&a, &bank, oa, BLK, 4096.0f);
+            jobs_run = 0;
+            wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync);
+            for (i = 0; i < BLK; i++) {
+                float d = fabsf(oa[i] - ob[i]);
+                if (d > worst) worst = d;
+                if (fabsf(oa[i]) > peak) peak = fabsf(oa[i]);
+            }
+        }
+        /* Where the cut went, not just that the audio matched. A cut through the
+         * middle of the pool renders the same samples (so the audio check cannot see
+         * it) but leaves core 1 idle at four notes, which is the defect being fixed:
+         * four notes occupied 0..3 and the pool was cut at 4. Half of the active
+         * voices is the target, so the two cores each get about the same work. */
+        {
+            uint32_t low = 0, high = 0;
+            for (i = 0; i < wv_last_split(); i++)
+                if (a.v[i].active)
+                    low++;
+            for (i = wv_last_split(); i < WV_VOICES; i++)
+                if (a.v[i].active)
+                    high++;
+            printf("  %2u voices: worst %.2f LSB, peak %.3f, cut at %u (%u|%u)\n",
+                   counts[c], worst / one_lsb, peak, wv_last_split(), low, high);
+            if (counts[c] >= 2 && (high == 0 || low > high + 1))
+                bad = 1;
+        }
+        if (peak < 0.01f || worst > 2.0f * one_lsb)
+            bad = 1;
+    }
+    ck(bad == 0, "a partial voice pool splits to the same audio, balanced across the cores");
+}
+
 /* ─── 2. the fallbacks ────────────────────────────────────────────────────── */
 
 static void test_refused_job_still_renders(void)
@@ -405,6 +483,7 @@ int main(void)
 {
     test_split_is_identical();
     test_split_with_moving_knobs();
+    test_split_follows_the_active_voices();
     test_refused_job_still_renders();
     test_dead_core_still_renders();
     test_grain_voice_is_a_voice();

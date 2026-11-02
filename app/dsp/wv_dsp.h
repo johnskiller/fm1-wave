@@ -217,6 +217,7 @@ void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
  * pool is cut in half, both halves run, and the bus limiter lands after both.
  * Falls back to one core whenever the second one will not take the job, so a unit
  * that cannot run it loses throughput and nothing else. */
+uint32_t wv_last_split(void);
 void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
                      int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
                      int (*wait)(void), void (*sync)(void));

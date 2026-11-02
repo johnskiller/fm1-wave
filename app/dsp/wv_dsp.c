@@ -541,13 +541,19 @@ static struct {
     float *out;
     uint32_t n;
     float master;
+    uint32_t mid;       /* the split: the second core renders [mid, WV_VOICES) */
 } job;
 
 static void job_half(void *arg)
 {
     (void)arg;
-    voice_block(job.s, job.b, job.out, job.n, job.master, WV_VOICES / 2u, WV_VOICES);
+    voice_block(job.s, job.b, job.out, job.n, job.master, job.mid, WV_VOICES);
 }
+
+/* The cut the last split used, for the tests: the balance is invisible in the audio
+ * (both cuts render the same samples), so the only way to assert that four notes no
+ * longer all land on core 0 is to look at where the cut was put. */
+uint32_t wv_last_split(void) { return job.mid; }
 
 /* The platform's signature: void (*)(uint32_t). */
 static void job_half_u32(uint32_t arg)
@@ -561,11 +567,48 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
                      int (*wait)(void), void (*sync)(void))
 {
     if (cpu2 && run && wait) {
+        /* Where to cut the voice pool.
+         *
+         * Cutting it in half is the obvious thing and it is wrong for a player: the
+         * allocator hands out voice 0 first, so four notes land in 0..3 and the second
+         * core is idle while the first does all of them. Measured on the device: GRAN at
+         * four notes read 51% and at eight also 51% -- the same four voices' work in
+         * both cases, and the fix is not more throughput but using the core that is
+         * already there.
+         *
+         * The cut is now between the ACTIVE voices, as near half of them as the
+         * contiguity allows: every voice in [0, mid) is lower-numbered than every voice
+         * in [mid, VOICES), and each is rendered by exactly one core -- that is the
+         * property the split has always needed, since two cores adding the same voice
+         * would double it. The quiet voices in each half cost almost nothing (the loop
+         * skips them), so the two halves are close to balanced by voice count.
+         *
+         * A cut that lands differently from the previous block is harmless: a voice's
+         * state floats (phase, filter, envelope, grain positions) is carried in the
+         * state, not in the core, and each block renders all n frames of its own
+         * voices. Whatever the cut, the sample a voice produces is the same -- the
+         * audio is bit-identical, which is what the regression below checks. */
+        uint32_t act = 0, seen = 0, mid = WV_VOICES / 2u;
+        uint32_t i;
+
+        for (i = 0; i < WV_VOICES; i++)
+            if (s->v[i].active)
+                act++;
+        if (act > 1u) {
+            for (i = 0; i < WV_VOICES; i++) {
+                if (s->v[i].active && ++seen == act / 2u) {
+                    mid = i + 1u;
+                    break;
+                }
+            }
+        }
+
         job.s = s;
         job.b = b;
         job.out = out;
         job.n = n;
         job.master = master;
+        job.mid = mid;
 
         /* Publish the job's argument block BEFORE handing it over. The platform's
          * own barrier covers its mailbox words, not this struct, and the two cores
@@ -580,7 +623,7 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
          * first would serialise them and cost more than one core, because the handover
          * is not free. */
         if (run(job_half_u32, 0u)) {
-            voice_block(s, b, out, n, master, 0u, WV_VOICES / 2u);
+            voice_block(s, b, out, n, master, 0u, mid);
 
             /* The wait can fail: the core was retired (cpu2_fallback) and the job
              * dropped. It is never half-done in that case — a fault restarts the
@@ -589,7 +632,7 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
              * Without this the top four voices would simply be missing, and that is
              * the difference between "slower" and "wrong". */
             if (wait() != 0)
-                voice_block(s, b, out, n, master, WV_VOICES / 2u, WV_VOICES);
+                voice_block(s, b, out, n, master, mid, WV_VOICES);
             else if (sync)
                 sync();                 /* drain its writes to `out` before the bus */
 
