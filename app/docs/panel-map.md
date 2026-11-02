@@ -244,6 +244,38 @@ The ring is `int16` (units of full scale) rather than `int8`: a fixed scale has 
 past 0 dBFS, and eight voices measure +2.4 dBFS. 768 samples of int16 is 1536 B of the
 98304 available.
 
+### The scope graticule
+
+The band is a scope screen, not a plot, so it has a grid: five vertical lines (every
+20 px) and the horizontal dB markers of the linear scale. The dB lines are NOT equally
+spaced, and that is the point, not a bug: the scale is linear in amplitude, so 0 dBFS
+is the band edge and the lines fall at
+
+```
+0 dB    row 1   (the band edge)
+-10 dB  row 29  (28 px in)
+-20 dB  row 37
+-30 dB  row 40
+-40 dB  row 41
+-50 dB  row 41  (coincides with -40: 41.6 and 41.9 both round to 41)
+```
+
+Denser near the centre, sparser at the top -- the signature of a dB scale. The bottom
+two markers fall on the same row and draw as one, which is honest: on a 41 px half-band
+a dB scale resolves six markers down to five visible lines, and a scope that cannot
+distinguish -40 from -50 at this depth should not pretend to. The measured rows (1, 29,
+37, 40, 41 above the centre at 42) match this exactly. The only
+label is "+0" at the right edge, in the top row: the 0 dBFS line is the reference a
+loud chord visibly crosses, and the rest is read off the spacing, because five words
+of six px in a 2 px gap would not read as a scale but as noise.
+
+The grid is a fixed neutral grey (`RGB(62,64,68)` / dim `RGB(36,38,42)`), not a skin
+colour: it must sit under all three skins, and a graticule tinted by the source would
+be content, not the glass.
+
+The trace runs over it (drawn after), which is how a real scope looks: the grid is
+behind the signal.
+
 ### The material band
 
 The table's own shape, 176 x 100 in SYNTH, with BANK and MORPH printed in the right
@@ -261,15 +293,13 @@ has a design, and the waveform shape GRAN would get is already its icon.
 
 ## Source indication
 
-## Source indication
-
 SOURCE has **three** states and `B_SEL`'s lamp has **two**, so the screen says it. The
 whole panel is coloured by source and one icon is drawn:
 
 | source | ground | ink | icon |
 |---|---|---|---|
 | SYNTH | black | the palette's own amber (theme untouched) | a saw, two cycles |
-| SMPL | `RGB(52,34,6)` | amber `RGB(232,136,30)` / `255,184,70` | a sine with a decay |
+| SMPL | `RGB(13,41,22)` | green `RGB(80,220,120)` / `150,255,175` | a sine with a decay |
 | GRAN | `RGB(8,38,52)` | cyan `RGB(60,180,235)` / `150,225,255` | a sine under scattered dots |
 
 Two earlier versions were wrong and are recorded here because the reason matters more

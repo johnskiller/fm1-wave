@@ -549,13 +549,17 @@ static src_skin_t src_skin(void)
     src_skin_t k;
 
     if (src == SRC_SMPL) {
-        /* inverted: the two colours SYNTH uses, roles swapped. The ground is the amber
-         * step pulled down until white sits on it -- the palette step itself is meant
-         * as ink on black, and as a ground it would swallow the labels. */
-        k.bg     = RGB(52, 34, 6);
-        k.track  = RGB(30, 20, 4);
-        k.ink    = RGB(232, 136, 30);
-        k.ink_hi = RGB(255, 184, 70);
+        /* green: the three sources read as the three scope colours of the bench,
+         * amber / green / blue-white, and that is what they used to be here before the
+         * ground went inverted. The hue is the platform's own GREEN palette (gfx.c:
+         * 80,220,120 / 150,255,175), so it matches a THEME=GREEN screen instead of
+         * fighting it. SMPL is the odd one out -- SYNTH keeps the wearer's theme and
+         * GRAN its own cyan -- and the sample is the one that used to be "the other
+         * amber". */
+        k.bg     = RGB(13, 41, 22);
+        k.track  = RGB(8, 26, 13);
+        k.ink    = RGB(80, 220, 120);
+        k.ink_hi = RGB(150, 255, 175);
         k.acc    = C_WHITE;
     } else if (src == SRC_GRAN) {
         /* cyan as the ground, and the ink stays inside the hue: a cyan curve on dim
@@ -736,6 +740,14 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * what the instrument produces -- velocity, envelope, polyphony, shaper, filter. */
 #define SCOPE_FS ((float)SCOPE_HALF)   /* full scale reaches the band edge */
 
+/* the graticule: a scope is not a plot, it has a screen. The horizontal lines are the
+ * dB markers of the linear scale (full scale = 0 dBFS, a line every 10 dB to -50),
+ * the vertical ones are quarters of the window. They are a neutral grey, not a skin
+ * colour, because they must sit under all three skins -- a graticule tinted by the
+ * source would be content, and a graticule is the glass. */
+#define GRID_DIM  RGB(36, 38, 42)
+#define GRID     RGB(62, 64, 68)
+
 /* amplitude as a fraction of full scale (-1..1) to a distance from the centre line */
 static float fs_px(float a)
 {
@@ -888,6 +900,40 @@ void app_frame(void)
          * point on it. */
         {
             const float mid = (float)SCOPE_MID;
+
+            /* ── the graticule ──────────────────────────────────────────────
+             *
+             * Drawn before the trace, so the waveform runs over it: a scope's grid is
+             * the glass, not the signal.
+             *
+             * The scale is linear in amplitude, so the dB lines are NOT equally
+             * spaced: the distance from 0 to -10 dB is 41 * (1 - 0.316) = 28 px, from
+             * -10 to -20 dB is 41 * (0.316 - 0.1) = 8.9 px, and so on. That is the
+             * signature of a dB scale and it is the point of drawing one: an eye that
+             * has read "half the height" off the screen is being told a dB number
+             * instead, and half the height on this band is -4 dBFS, not -30.
+             *
+             * Labels: "+0" only, at the right edge in the top row. The others would be
+             * "-10", "-20"... -- five words of six px each in a 2 px gap, which is not
+             * readable and not a scope. The 0 line is the reference and the only one
+             * a loud chord visibly crosses; the rest of the scale is read off the
+             * spacing. */
+            {
+                int32_t db, col;
+                for (col = 1; col * 20 < 240; col++)
+                    cv_line(col * 20, 0, col * 20, SCOPE_H - 1, GRID_DIM);
+                for (db = 0; db >= -50; db -= 10) {
+                    /* the y of db on this band, each side of the centre: fm_db2lin
+                     * is the platform's own dB -> linear, the inverse of the scale */
+                    int32_t up = (int32_t)(mid - fs_px(fm_db2lin(db)));
+                    cv_rect(0, up, 240, 1, db == 0 ? GRID : GRID_DIM);
+                    cv_rect(0, (int32_t)(mid + (mid - up)), 240, 1, db == 0 ? GRID : GRID_DIM);
+                }
+                {
+                    char lab[3] = { '+', '0', 0 };
+                    cv_text(240 - 24, 1, &FONT_XS, lab, GRID);
+                }
+            }
 
             /* a centre line, so silence reads as a flat line and not as nothing */
             cv_rect(0, (int32_t)mid, 240, 1, sk.track);
