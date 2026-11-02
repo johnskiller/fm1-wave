@@ -35,6 +35,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 HOST = os.path.join(ROOT, "app", "build", "host", "wave_host")
 
+sys.path.insert(0, HERE)
+from pool_material import skip_unless_demo, describe  # noqa: E402
+
 # the material band on the 240x240 screen: y 84..175, the picture inside it starts at
 # x=4 and is MAT_W (232) wide. The sample name sits at y 90..103, so bars are
 # detected below y=104 -- otherwise a text glyph is counted as a grain.
@@ -107,6 +110,10 @@ def run(script, out, shots):
 def main():
     if not os.path.exists(HOST):
         sys.exit(f"{HOST} is missing: build it with `python3 platform/tools/build.py app --host`")
+    # The expected playhead positions below are the 11.025 kHz demo kit's (63 px of
+    # travel per 300 ms at 1x). Real material of another length parks elsewhere.
+    if skip_unless_demo("test_grainmap"):
+        return 0
 
     out = tempfile.mkdtemp(prefix="fm1grainmap")
 

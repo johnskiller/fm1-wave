@@ -32,6 +32,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 HOST = os.path.join(ROOT, "app", "build", "host", "wave_host")
 
+sys.path.insert(0, HERE)
+from pool_material import skip_unless_demo  # noqa: E402
+
 # key 20 is above the demo kit's chops (they land on 53..56 = keys 0..3), so this is the
 # no-chop fallback -- the path that was hardcoded to slot 0. Testing a chop key would also
 # exercise the bug, but through reslice() rather than through the fallback, and the two are
@@ -116,6 +119,8 @@ wavstop
 def main():
     if not os.path.exists(HOST):
         sys.exit(f"{HOST} is missing: build it with `python3 platform/tools/build.py app --host`")
+    if skip_unless_demo("test_slot"):
+        return 0
 
     out = tempfile.mkdtemp(prefix="fm1slot")
     # one turn of EN_SELECT from the boot slot, and back again
