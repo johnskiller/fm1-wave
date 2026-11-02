@@ -1250,53 +1250,69 @@ static float fs_px(float a)
 static const uint16_t MPU_CLKS[] = { 240, 320, 360, 480 };
 
 static uint32_t dbg_mhz;            /* the reading, MHz: 0 = not measured */
-static uint8_t  dbg_mhz_ok;         /* 1 = it landed on a known clock */
 static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least once */
 
-#define DBG_LOOP 2000u
-#define DBG_CPL  8u                 /* dependent vmul+vadd pairs per iteration */
+/* The clock measurement: the core's own cycle counter against the 24 MHz crystal.
+ *
+ * The first version of this counted a float loop and divided by an assumed 8 cycles an
+ * iteration; on the device it read 129 MHz, which is 1555 / 12 -- the loop is ~22
+ * cycles, not 8, because the FPU's dependent-operation latency dominates. Every
+ * constant in that version was a guess, so it is gone.
+ *
+ * fm1_perf.h exposes the hardware counter (C0_TL_CKCNT, the AC79's corex2 block, which
+ * JieLi's own debug.c reads to compute CPU efficiency): cycles on one side, the 24 MHz
+ * crystal's ticks on the other, no assumption in between. It is marked "not verified on
+ * hardware" upstream, so it is checked first -- a counter that does not move falls back
+ * to nothing rather than to a wrong number.
+ *
+ * On the host there is no such counter and the host's own cycles are not the FM-1's, so
+ * there is no reading at all: the row stays blank. A fabricated figure is worse than an
+ * empty one. */
+#if defined(PLAT_HOST)
+#define DBG_NO_CYCLES 1
+#else
+#include "fm1_perf.h"
+#endif
+
+static uint32_t dbg_mhz;            /* 0 = not measured */
+static uint8_t  dbg_mhz_ok = 1;     /* 0 = the reading is not a known clock */
+static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least once */
+
+#define DBG_SPAN_US 2000u           /* long enough that one cycle of error is 0.05% */
 
 static void dbg_measure_clock(void)
 {
-    uint32_t t0, t1, i, n;
-    float a = 1.0f, b = 1.000001f, m;
+#if !defined(DBG_NO_CYCLES)
+    uint32_t c0, c1, t0, t1, n;
+    float m;
 
+    if (!fm1_perf_cycles_run())
+        return;                     /* the counter does not move: nothing to measure with */
+    c0 = fm1_perf_cycles();
     t0 = plat_ticks24();
-    for (i = 0; i < DBG_LOOP; i++) {
-        a = a * b + 1e-7f;
-        a = a * b + 1e-7f;
-        a = a * b + 1e-7f;
-        a = a * b + 1e-7f;
-    }
-    t1 = plat_ticks24();
-    if (a == 0.0f || t1 == t0)
-        return;                     /* dead code or a stopped counter: no reading */
+    do {
+        t1 = plat_ticks24();
+    } while ((uint32_t)(t1 - t0) < DBG_SPAN_US * PLAT_TICKS_PER_US);
+    c1 = fm1_perf_cycles();
 
-    /* ticks are 1/24 us:  MHz = loops * cycles / ticks * 24 */
-    m = (float)DBG_LOOP * (float)DBG_CPL * 24.0f / (float)(t1 - t0);
+    /* ticks are 1/24 us:  MHz = cycles / us */
+    if (t1 == t0)
+        return;
+    m = (float)(c1 - c0) * 24.0f / (float)(t1 - t0);
 
-    /* Accepted only when it lands on a clock this chip runs at. A reading of 1555 MHz
-     * is not a measurement of the FM-1, it is a measurement of the machine the host
-     * build runs on (and a real reading that misses every candidate means the loop was
-     * not compiled as the cycle count here assumes -- an unrolled or vectorised body
-     * changes cycles-per-iteration). Showing the number anyway would put a plausible
-     * looking figure on screen that is wrong by an unknown factor, which is worse than
-     * an empty row: a debug readout that can lie is a debug readout that misleads. */
     for (n = 0; n < sizeof MPU_CLKS / sizeof MPU_CLKS[0]; n++) {
         float d = m - (float)MPU_CLKS[n];
-        if (d > -30.0f && d < 30.0f) {
+        if (d > -20.0f && d < 20.0f) {
             dbg_mhz = MPU_CLKS[n];
-            dbg_mhz_ok = 1;
             return;
         }
     }
-    /* Not a known clock: show the number anyway, marked. A blank row would say "the
-     * counter did not move" and leave nothing to work with on the first real run; the
-     * figure with a "?" says which way the cycle count is wrong (half of 360 means the
-     * loop is four instructions an iteration, not eight: the core has an FMA). That is
-     * a calibration, and it can only be done on the device. */
+    /* Not a known clock. Show it marked rather than hide it: on the device this means
+     * the counter's unit is not what fm1_perf.h says it is, and the number is the only
+     * evidence of that. */
     dbg_mhz = (uint32_t)(m + 0.5f);
-
+    dbg_mhz_ok = 0;
+#endif
 }
 
 /* The corner. Drawn after the trace, on purpose: an overlay the waveform can hide is an

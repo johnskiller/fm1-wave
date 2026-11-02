@@ -267,10 +267,20 @@ shot grn.png
     # "0% xr0"); counting exact matches measures the font's hinting, not whether the
     # row drew. What is counted is bright pixels -- anything well above the backing box
     # and the graticule, which is what a glyph's core is.
-    for name, y0, y1 in (("row 1", 4, 16), ("row 2", 16, 28), ("row 3", 28, 40)):
+    for name, y0, y1 in (("row 1", 4, 16), ("row 2", 16, 28)):
         n_ink = sum(1 for y in range(y0, y1) for x in range(0, 64)
                     if sum(im.getpixel((x, y))) > 300)
         ck(n_ink > 15, f"debug {name} is drawn", f"{n_ink} px of ink")
+
+    # Row 3 is the clock, and the host has no cycle counter (app.c DBG_NO_CYCLES): the
+    # host's own cycles are not the FM-1's, so there is no reading and the row must stay
+    # EMPTY. Asserting it draws would force the host build to fabricate a figure, which
+    # is the one thing the measurement must not do -- the first version printed "1555M?",
+    # a measurement of the developer's machine. What is checked here is that host and
+    # device differ for a stated reason, not that both show three rows.
+    n_row3 = sum(1 for y in range(28, 40) for x in range(0, 64)
+                 if sum(im.getpixel((x, y))) > 300)
+    ck(n_row3 < 8, "debug row 3 is blank on the host (no cycle counter there)", f"{n_row3} px")
 
     # The backing box must NOT cover the 0 dBFS line at row 1: the graticule's reference
     # is the scale's anchor, and a debug overlay that hides it makes the scope unreadable
