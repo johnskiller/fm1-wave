@@ -15,6 +15,7 @@
 #include "wv_sample.h"
 #include "wv_slice.h"
 #include "wv_banks.h"
+#include "build_id.h"          /* the commit this image is: tools/gen_build_id.py */
 
 #define WAVE_HZ   44100.0f
 #define BLK_MAX   256u
@@ -1566,7 +1567,7 @@ static void dbg_draw(const src_skin_t *k)
      * scope trace runs through them too: text over a grid at this size is unreadable,
      * and a debug readout that cannot be read is not a debug readout. 62 px covers the
      * widest row ("c2 wt!", "360M?"). */
-    cv_rect(0, 3, 62, 36, k->bg);
+    cv_rect(0, 3, 84, 36, k->bg);
 
     /* row 1: "12% xr0" -- the load and the xruns, the two numbers a render that is
      * running out of time shows first */
@@ -1580,6 +1581,17 @@ static void dbg_draw(const src_skin_t *k)
     *q++ = 'r';
     num(t, (int32_t)plat_xruns());
     for (const char *p = t; *p; )
+        *q++ = *p++;
+    /* The build's commit, on the row that is already there.
+     *
+     * `build.py` names every package `wave.fwsc` and the image carried no mark, so
+     * "which firmware is on this unit?" had no answer -- and a comparison between the
+     * device and an emulator built from a different commit looks exactly like a bug
+     * that only the device has. It is worth the twelve pixels: a claim about the
+     * sources should be readable on the thing that runs them. See tools/gen_build_id.py
+     * for why the hash is the tree's and not the clock's. */
+    *q++ = ' ';
+    for (const char *p = APP_BUILD_ID; *p; )
         *q++ = *p++;
     *q = 0;
     cv_text(1, 4, &FONT_T, r, k->ink_hi);

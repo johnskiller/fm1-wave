@@ -311,8 +311,12 @@ shot grn.png
     ck(len(rows) > 0, "the host prints the debug rows", f"{len(rows)} lines")
     if rows:
         r1, r2, r3 = rows[-1]
-        ck(_re.fullmatch(r"\d+% xr\d+", r1) is not None,
-           "row 1 is '<load>% xr<xruns>'", repr(r1))
+        # row 1 is the load, the xruns, and the commit the image was built from: the
+        # build's identity has to be readable on the thing that runs it, because
+        # `build.py` names every package wave.fwsc and two commits otherwise look the
+        # same. "nogit" is the honest answer for a tree without .git.
+        ck(_re.fullmatch(r"\d+% xr\d+ (?:[0-9a-f]{7}\+?|nogit)", r1) is not None,
+           "row 1 is '<load>% xr<xruns> <build id>'", repr(r1))
         ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?( p\d+)?", r2) is not None,
            "row 2 reports the jobs handed over and the us each, or '--'", repr(r2))
         # The host runs its jobs inline (plat_host.c: at once, in order), so the interval
@@ -329,7 +333,7 @@ shot grn.png
     # is the scale's anchor, and a debug overlay that hides it makes the scope unreadable
     # to check. (This check earned its place: the first version covered rows 0-36 and the
     # 0 dBFS line went from 240 px of GRID to 178, which the check above caught.)
-    dbg_bg = sum(1 for x in range(0, 64) if im.getpixel((x, 3)) == BG)
+    dbg_bg = sum(1 for x in range(0, 64) if im.getpixel((x, 3)) == BG)   # a subset of the 84-px box
     ck(dbg_bg > 40, "the debug box's backing reaches row 3", f"{dbg_bg} px")
     ck(im.getpixel((0, 1)) == SCOPE_GRID,
        "the debug box leaves the 0 dBFS line at row 1 intact")
