@@ -146,6 +146,59 @@ parameters it has.
 Defaults are `RATE 0, DEPTH 0` — **off** — so a patch made before the LFO existed
 sounds the same after it.
 
+### `B_ARP` — the arpeggiator page
+
+| | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
+|---|---|---|---|---|---|---|---|
+| page up | **RATE** off / 1/4 … 1/64 | **TYPE** UP·DOWN·UP-DN·RND | **OCT** 1–4 | **GATE** 1–100% | unchanged | unchanged | unchanged |
+
+Any source. `B_ARP` toggles, and it is the third of the mutually exclusive pages: ENV,
+LFO and ARP each close the other two.
+
+**`RATE` doubles as the switch.** Zero is off, which is also the default, so an
+arpeggiator that has never been turned on cannot change how an existing patch plays.
+The divisions are at **120 BPM** — a beat is 500 ms, so 1/4 is 500 and each plain
+division halves it (250, 125, 62); a triplet is two thirds of the plain value it sits
+between (167, 83). The readout prints the division, because a division is what the
+player is choosing and a length in milliseconds is not.
+
+**This is a clock, not a free-Hz knob.** An arpeggiator that will not sit on a beat is
+not an arpeggiator. The platform receives MIDI clock but does not track tempo yet, so
+the tempo is fixed at 120 and following a clock is a second stage.
+
+What the arp outputs is **only the held notes, transposed by whole octaves**. It never
+invents a pitch: a note outside the chord is a sequencer's job, and `B_SEQ` is still
+the empty button on this panel.
+
+`TYPE` walks the held set **sorted by pitch**, not by the order the fingers landed:
+
+| TYPE | walk for a three-note chord |
+|---|---|
+| UP | 0 1 2 0 1 2 … |
+| DOWN | 2 1 0 2 1 0 … |
+| UP-DN | 0 1 2 1 0 1 2 … (the ends are not played twice, so the cycle is `2n-2`) |
+| RND | any of the held notes, chosen by an LCG |
+
+`OCT` repeats the whole set 1–4 octaves up before wrapping, and is clamped there: a
+fifth octave would leave the keyboard range.
+
+`GATE` is the note's length as a fraction of the step, 1–100%. It is on a knob rather
+than fixed because it is what makes an arp sound staccato or legato, and it is the
+parameter a player reaches for first.
+
+**The panel's keys and MIDI share one set and one engine.** With the arp on, a key does
+not play a voice — it enters the held set, and the clock plays it. A note from USB, BLE
+or the TRS jack enters the same set. This is the lesson from the MIDI-in work: one
+engine, one sound, or the instrument has two personalities.
+
+The held set is **eight notes**, and a ninth gives way to the oldest — the same rule the
+voices use, so holding more keys than the instrument can sound still does something
+predictable rather than something different.
+
+The arp's clock is the platform's 1 kHz `app_tick`. That hook needs `APP_TICK` in
+`app/app.h`; without the macro the platform never calls it, which is the same trap that
+made `touch_poll` dead code.
+
 ---
 
 ## Buttons
@@ -159,7 +212,7 @@ sounds the same after it.
 | `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
 | `B_SAVE` | SAVE | nothing | **free** | — |
-| `B_ARP` | ARP | nothing (not read anywhere in the platform) | **free** | — |
+| `B_ARP` | ARP | **ARP page** toggle (RATE/TYPE/OCT/GATE on K1–K4) | app | app.c |
 | `B_SEQ` | SEQ | nothing (not read anywhere in the platform) | **free** | — |
 | `B_PLAY` | PLAY | **safe mode only**: a second failed boot, then PLAY = "try again" | platform | main_fm1.c:818 |
 | `B_REC` | REC | **power-on only**: held at boot = UPDATE MODE | platform | main_fm1.c:968 |
@@ -621,6 +674,7 @@ built from state:
 |---|---|
 | `B_ENV` | the ENV page is up |
 | `B_LFO` | the LFO page is up |
+| `B_ARP` | the ARP page is up |
 | `B_SEL` | SOURCE is not SYNTH (the power-on default) |
 | `B_EDIT` | SOURCE is SMPL, where EDIT is the chop button |
 
@@ -661,7 +715,7 @@ there are more free buttons than pending functions.
 | `B_SAVE` | save the current knob set as the boot state | `plat_store_save` exists; the settings object is already there |
 | `B_FX` | a second waveshaper stage, or a filter-type switch | no DSP behind it yet |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
-| `B_ARP` | arpeggiator | needs a clock and a note queue; not small |
+| `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 
 **If only one is done**: `B_HOME` → PANIC. It costs a dozen lines and fixes the one

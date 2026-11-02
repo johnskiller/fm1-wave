@@ -222,3 +222,35 @@ turn ALGO -1
 expect grain 104
 tap LFO
 expect lfo 0
+
+# --- the ARP page -----------------------------------------------------------
+tap ARP
+expect arp 1
+expect lfo 0
+
+# a page is exclusive: opening another closes it
+tap ENV
+expect arp 0
+expect env 1
+tap ARP
+expect env 0
+expect arp 1
+
+# RATE is the switch as well as the rate. It is set from wherever the earlier
+# sections left it, so the first move is to zero and the second is absolute in turns.
+turn K1 -64
+expect arp_on 0
+turn K1 12
+expect arp_on 1
+expect arp_step 167
+
+# the four knobs are RATE / TYPE / OCT / GATE, in that order
+turn K2 1
+expect arp_type 1
+turn K3 1
+expect arp_oct 2
+turn K4 8
+expect arp_gate 96
+
+tap ARP
+expect arp 0

@@ -112,6 +112,62 @@ static uint8_t k_spray = 0;       /* 0..127: 0 makes a grain voice a sample play
 static uint8_t env_page;
 static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 
+/* --- the arpeggiator ------------------------------------------------------
+ *
+ * B_ARP toggles a page the way B_ENV does, and K1-K4 become RATE / TYPE / OCT /
+ * GATE while it is up. Three things about it are decisions, not defaults:
+ *
+ * 1. RATE 0 is OFF. The knob is the switch, like the LFO's, so a patch made
+ *    before the arp existed sounds the same after it and there is no separate
+ *    on/off to forget.
+ *
+ * 2. It is a clock, not a free Hz knob. An arpeggiator that will not sit on a
+ *    beat is not an arpeggiator. The steps are note divisions at a fixed 120 BPM,
+ *    because the platform receives MIDI clock but does not track tempo yet; when
+ *    it does, the divisor stays and the BPM becomes the input.
+ *
+ * 3. The panel's keys are armed too. ARP is a state of the instrument, not a
+ *    property of USB. A chord from the keys and the same chord from a DAW have to
+ *    arpeggiate the same way, which is the lesson from MIDI in: one engine, one
+ *    set of rules.
+ *
+ * The held notes are kept here rather than read from the key matrix, because a
+ * note can arrive from MIDI where there is no key to read -- arming the arp must
+ * not care which link the note came in on.
+ */
+static uint8_t arp_page;
+static uint8_t k_arp_rate = 0;            /* 0 = off; 1..127 = a clock division */
+static uint8_t k_arp_type = 0;            /* ARP_UP / DOWN / UPDN / RND */
+static uint8_t k_arp_oct  = 1;            /* 1..4 octaves */
+static uint8_t k_arp_gate = 64;           /* 1..127: the note length as a fraction of the step */
+
+enum { ARP_UP, ARP_DOWN, ARP_UPDN, ARP_RND, ARP_TYPE_N };
+static const char *const ARP_NAME[ARP_TYPE_N] = { "UP", "DOWN", "UP-DN", "RND" };
+
+/* The held notes, as MIDI numbers. 8 is the voice count: a ninth note cannot
+ * sound even without the arp, so holding more would only change the pattern and
+ * not the sound. Sorted before it is walked, because an arp's order is by pitch
+ * and never by when the fingers landed.
+ *
+ * `age` orders them: the oldest is the one that gives way when a ninth arrives,
+ * the same rule the voices use. */
+#define ARP_HOLD 8
+static uint8_t arp_hold[ARP_HOLD];
+static uint8_t arp_vel[ARP_HOLD];
+static uint8_t arp_held;                  /* how many entries are in use */
+static uint32_t arp_pos;                  /* the position in the walk, notes x octaves */
+static uint8_t arp_up;                    /* unused by the bounce (see arp_advance), kept for ARP_RND */
+static uint32_t arp_lcg = 12345u;         /* ARP_RND's state */
+static uint8_t arp_note = 0xFFu;          /* the note the arp is sounding, 0xFF none */
+static uint32_t arp_t;                    /* ms until the next step */
+static uint32_t arp_ms;                   /* the step length, from k_arp_rate */
+static uint32_t arp_off_at;               /* ms into the step at which the note ends */
+
+/* Is the arp taking the keys? RATE 0 is off, and so is an empty page behind it --
+ * the knob is the switch, so there is nothing else to consult. */
+static int arp_on(void) { return k_arp_rate != 0; }
+static uint8_t arp_gated;                 /* the note of this step has already ended */
+
 /* ─── the scope ─────────────────────────────────────────────────────────────
  *
  * The screen is 240 columns and the band is 112 px. Two decisions decide whether
@@ -500,6 +556,195 @@ static void play_note(uint8_t note, uint8_t vel)
     wv_note_on_sample(&dsp, &smp[smp_i], note, vel, 0, 0, 0);
 }
 
+/* --- the arpeggiator's clock and its walk ------------------------------------
+ *
+ * A step division at 120 BPM: the note values a player thinks in, and the set every
+ * DAW offers, so "1/16" here and "1/16" there are the same length. A triplet is 2/3
+ * of the plain value, which is why the table is not a power-of-two halving.
+ *
+ * The knob maps 1..127 linearly onto the eight entries. Coarse on purpose: an arp
+ * rate is chosen by ear, and a fine control would only make a division slow to find.
+ */
+/* At 120 BPM a beat is 500 ms, so 1/4 is 500 and each plain division halves it: 250,
+ * 125, 62. A triplet is two thirds of the plain value it sits between, which is where
+ * 167 and 83 come from. The table used to hold { 1000, 667, 500, ... }, which is not a
+ * note division at any tempo -- 667 ms is not 1/8 (250) and not 1/8 at half speed
+ * (375) either -- so RATE could not print a name it was actually playing. */
+static const uint16_t ARP_STEP_MS[8] = { 500, 250, 167, 125, 83, 62, 42, 31 };
+
+/* The names, in the table's order. Kept next to it so the two cannot drift: the
+ * readout and the clock index the same array. */
+static const char *const ARP_STEP_NAME[8] = { "1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T", "1/64" };
+
+static uint32_t arp_step_ms(uint8_t v)
+{
+    if (!v)
+        return 0;
+    return ARP_STEP_MS[(uint32_t)(v - 1u) * 8u / 127u];
+}
+
+/* Keep a note in the held set. A ninth gives way to the oldest, the same rule the
+ * voices use -- so holding more keys than the instrument can sound still does
+ * something predictable rather than something different. */
+static void arp_hold_add(uint8_t note, uint8_t vel)
+{
+    uint8_t i;
+
+    for (i = 0; i < arp_held; i++)
+        if (arp_hold[i] == note) {
+            arp_vel[i] = vel;
+            return;
+        }
+    if (arp_held < ARP_HOLD) {
+        arp_hold[arp_held] = note;
+        arp_vel[arp_held] = vel;
+        arp_held++;
+        return;
+    }
+    for (i = 1; i < ARP_HOLD; i++) {
+        arp_hold[i - 1] = arp_hold[i];
+        arp_vel[i - 1] = arp_vel[i];
+    }
+    arp_hold[ARP_HOLD - 1] = note;
+    arp_vel[ARP_HOLD - 1] = vel;
+}
+
+static void arp_hold_del(uint8_t note)
+{
+    uint8_t i;
+
+    for (i = 0; i < arp_held; i++)
+        if (arp_hold[i] == note) {
+            for (; i + 1 < arp_held; i++) {
+                arp_hold[i] = arp_hold[i + 1];
+                arp_vel[i] = arp_vel[i + 1];
+            }
+            arp_held--;
+            return;
+        }
+}
+
+/* The notes this step walks, sorted by pitch. Order is by pitch and never by when
+ * the fingers landed, which is what makes an arp sound like one. */
+static uint8_t arp_sort(void)
+{
+    uint8_t i, j, t, v;
+
+    for (i = 1; i < arp_held; i++) {
+        t = arp_hold[i];
+        v = arp_vel[i];
+        for (j = i; j > 0 && arp_hold[j - 1] > t; j--) {
+            arp_hold[j] = arp_hold[j - 1];
+            arp_vel[j] = arp_vel[j - 1];
+        }
+        arp_hold[j] = t;
+        arp_vel[j] = v;
+    }
+    return arp_held;
+}
+
+static void arp_silence(void)
+{
+    if (arp_note != 0xFFu) {
+        wv_note_off(&dsp, arp_note);
+        arp_note = 0xFFu;
+    }
+}
+
+/* One step. `arp_pos` walks the whole span (notes x octaves) and never wraps: it
+ * is reset when it runs out, so UP-DN can bounce inside it without a second
+ * counter, and RND can ignore it entirely. */
+static void arp_advance(void)
+{
+    uint8_t n = arp_sort(), idx, note, vel;
+    uint32_t span;
+
+    if (!n) {
+        arp_silence();
+        arp_pos = 0;
+        arp_up = 1;
+        return;
+    }
+
+    span = (uint32_t)n * (uint32_t)k_arp_oct;
+
+    switch (k_arp_type) {
+    case ARP_DOWN:
+        idx = (uint8_t)(span - 1u - arp_pos);
+        break;
+    case ARP_UPDN:
+        /* 0 1 2 1 0 1 2 ... for three notes: the ends are not played twice, so the
+         * span the bounce covers is 2 * span - 2 long. */
+        if (span < 2u) {
+            idx = 0;
+        } else {
+            uint32_t period = 2u * span - 2u, at = arp_pos % period;
+            idx = (uint8_t)(at < span ? at : period - at);
+        }
+        break;
+    case ARP_RND:
+        arp_lcg = arp_lcg * 1103515245u + 12345u;
+        idx = (uint8_t)((arp_lcg >> 16) % span);
+        break;
+    default:
+        idx = (uint8_t)arp_pos;
+        break;
+    }
+
+    note = (uint8_t)(arp_hold[idx % n] + 12u * (uint8_t)(idx / n));
+    if (note > 127u)
+        note = arp_hold[idx % n];
+    vel = arp_vel[idx % n];
+
+    arp_silence();
+    play_note(note, vel ? vel : 100);
+    arp_note = note;
+
+    /* UP-DN needs a longer cycle than the span, or its bounce never happens: the
+     * walk was clamped at `span`, so `arp_pos % (2*span - 2)` only ever saw 0..span-1
+     * and UP-DN played UP. The cycle length belongs to the TYPE, so it is computed
+     * here the same way arp_advance computes the index. */
+    arp_pos++;
+    {
+        uint32_t cycle = span;
+        if (k_arp_type == ARP_UPDN && span >= 2u)
+            cycle = 2u * span - 2u;
+        if (arp_pos >= cycle)
+            arp_pos = 0;
+    }
+}
+
+/* 1 kHz. The step ends, the note ends `gate` of the way through it, and a held set
+ * that empties stops the note instead of waiting for the step to run out. */
+static void arp_tick(void)
+{
+    uint32_t gate;
+
+    if (!k_arp_rate) {
+        if (arp_note != 0xFFu)
+            arp_silence();
+        return;
+    }
+    arp_ms = arp_step_ms(k_arp_rate);
+
+    if (!arp_t) {
+        arp_advance();
+        arp_t = arp_ms;
+        gate = (arp_ms * k_arp_gate) / 127u;
+        arp_off_at = gate ? arp_ms - gate : 0u;    /* ms into the step the note ends */
+    }
+    if (!arp_gated && arp_t <= arp_off_at) {
+        arp_silence();
+        arp_gated = 1;
+    }
+    if (!arp_held) {
+        arp_silence();
+        arp_gated = 1;
+    }
+    if (arp_t)
+        arp_t--;
+}
+
 /* the input state, kept for the lamp pass at the end of the frame: the lights are
  * drawn after the screen, and rebuilding the key mask there would read the matrix a
  * second time in the same frame */
@@ -533,16 +778,29 @@ static void midi_in(void)
             continue;
         midi_seen++;
 
-        if ((st & 0xF0u) == 0x90u && d2)
-            play_note((uint8_t)d1, (uint8_t)d2);
-        else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u)
-            wv_note_off(&dsp, (uint8_t)d1);
+        if ((st & 0xF0u) == 0x90u && d2) {
+            if (arp_on())
+                arp_hold_add((uint8_t)d1, (uint8_t)d2);
+            else
+                play_note((uint8_t)d1, (uint8_t)d2);
+        } else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) {
+            if (arp_on())
+                arp_hold_del((uint8_t)d1);
+            else
+                wv_note_off(&dsp, (uint8_t)d1);
+        }
         else if (st == 0xB0u && (d1 == 123u || d1 == 120u)) {
             /* all notes off / all sound off: CC123 releases what is sounding,
              * CC120 stops it. The engine has one way to end a voice (release to
              * the floor), and 8 voices is a cheap loop -- but only the notes that
-             * are actually held, not 128 calls to wv_note_off. */
+             * are actually held, not 128 calls to wv_note_off.
+             *
+             * The arp's set goes too: a panic that leaves it holding notes would
+             * start playing again on the next tick, which is the opposite of what
+             * a panic is for. */
             uint32_t v;
+            arp_held = 0;
+            arp_silence();
             for (v = 0; v < WV_VOICES; v++)
                 if (dsp.v[v].active)
                     wv_note_off(&dsp, dsp.v[v].note);
@@ -565,7 +823,13 @@ static void input(void)
         uint8_t note = (uint8_t)(i + 53);
         if ((keys & bit) && !(held_prev & bit)) {
             uint8_t vel = touch_vel(i);
-            play_note(note, vel ? vel : 100);
+            /* With the arp running a key adds to the held set and the clock plays
+             * it; without it the key plays now, which is why both paths end at
+             * play_note and there is no second engine. */
+            if (arp_on())
+                arp_hold_add(note, vel ? vel : 100);
+            else
+                play_note(note, vel ? vel : 100);
             /* the FM-1 as a keyboard as well as an instrument: the keys go out over
              * USB-MIDI and Bluetooth, so a DAW can record what is being played */
             plat_midi_send(0x09u | 0x90u << 8 | (uint32_t)note << 16
@@ -574,7 +838,13 @@ static void input(void)
             /* the last key up: the scope can go back to a neutral window. A single
              * key-up while others are held must not, so the flag is cleared only when
              * no key is left down -- checked after the loop. */
-            wv_note_off(&dsp, note);
+            /* the arp's set, or the voice: a key that the arp was holding has no
+             * voice of its own to end, and wv_note_off on it would be a no-op that
+             * looked like one */
+            if (arp_on())
+                arp_hold_del(note);
+            else
+                wv_note_off(&dsp, note);
             plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)note << 16, TO_USB | TO_BLE);
         }
     }
@@ -590,12 +860,19 @@ static void input(void)
     if (btn_pressed(btn, B_ENV)) {
         env_page ^= 1u;
         if (env_page)
-            lfo_page = 0;               /* two pages cannot be up at once */
+            lfo_page = 0, arp_page = 0;   /* two pages cannot be up at once */
     }
     if (btn_pressed(btn, B_LFO)) {
         lfo_page ^= 1u;
         if (lfo_page)
-            env_page = 0;
+            env_page = 0, arp_page = 0;
+    }
+    /* B_ARP: the same page mechanism. The panel has had the button since the
+     * beginning (plat.h's B_ARP) and nothing used it. */
+    if (btn_pressed(btn, B_ARP)) {
+        arp_page ^= 1u;
+        if (arp_page)
+            env_page = 0, lfo_page = 0;
     }
 
     /* The LFO page takes K3 and K4, not K1 and K2.
@@ -605,22 +882,30 @@ static void input(void)
      * sitting on K1 in every mode and on every page is the one thing the panel must
      * not move. SHAPE and AMOUNT are what give way -- they are the pair a filter LFO
      * does not change, and they are one button away. */
+    /* The ARP page keeps CUT on K1 for the same reason the LFO page does, and for a
+     * stronger one: RATE doubles as the on/off switch, so the page needs a parameter
+     * that stays useful while the arp is off -- a page where every knob does nothing
+     * until one of them has been turned is a page you cannot see the state of. */
     if ((e = plat_enc(EN_K1)) != 0) {
-        if (env_page) k_eg_a = (uint8_t)clamp((int32_t)k_eg_a + e * 4, 0, 127);
-        else          k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
+        if (env_page)      k_eg_a = (uint8_t)clamp((int32_t)k_eg_a + e * 4, 0, 127);
+        else if (arp_page) k_arp_rate = (uint8_t)clamp((int32_t)k_arp_rate + e * 4, 0, 127);
+        else               k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K2)) != 0) {
-        if (env_page) k_eg_d = (uint8_t)clamp((int32_t)k_eg_d + e * 4, 0, 127);
-        else          k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
+        if (env_page)      k_eg_d = (uint8_t)clamp((int32_t)k_eg_d + e * 4, 0, 127);
+        else if (arp_page) k_arp_type = (uint8_t)((k_arp_type + (e > 0 ? 1 : ARP_TYPE_N - 1)) % ARP_TYPE_N);
+        else               k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K3)) != 0) {
         if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
         else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
     if ((e = plat_enc(EN_K4)) != 0) {
         if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
         else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
     /* EN_ALGO is MORPH in SYNTH, and GRAIN SIZE in GRAN. This is the one place a knob
@@ -798,6 +1083,40 @@ static char *lfo_rate_text(uint8_t v)
     b[n++] = 'H';
     b[n++] = 'z';
     b[n] = 0;
+    return b;
+}
+
+/* The ARP page's two readouts. RATE prints the note division, because that is what
+ * the player is choosing and "1/16" is a length while "43" is not; OFF at zero says
+ * the knob is also the switch. OCT prints "2x", a height rather than a percentage. */
+static char *arp_rate_text(uint8_t v)
+{
+    static char ring[2][6];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    const char *s;
+    int n = 0;
+
+    if (!v) {
+        b[0] = 'O'; b[1] = 'F'; b[2] = 'F'; b[3] = 0;
+        return b;
+    }
+    s = ARP_STEP_NAME[(uint32_t)(v - 1u) * 8u / 127u];
+    while (*s && n < 5)
+        b[n++] = *s++;
+    b[n] = 0;
+    return b;
+}
+
+static char *arp_oct_text(uint8_t v)
+{
+    static char ring[2][4];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+
+    b[0] = (char)('0' + (v < 1u ? 1u : v > 4u ? 4u : v));
+    b[1] = 'x';
+    b[2] = 0;
     return b;
 }
 
@@ -2133,6 +2452,10 @@ void app_frame(void)
 
         if (env_page)
             cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
+        else if (lfo_page)
+            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "LFO PAGE", sk.ink);
+        else if (arp_page)
+            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ARP PAGE", sk.ink);
     }
     cv_blit(0, SCOPE_H);
 
@@ -2153,6 +2476,14 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
         knob(120, KNOB_TOP, 54, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
         knob(178, KNOB_TOP, 54, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
+    } else if (arp_page) {
+        /* The ARP page: RATE doubles as the switch, so it reads OFF at zero and a
+         * note division otherwise. OCT prints "2x" because the useful question is how
+         * far it climbs, not a percentage. */
+        knob(4,   KNOB_TOP, 54, "RATE",  arp_rate_text(k_arp_rate), k_arp_rate, 1);
+        knob(62,  KNOB_TOP, 54, "TYPE",  ARP_NAME[k_arp_type], k_arp_type * 42, 1);
+        knob(120, KNOB_TOP, 54, "OCT",   arp_oct_text(k_arp_oct), k_arp_oct, 1);
+        knob(178, KNOB_TOP, 54, "GATE",  pct(k_arp_gate), k_arp_gate, 1);
     } else if (lfo_page) {
         /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
          * the page's knobs are read. RATE prints Hz, because a rate in percent is not
@@ -2204,6 +2535,8 @@ void app_frame(void)
             lit |= 1u << B_LFO;
         else if (k_lfo_rate != 0 && k_lfo_depth != 0 && ((now >> 8) & 1u))
             lit |= 1u << B_LFO;
+        if (arp_page)
+            lit |= 1u << B_ARP;
         if (src != SRC_SYNTH)
             lit |= 1u << B_SEL;
         if (src == SRC_SMPL)
@@ -2237,6 +2570,15 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "src"))        { *got = src;      return 1; }
     if (!strcmp(what, "env"))        { *got = env_page; return 1; }
     if (!strcmp(what, "lfo"))        { *got = lfo_page; return 1; }
+    if (!strcmp(what, "arp"))        { *got = arp_page; return 1; }
+    if (!strcmp(what, "arp_on"))     { *got = arp_on(); return 1; }
+    if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }
+    if (!strcmp(what, "arp_type"))   { *got = k_arp_type; return 1; }
+    if (!strcmp(what, "arp_oct"))    { *got = k_arp_oct; return 1; }
+    if (!strcmp(what, "arp_gate"))   { *got = k_arp_gate; return 1; }
+    if (!strcmp(what, "arp_held"))   { *got = arp_held; return 1; }
+    if (!strcmp(what, "arp_note"))   { *got = (arp_note == 0xFFu) ? -1 : arp_note; return 1; }
+    if (!strcmp(what, "arp_step"))   { *got = (int)arp_step_ms(k_arp_rate); return 1; }
     if (!strcmp(what, "tap_pk"))      { *got = scope_pk_q; return 1; }
     /* How many slots the pool gave: 0 means the app is playing without material, which
      * is a state the screen shows (NO SAMPLES) and a test has to be able to assert
@@ -2336,6 +2678,31 @@ int app_expect(const char *what, int *got)
     }
     return 0;
 }
+
+#ifdef PLAT_HOST
+#include <stdio.h>
+/* `show WHAT`: print an observation instead of asserting it.
+ *
+ * `expect` is the right tool when the value is known, and the wrong one when it is
+ * not: test_arp.py has to read the note the arp walked, because a correct walk is a
+ * sequence and any single value it asserted would fail on a correct run half the
+ * time. This prints the reading and lets the script be the thing that decides. */
+int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d)
+{
+    (void)b; (void)c; (void)d;
+    if (strcmp(cmd, "show") || !a[0])
+        return 0;
+    {
+        int got = 0;
+        if (app_expect(a, &got))
+            printf("show %s %d\n", a, got);
+        else
+            printf("show %s ?\n", a);
+    }
+    fflush(stdout);
+    return 1;
+}
+#endif
 
 void app_ui_init(void)
 {
@@ -2452,7 +2819,10 @@ static void pool_poll(void)
 
 void app_tick(void)
 {
+    /* the arpeggiator's clock. touch_update lives here too (pressure, every 5 ms);
+     * touch_poll and pool_poll do NOT -- they need to run whether or not the tick
+     * does, and the tick is the one hook a header can forget to enable. */
+    arp_tick();
     touch_update();
-    pool_poll();
 }
 

@@ -20,6 +20,12 @@
 #define APP_BLE_AT_BOOT (!template_ble_off())   /* Bluetooth at power-on: as the player left it (REC held) */
 int template_ble_off(void);
 
+/* The 1 kHz tick: the arpeggiator's clock. touch_poll and the pool poll used to live
+ * in app_tick and it was never called (no APP_TICK in this header), so neither ever ran;
+ * both are now in app_frame/app_render where the platform does call them, and the tick
+ * is left with the one job that genuinely needs 1 kHz. */
+#define APP_TICK
+
 /* the store: the app's objects, the panel calibration (the platform's) and Bluetooth's address and pairing among
  * them, and their flash offsets */
 enum { OBJ_SETTINGS, OBJ_PANEL, OBJ_BLE, OBJ_NOBJ };
@@ -69,3 +75,9 @@ void app_backup_restored(void);
  * The names are the panel's, so a failure names the knob the player turns. */
 #define APP_HOST_EXPECT
 int app_expect(const char *what, int *got);
+
+/* The host simulator's "app" checks (host/plat_host.c: any line the app claims).
+ * Used by test_arp.py, which has to read a note number the arp walked rather than
+ * assert one it guessed: `expect arp_note 60` fails on a correct run. */
+#define APP_HOST_CMD
+int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d);
