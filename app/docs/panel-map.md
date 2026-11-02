@@ -130,25 +130,75 @@ power-on.
 
 ---
 
+## Screen layout
+
+240 x 240, drawn as four canvases (`cv_begin` / `cv_blit`, one pair per band, because
+each canvas is a fixed-size pool and the bands are different heights):
+
+```
+  0.. 68   scope        the live waveform, auto-gained to the band
+ 68..124   row A        K1..K4      four cells of 60 px
+124..200   row B        encoders    three cells of 80 px
+200..240   strip        source icon (left) + BANK/SLOT (right)
+```
+
+**Row A** is `CUT RES SHAPE AMOUNT`, or `ATTACK DECAY SUSTAIN RELEASE` on the ENV
+page. **Row B** is the encoder whose meaning follows the source (`MORPH`, or
+`GRAIN SIZE` in GRAN), the `SOURCE` selector, and the bank/slot title.
+
+Why two rows: seven encoders across 240 px is 34 px each, and `AMOUNT` at FONT_XS
+measures 43 px — measured on the host by scanning the label rows for ink runs, it ran
+9 px into the next cell. Shortening the names fixes that one collision and leaves
+every label at four or five characters; two rows keeps the full names.
+
+Why the scope gave up height (112 -> 68): 112 + 56 + 76 + 40 = 284, which is 44 more
+than the screen has. The scope is the one band whose height is not load-bearing —
+the auto-gain fills whatever band it is given — so it paid.
+
+Measured after the change, per source, ink in the strip's three thirds:
+`icon(0-64) / BANK(64-146) / SLOT(146-240)` = 98/293/0 (SYN), 84/293/228 (SMP),
+189/293/228 (GRN). No overlap, and SYNTH carries no SLOT — that number is a sample
+fact and the table path has no slots.
+
 ## Source indication
 
-SOURCE has **three** states and `B_SEL`'s lamp has **two**, so the screen says it,
-on two channels:
+SOURCE has **three** states and `B_SEL`'s lamp has **two**, so the screen says it. The
+whole panel is coloured by source and one icon is drawn:
 
-1. **The background tint of the scope band.** SYNTH is black, SMPL and GRAN take one
-   palette step each. It is the only signal here visible without looking directly at
-   the screen — but it is deliberately dark (the palette's two lowest steps, not the
-   two value steps), because colour on this screen means "value, part, alarm" and a
-   background must not compete with that.
+| source | ground | ink | icon |
+|---|---|---|---|
+| SYNTH | black | the palette's own amber (theme untouched) | a saw, two cycles |
+| SMPL | `RGB(52,34,6)` | amber `RGB(232,136,30)` / `255,184,70` | a sine with a decay |
+| GRAN | `RGB(8,38,52)` | cyan `RGB(60,180,235)` / `150,225,255` | a sine under scattered dots |
 
-2. **Three icons in the strip below the knobs** (y 180–240, a band nothing else
-   used), one lit. The shapes are what a key will read: a table's stacked frames, one
-   sample's transient and decay, grains scattered over a slot. Not three letters:
-   the rest of this panel's text is read with a hand already on a knob, while a
-   source indicator has to answer "what am I about to play" from across the room.
+Two earlier versions were wrong and are recorded here because the reason matters more
+than the result:
 
-Measured: lit-pixel counts per icon are 264/0/0, 0/260/0, 0/0/204 for SYN/SMP/GRN,
-so exactly one is highlighted and the other two are at the unlit step.
+1. **Only the scope band was tinted.** The frame is three canvases, so two thirds of
+   the screen stayed black and took the eye: three distinct near-blacks, measured,
+   and invisible in use.
+2. **Three icons were drawn with two dimmed.** Only one source is ever live, so the
+   dim ones were decoration in the one place the eye rests.
+
+Where the colours come from: `palette_set()` runs once at boot from `APP_PALETTE`, so
+the theme cannot follow the source — but `cv_begin`'s background and `cv_text`'s
+colour are raw RGB565, not palette indices, so the app colours its own screen without
+the platform owning three palettes. The hues are the palette's own highlight steps
+(`gfx.c` PALETTES), so no second colour language is learned. What changes per source
+is the role the hue plays: SYNTH keeps the theme's dark ground, SMPL swaps the same
+two colours (amber ground, amber ink), GRAN puts the hue in the ground.
+
+The icons share one idea — what a key reads — and differ in continuity, which is the
+musical difference: a saw is continuous (the table being scanned), a sine with a decay
+exists once and fades (a sample), a sine under a scatter is the same waveform broken
+up (grains). The first SYNTH icon was three stacked steps, arguing from the data
+layout: a table has eight frames. But a table read for one note is one waveform — the
+frames are what MORPH chooses between, not what SOURCE selects — so it described
+storage, not sound.
+
+Measured, as the dominant colour of each of the three bands: SYNTH `(0,0,0)` on all
+three, SMPL `(49,32,0)` on all three, GRAN `(8,36,49)` on all three. Knob-band ink
+follows: `(148,149,156)` / `(238,137,24)` / `(57,182,238)`.
 
 ---
 

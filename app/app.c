@@ -361,6 +361,19 @@ static void num(char *b, int32_t v)
     b[j] = 0;
 }
 
+/* num() writes into a buffer the caller owns. knob() needs the value inline, and a
+ * single static buffer would let the second call overwrite the first before knob()
+ * had drawn it -- the same trap sel_time() documents. Ring of four: the widest screen
+ * draws four numeric values at once (CUT RES AMOUNT, plus one mode knob). */
+static char *pct(uint8_t v)
+{
+    static char ring[4][6];
+    static uint8_t turn;
+    char *b = ring[turn++ % 4];
+    num(b, (int32_t)v * 100 / 127);
+    return b;
+}
+
 /* A time parameter as text: milliseconds below a second, seconds above it. A
  * percentage is meaningless for a time — "37" on an attack could be 37 ms or 37% of
  * four seconds, and the player has no way to tell which.
@@ -504,8 +517,12 @@ static src_skin_t src_skin(void)
  * language, one scale down. */
 static void src_icon(const src_skin_t *k)
 {
-    /* the strip's own canvas is 240x60 (y 180 on screen); the icon sits centred */
-    int32_t x0 = 78, y0 = 10, w = 84, h = 40;
+    /* The strip's own canvas is 240x40. The icon sits in the left corner and is 56 px
+     * wide rather than centred: the strip's right side carries BANK and SLOT, and a
+     * centred icon measured 78..161, overlapping the BANK text at 112. A corner icon
+     * is also the thing the user asked for -- the bottom band is now free for the
+     * information that has no encoder to sit next to. */
+    int32_t x0 = 6, y0 = 8, w = 56, h = 24;
     int32_t mid = y0 + h / 2, amp = h / 2 - 1;
     int32_t i, px = 0, py = 0;
 
@@ -542,28 +559,37 @@ static void src_icon(const src_skin_t *k)
          * random icon would shimmer every frame, and shimmer is what a fault looks
          * like. Eleven dots at two heights either side of the curve. */
         for (i = 0; i < 11; i++) {
-            int32_t gx = x0 + (i * 23 + 7) % w;
+            int32_t gx = x0 + (i * 11 + 3) % w;
             int32_t gy = mid + (((i * 37) % 7) - 3) * (amp / 3);
             cv_rect(gx, gy, 3, 3, k->ink);
         }
     }
 }
 
-/* one knob column: its name, its value, and a bar that follows the value */
-static void knob(int32_t x, const char *name, const char *val, int32_t v127, int lit)
+/* One knob: its name, its value, and a bar that follows the value. The geometry is
+ * a parameter rather than a constant because the panel is two rows now (see the
+ * panel layout note below), and a row is wider than a cell in the other row.
+ *
+ * The bar is 8 px rather than 6: at the old 30 px width a bar was a tick mark, at
+ * 54 it is the thing the eye actually tracks while turning. */
+static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
+                 int32_t v127, int lit)
 {
     uint16_t c = lit ? sk.ink_hi : sk.ink;
-    cv_text(x, 6, &FONT_XS, name, c);
-    cv_text(x, 26, &FONT_XS, val, lit ? sk.acc : sk.ink);
-    cv_rect(x, 48, 30, 6, sk.track);
-    if (v127 > 0)
-        cv_rect(x, 48, 30 * v127 / 127, 6, lit ? sk.ink_hi : sk.ink);
+    cv_text(x, y, &FONT_XS, name, c);
+    cv_text(x, y + 18, &FONT_XS, val, lit ? sk.acc : sk.ink);
+    cv_rect(x, y + 34, w, 8, sk.track);
+    if (v127 > 0) {
+        int32_t fw = w * v127 / 127;
+        if (fw < 1)
+            fw = 1;                       /* a bar at "just off zero" is not nothing */
+        cv_rect(x, y + 34, fw, 8, lit ? sk.ink_hi : sk.ink);
+    }
 }
 
 void app_frame(void)
 {
     static uint32_t last;
-    char t[8];
     uint32_t now = plat_ms();
 
     input();
@@ -572,7 +598,7 @@ void app_frame(void)
 
     /* the scope redraws every frame: it is the one thing on screen that must not
      * look frozen while a note is held */
-    cv_begin(240, 112, sk.bg);
+    cv_begin(240, 68, sk.bg);
     {
         /* Read the ring backwards from where the audio has got to, so the newest
          * sample is at the right edge: a scope that scrolls the other way reads as
@@ -583,7 +609,7 @@ void app_frame(void)
         int32_t lo, hi, peak;
 
         /* a centre line, so silence reads as a flat line and not as nothing */
-        cv_rect(0, 56, 240, 1, sk.track);
+        cv_rect(0, 34, 240, 1, sk.track);
 
         /* the frame's own peak, for the vertical gain: one pass, before drawing */
         peak = 0;
@@ -630,65 +656,156 @@ void app_frame(void)
              * Floor of 24 counts (~ -14 dBFS) so silence does not amplify its own
              * dither into a full-height block, and a ceiling so a loud eight-voice
              * chord cannot clip the drawing into a square wave. */
-            lo = lo * 50 / peak;
-            hi = hi * 50 / peak;
+            lo = lo * 31 / peak;
+            hi = hi * 31 / peak;
             if (hi - lo < 1) {
                 /* a quiet or steady column is a dot, not a gap: a scope that drops
                  * columns looks broken */
-                cv_rect(x, 56 - hi, 1, 1, sk.ink_hi);
+                cv_rect(x, 34 - hi, 1, 1, sk.ink_hi);
             } else {
-                cv_line(x, 56 - hi, x, 56 - lo, sk.ink_hi);
+                cv_line(x, 34 - hi, x, 34 - lo, sk.ink_hi);
             }
         }
     }
     cv_blit(0, 0);                 /* without this the band is drawn and never shown */
 
-    /* A canvas drawn and never blitted is a canvas drawn for nothing: each band
-     * ends in a blit (gfx.c), so the knob band needs its own cv_begin and blit. */
-    cv_begin(240, 68, sk.bg);
+    /* ─── the panel body ──────────────────────────────────────────────────────
+     *
+     * ONE ROW DID NOT FIT. Seven encoders across 240 px is 34 px each, and the names
+     * are 3-8 characters of FONT_XS at 6.2 px plus padding: "AMOUNT" measures 43 px
+     * and ran 9 px into the next cell. Measured on the host before this change, by
+     * scanning the label rows for ink runs -- CUT/RES/SHAPE/MORPH clean, AMOUNT
+     * (112..154) overlapping the knob at 148. Shortening the names fixes that one
+     * collision and leaves every label at 4-5 characters, which is not what the
+     * panel should force a name down to.
+     *
+     * So the panel is two rows:
+     *
+     *   row A  K1..K4     4 cells of 60   CUT RES SHAPE AMOUNT      (or A D S R in ENV)
+     *   row B  encoders   3 cells of 80   MORPH / knob | SOURCE | title
+     *
+     * and each row is one encoder each -- location follows the physical knob, which is
+     * the rule this panel has held since the first layout (see panel-map.md). What
+     * moves is only how much room each control gets, and the row a control sits in.
+     *
+     * The row heights differ because the rows do different jobs. Row A is four knobs
+     * and nothing else, so it is compact (56 px: label 10, value 13, gap, bar). Row B
+     * is where the mode-specific controls live, so it is taller and its value line can
+     * carry a bank name instead of a number.
+     *
+     * The bottom 40 px is then free, and it earns its keep as the mode strip: the
+     * source icon, and the two selections that have no encoder of their own to be
+     * shown next to -- the wavetable bank and the sample slot.
+     *
+     * Height budget: 112 scope + 56 row A + 76 row B + 40 strip = 284... which is 44
+     * too many. The scope gives them up: 112 -> 68. A scope 68 px tall with the
+     * waveform filling it is more readable than 112 px half empty (the auto-gain from
+     * the previous commit already fills whatever band it is given), and the scope is
+     * the one band whose height is not load-bearing.
+     *
+     *   0..68    scope
+     *   68..124  row A
+     *   124..200 row B
+     *   200..240 mode strip
+     */
+    cv_begin(240, 56, sk.bg);
     if (env_page) {
         /* The ENV page: the same four bars in the same four positions, so the hand
          * does not move — only what they mean. Time in ms/s as text, because "37" on
          * an envelope is unreadable and "37 ms" is not. */
-        knob(4,   "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
-        knob(40,  "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
-        knob(76,  "SUSTAIN", (num(t, k_eg_s * 100 / 127), t), k_eg_s, 1);
-        knob(112, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
-        knob(148, "ENV",     "ON", 127, 1);
-        knob(184, "SOURCE",  SRC_NAME[src], (int32_t)src * 127 / 2, 1);
+        knob(4,   6, 52, "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
+        knob(64,  6, 52, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
+        knob(124, 6, 52, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
+        knob(184, 6, 52, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
     } else {
-    knob(4,   "CUT",    (num(t, k_cut * 100 / 127), t), k_cut, 0);
-    knob(40,  "RES",    (num(t, k_res * 100 / 127), t), k_res, 0);
-    knob(76,  "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
-    knob(112, "AMOUNT", (num(t, k_amount * 100 / 127), t), k_amount, 0);
-    if (src == SRC_GRAN)
-        knob(148, "GRAINSIZE", sel_time(k_grain, 3), k_grain, 1);
-    else
-        knob(148, "MORPH",  (num(t, k_morph * 100 / 127), t), k_morph, 0);
-    if (src == SRC_SYNTH) {
-        knob(184, "SYNTH", WV_BANK_NAME[bank_i], (int32_t)bank_i * 127 / (WV_BANK_COUNT - 1), 1);
-    } else if (!smp_count) {
-        knob(184, "SMPL", "NONE", 0, 0);
-    } else if (src == SRC_GRAN) {
-        /* The last band is SPRAY, because that is the knob GRAN got and this is the
-         * band that names the mode-specific control. It used to fall through to the
-         * SMPL branch and read "DEMO K  4" — a slot name and a slice count, neither of
-         * which GRAN uses, sitting where SPRAY lives. The slice count is specifically
-         * wrong here: GRAN plays no chops, so the number described nothing. */
-        knob(184, "SPRAY", (num(t, k_spray * 100 / 127), t), k_spray, 1);
-    } else {
-        /* the slot's name and how many chops it produced: the one number that says
-         * whether the keys below 53 are going to do anything interesting */
-        knob(184, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL",
-             (num(t, slice_count), t), (int32_t)smp_i * 127 / (smp_count ? smp_count : 1), 1);
+        knob(4,   6, 52, "CUT",    pct(k_cut), k_cut, 0);
+        knob(64,  6, 52, "RES",    pct(k_res), k_res, 0);
+        knob(124, 6, 52, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
+        knob(184, 6, 52, "AMOUNT", pct(k_amount), k_amount, 0);
     }
-    }
-    cv_blit(0, 112);
+    cv_blit(0, 68);
 
-    /* the source strip, in the band below the knobs that nothing else uses */
-    cv_begin(240, 60, sk.bg);
+    cv_begin(240, 76, sk.bg);
+    {
+        /* row B, cell 1: the knob whose meaning follows the source. GRAIN SIZE in
+         * GRAN, MORPH otherwise -- MORPH is read only by the table path (see
+         * wv_dsp.c), so in GRAN it is the one encoder that does nothing audible and
+         * the one that can be lent out. Its label carries the source's name so the
+         * lending is visible rather than something to remember. */
+        int32_t k;
+        if (src == SRC_GRAN) {
+            knob(4, 6, 72, "GRAIN SIZE", sel_time(k_grain, 3), k_grain, 1);
+        } else {
+            knob(4, 6, 72, "MORPH", pct(k_morph), k_morph, 0);
+        }
+
+        /* row B, cell 2: SOURCE. Not an encoder -- B_SEL owns it (three states on a
+         * two-state lamp, which is why the screen carries it) -- so this cell is
+         * drawn as a selector: the three names, the live one bright and underlined.
+         * That is the one place on this panel where the screen is the control's only
+         * readout, and drawing it as text rather than as a bar says so. */
+        cv_text(84, 6, &FONT_XS, "SOURCE", sk.ink);
+        {
+            int32_t x = 84;
+            for (k = 0; k < 3; k++) {
+                int32_t on = (k == (int32_t)src);
+                int32_t w = 3 * 6 + (k == 1 ? 2 : 0);
+                cv_text(x, 30, &FONT_XS, SRC_NAME[k], on ? sk.ink_hi : sk.track);
+                if (on)
+                    cv_rect(x, 41, w, 2, sk.ink_hi);
+                x += 24;
+            }
+        }
+
+        /* row B, cell 3: the title -- what this box currently is, in the one string
+         * that answers "what am I playing". Bank name, slot name, or that the samples
+         * are missing, which is the only failure this build can be in at boot. */
+        /* Named, not just printed: a bare "SAW SQR" sitting one cell right of SOURCE
+         * reads as SOURCE's value. The label is the source's own word for it -- BANK
+         * for a table, SLOT for a sample -- and the strip below carries the index
+         * ("BANK 3/8"), so the two are the same fact at two precisions. */
+        cv_text(166, 6, &FONT_XS, env_page ? "ENV PAGE" : (src == SRC_SYNTH ? "BANK" : "SLOT"),
+                sk.ink);
+        if (src == SRC_SYNTH)
+            cv_text(166, 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
+        else if (!smp_count)
+            cv_text(166, 30, &FONT_XS, "NONE", sk.track);
+        else
+            cv_text(166, 30, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+    }
+    cv_blit(0, 124);
+
+    /* the mode strip: the source's shape in the corner, and the positions that have
+     * no encoder to be drawn next to. B_ENV's page and B_SEL's source both live here
+     * because the panel has no spare lamps for either. */
+    cv_begin(240, 40, sk.bg);
     src_icon(&sk);
-    cv_blit(0, 180);
+    {
+        char b[12];
+        /* bank, right-aligned: "BANK 3/8" rather than a bar, because a bar cannot say
+         * which of eight and the number is the thing worth knowing */
+        int32_t bl = 0, k;
+        b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
+        if (WV_BANK_COUNT > 9u) { b[bl++] = (char)('0' + (bank_i + 1) / 10 % 10); }
+        b[bl++] = (char)('0' + (bank_i + 1) % 10);
+        b[bl++] = '/';
+        b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
+        b[bl] = 0;
+        cv_text(70, 14, &FONT_XS, b, sk.ink);
+
+        if (src != SRC_SYNTH && smp_count) {
+            /* slot index, the same shape of information for the sample sources */
+            bl = 0;
+            b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'O'; b[bl++] = 'T'; b[bl++] = ' ';
+            b[bl++] = (char)('0' + (smp_i + 1) % 10);
+            b[bl++] = '/';
+            b[bl++] = (char)('0' + (smp_count % 10));
+            b[bl] = 0;
+            cv_text(150, 14, &FONT_XS, b, sk.ink);
+        }
+        (void)k;
+    }
+    cv_blit(0, 200);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the
