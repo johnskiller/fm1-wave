@@ -524,6 +524,40 @@ static void num(char *b, int32_t v)
  * single static buffer would let the second call overwrite the first before knob()
  * had drawn it -- the same trap sel_time() documents. Ring of four: the widest screen
  * draws four numeric values at once (CUT RES AMOUNT, plus one mode knob). */
+/* "3/8": a position and the count of positions. Static ring like pct(), because the
+ * caller draws it immediately and a single buffer would be clobbered by the next call. */
+/* Rendered width of a string in FONT_XS, from the font's advance table. Proportional,
+ * so this cannot be "7 px times the glyph count". */
+static int32_t txt_w(const char *t)
+{
+    int32_t w = 0;
+    while (*t) {
+        int32_t c = (uint8_t)*t++;
+        if (c >= FONT_XS.first && c <= FONT_XS.last)
+            w += FONT_XS.adv[c - FONT_XS.first];
+    }
+    return w;
+}
+
+static char *num2(int32_t a, int32_t b)
+{
+    static char ring[4][8];
+    static uint8_t turn;
+    char *o = ring[turn++ % 4];
+    char t[8];
+    int n = 0, i, k;
+    for (k = 0; k < 2; k++) {
+        int32_t v = k ? b : a;
+        if (v < 0) { o[n++] = '-'; v = -v; }
+        i = 0;
+        do { t[i++] = (char)('0' + v % 10); v /= 10; } while (v);
+        while (i) o[n++] = t[--i];                 /* t[] is least-significant-first */
+        if (k == 0) o[n++] = '/';
+    }
+    o[n] = 0;
+    return o;
+}
+
 static char *pct(uint8_t v)
 {
     static char ring[4][6];
@@ -1477,48 +1511,52 @@ void app_frame(void)
 
         /* ── the three values, in their knobs' corners ── */
 
-        /* SELECT: top right. Bank or slot depending on the source, which is the same
-         * question either way -- which material is loaded. */
-        if (src == SRC_SYNTH) {
-            bl = 0;
-            b[bl++] = (char)('0' + (bank_i + 1) % 10);
-            b[bl++] = '/';
-            b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
-            b[bl] = 0;
-            cv_text(MAT_LAB_R - 7 * bl, ytop, &FONT_XS, b, sk.ink_hi);
-        } else if (smp_count) {
-            bl = 0;
-            b[bl++] = (char)('0' + (smp_i + 1) % 10);
-            b[bl++] = '/';
-            b[bl++] = (char)('0' + (smp_count % 10));
-            b[bl] = 0;
-            cv_text(MAT_LAB_R - 7 * bl, ytop, &FONT_XS, b, sk.ink_hi);
+        /* Every value gets its name. An earlier pass printed the numbers alone, on the
+         * argument that the corner is the name -- the argument the four knobs below use,
+         * where CUT really is at CUT's position. It does not carry up here, because the
+         * same corner means a different thing in each source: the top right is BANK in
+         * SYNTH but SLOT in SMPL and GRAN, and the bottom right is MORPH in SYNTH but
+         * GRAIN in GRAN. "2/2" and "45ms" do not say which. A position is only a name
+         * when it is the same name every time, and the player said so within a minute.
+         *
+         * Name first, then the value, so a label reads as one phrase. Left corner is
+         * flush left at the band edge, right corner flush right at it, which keeps the
+         * two symmetric about the picture.
+
+         * The width is summed from the font's own advance table rather than assumed:
+         * FONT_XS is proportional (a digit is 6 px, '/' is 3), so a fixed 7 px per glyph
+         * left the right-hand labels 4-9 px off the edge and drifting with the value's
+         * digit count. */
+        const char *nm;
+        char *vv;
+        int32_t w;
+
+        /* SELECT: top right. */
+        nm = (src == SRC_SYNTH) ? "BANK" : "SLOT";
+        vv = num2(src == SRC_SYNTH ? bank_i + 1 : smp_i + 1,
+                  src == SRC_SYNTH ? (int32_t)WV_BANK_COUNT : (int32_t)smp_count);
+        if (src == SRC_SYNTH || smp_count) {
+            cv_text(MAT_LAB_R - txt_w(nm) - 4 - txt_w(vv), ytop, &FONT_XS, nm,
+                    dim(sk.ink_hi, 3, 5));
+            cv_text(MAT_LAB_R - txt_w(vv), ytop, &FONT_XS, vv, sk.ink_hi);
         }
 
-        /* PRESET: bottom left, GRAN only. SPRAY is the only thing on this knob. */
+        /* PRESET: bottom left, GRAN only -- SPRAY is the only thing on that knob. */
         if (src == SRC_GRAN) {
-            char *v = pct(k_spray);
-            int32_t n = 0;
-            while (v[n])
-                n++;
-            cv_text(MAT_LAB_L, ybot, &FONT_XS, v, sk.ink_hi);
-            cv_text(MAT_LAB_L + 7 * n + 4, ybot, &FONT_XS, "SPRAY", dim(sk.ink, 3, 5));
+            cv_text(MAT_LAB_L, ybot, &FONT_XS, "SPRAY", dim(sk.ink_hi, 3, 5));
+            cv_text(MAT_LAB_L + txt_w("SPRAY") + 4, ybot, &FONT_XS, pct(k_spray),
+                    sk.ink_hi);
         }
 
-        /* ALGO: bottom right. MORPH in SYNTH (and dead in SMPL, so not drawn), GRAIN
-         * SIZE in GRAN. */
-        if (src == SRC_SYNTH) {
-            char *v = pct(k_morph);
-            bl = 0;
-            while (v[bl])
-                bl++;
-            cv_text(MAT_LAB_R - 7 * bl, ybot, &FONT_XS, v, sk.ink_hi);
-        } else if (src == SRC_GRAN) {
-            char *v = sel_time(k_grain, 3);
-            bl = 0;
-            while (v[bl])
-                bl++;
-            cv_text(MAT_LAB_R - 7 * bl, ybot, &FONT_XS, v, sk.ink_hi);
+        /* ALGO: bottom right. MORPH in SYNTH, GRAIN in GRAN. Not drawn in SMPL: morph
+         * indexes a wavetable frame and SMPL reads no wavetable, so the knob is dead
+         * there, and a dead value is worse than an empty corner. */
+        if (src == SRC_SYNTH || src == SRC_GRAN) {
+            nm = (src == SRC_SYNTH) ? "MORPH" : "GRAIN";
+            vv = (src == SRC_SYNTH) ? pct(k_morph) : sel_time(k_grain, 3);
+            w = txt_w(vv);
+            cv_text(MAT_LAB_R - txt_w(nm) - 4 - w, ybot, &FONT_XS, nm, dim(sk.ink_hi, 3, 5));
+            cv_text(MAT_LAB_R - w, ybot, &FONT_XS, vv, sk.ink_hi);
         }
 
         if (env_page)

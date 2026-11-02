@@ -452,18 +452,42 @@ behind the signal.
 
 ### The material band
 
-The table's own shape, 176 x 100 in SYNTH, with BANK and MORPH printed in the right
-column because they are exactly the two parameters it draws. Those two lost their cells
-in `bb55fd3` for that reason: a number beside a waveform that shows that number's effect
-is a worse use of a cell than the waveform at a readable size.
+The picture runs the full band, 232 x 80. Three values are printed on top of it, one per
+knob, in the corner that knob occupies on the panel:
 
-At 28 px (the first version) the wave used 13 px of height and the MORPH steps measured
-0.59 px apart. At 100 px they measure 2.90 / 6.74 / 12.00 / 19.44 px.
+                             BANK 1/8     top right
+    SPRAY 0                               bottom left    GRAN only
+                             GRAIN 45ms   bottom right
 
-SMPL and GRAN have no picture yet: the band carries the source icon and the material's
-name. A sample needs a min/max envelope (8800 samples into 176 columns: transients
-visible, individual cycles not) and GRAN needs the grain window and its overlap. Neither
-has a design, and the waveform shape GRAN would get is already its icon.
+The name is drawn at 3/5 ink and the value at ink_hi, so a label reads as one phrase
+whose subject is dim and whose number is bright. Widths come from the font's own advance
+table (`txt_w()`), not from a fixed 7 px per glyph: FONT_XS is proportional and a digit
+is 6 px while `/` is 3, which left the right-hand labels 4-9 px off the edge and drifting
+with the digit count before.
+
+**Every label names its parameter.** An earlier pass printed the numbers alone, on the
+argument that a corner is a name the way CUT is a name, and the player rejected it in a
+minute: the same corner is BANK in SYNTH but SLOT in SMPL and GRAN, MORPH in SYNTH but
+GRAIN in GRAN. A position is only a name when it is the same name every time.
+
+SMPL's bottom right is deliberately empty. MORPH indexes a wavetable frame and SMPL reads
+no wavetable, so that knob is dead there, and a dead value is worse than a blank corner.
+`test_screen.py` asserts the emptiness so nobody "fixes" it.
+
+Cost, measured: the labels sit over the waveform. Ink already in each label's box, in the
+same hue family but at 2/5 brightness for the envelope and 3-5/5 for the text -- the
+separation is brightness, not hue. On the device this reads as text on a dim trace; if it
+does not, the two fixes are an inset backdrop of the band's own colour (cuts a notch out
+of the envelope) or dropping the value's brightness (loses the number's prominence).
+
+The table's own shape keeps 100 px of height in the band: at 28 px the wave used 13 px
+and the MORPH steps measured 0.59 px apart; at 100 px they measure 2.90 / 6.74 / 12.00 /
+19.44 px.
+
+SMPL and GRAN draw the material instead: a min/max envelope of the sample (8800 samples
+into 176 columns: transients visible, individual cycles not), and for GRAN that envelope
+predimmed under the grain bars -- bar width is GRAIN SIZE as a fraction of the material,
+spread is SPRAY.
 
 ## Source indication
 

@@ -168,17 +168,57 @@ shot grn.png
         print(f"{name}: material picture is {pct:.1f} % ink")
         ck(pct > 4.0, f"{name}: the envelope is filled, not a hairline", f"{pct:.1f} %")
 
-    # the labels must be on the right of the picture and not on top of it, because they
-    # are the panel's 2x2 and the picture is what is left. Measured, the picture ends at
-    # x 4+MAT_W and the label columns start at MAT_LAB_L.
-    for name in ("syn", "smp", "grn"):
+
+    # ── every corner label carries a NAME as well as a value ────────────────
+    # This is the check that was missing. The first full-width pass printed values alone
+    # ("1/8", "45ms") on the argument that a corner is a name the way CUT is a name. The
+    # player's reply was that the two right-hand ones read as nothing at all: the same
+    # corner is BANK in SYNTH but SLOT in SMPL and GRAN, MORPH in SYNTH but GRAIN in
+    # GRAN. A position is only a name when it is the same name every time.
+    #
+    # The name is drawn dim and the value at ink_hi, so the test looks for the dim name
+    # colour itself. Width was the first idea and it does not work: the waveform runs the
+    # full band, so any ink-run measurement includes envelope pixels and a value-only
+    # label still comes out wide. Measured with the value stripped, "1/8" alone measured
+    # 17 px against 15 for the string, i.e. the check would have passed the very bug it
+    # was written for.
+    def name_cols(im, y0, dim_col):
+        """Columns holding the dim NAME tone -- and enough of it to be glyphs.
+
+        Exact colour alone is not enough to prove a label is present: the waveform's edge
+        produces stray pixels of the same value. With the name stripped the counts were 1
+        pixel at y 96, 1 at 99 and 1 at 103 in the half-tone colour, so a "does this
+        colour exist" test passed the bug it was written for. A four-letter name at 6 px
+        per glyph puts 40-60 such pixels in the row window; requiring 15 keeps the check
+        honest without depending on the exact rasterisation."""
+        n = sum(1 for x in range(0, 240) for y in range(y0, y0 + 10)
+                if im.getpixel((x, y)) == dim_col)
+        if n < 15:
+            return []
+        return [x for x in range(0, 240)
+                if any(im.getpixel((x, y)) == dim_col for y in range(y0, y0 + 10))]
+
+    for name, y0, dim_col, where in (
+            ("syn", 92, (148, 109, 32), "top"),        # BANK
+            ("syn", 146, (148, 109, 32), "bottom"),    # MORPH
+            ("smp", 92, (82, 149, 98), "top"),         # SLOT
+            ("grn", 92, (82, 133, 148), "top"),        # SLOT
+            ("grn", 146, (82, 133, 148), "bottom"),    # GRAIN
+            ("grn", 146, (82, 133, 148), "left")):     # SPRAY
         im = shots[name]
-        band_bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
-        right = sum(1 for x in range(MAT_LAB_L, 236)
-                    for y in range(SCOPE_H + 2, SCOPE_H + MAT_H - 2)
-                    if im.getpixel((x, y)) != band_bg)
-        ck(right > 20, f"{name}: the labels sit to the right of the picture",
-           f"{right} ink px right of x {MAT_LAB_L}")
+        cols = name_cols(im, y0, dim_col)
+        if where == "left":
+            cols = [x for x in cols if x < 120]
+        ck(bool(cols),
+           f"{name}: the {where} label has a name in the dim tone, not only a value",
+           "no dim-toned glyphs found")
+
+    # SMPL's bottom right is empty on purpose: MORPH indexes a wavetable frame and SMPL
+    # reads no wavetable, so that knob is dead there, and a dead value is worse than an
+    # empty corner. Asserted so it is not "fixed" by someone reading the gap as a bug.
+    ck(not name_cols(shots["smp"], 146, (82, 149, 98)),
+       "smp: the bottom-right corner has no label at all")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 
