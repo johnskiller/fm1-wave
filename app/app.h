@@ -55,6 +55,11 @@ void app_backup_flush(void);
 void app_backup_hold(int on);
 void app_backup_restored(void);
 
-/* No APP_HOST_EXPECT yet: the host simulator's "expect" checks (octave, wave, note,
- * dirty, turnsN) belong with the scripted tests, which are rewritten once the
- * panel is settled. tests/basic.txt is the template's and fails by design. */
+/* The host simulator's "expect" checks (host/plat_host.c: expect WHAT VALUE). The
+ * panel is now settled enough to assert against, and these exist so the assignment
+ * in docs/panel-map.md is checked by the build rather than trusted: "what does
+ * EN_K1 do in GRAN" must be answerable by running a script, not by reading app.c.
+ *
+ * The names are the panel's, so a failure names the knob the player turns. */
+#define APP_HOST_EXPECT
+int app_expect(const char *what, int *got);

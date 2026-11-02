@@ -126,6 +126,15 @@ void wv_init(wv_state *s)
     s->sh_amount = 0;
     s->cut_z = cut_hz(s->cut);
     s->amount_z = 0.0f;
+    /* The envelope's defaults are the old hardcoded behaviour: a ~1 ms attack, full
+     * sustain (so decay has nowhere to go), and a release of about the 30 ms the
+     * fixed coefficient gave. A patch made before A/D/S/R existed therefore sounds
+     * the same after it, which is the only way adding a feature does not silently
+     * change every sound. */
+    s->eg_a = 0;
+    s->eg_d = 64;
+    s->eg_s = 127;
+    s->eg_r = 32;
 }
 
 /* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
@@ -166,6 +175,10 @@ static void voice_begin(wv_state *s, uint32_t pick, uint8_t note, uint8_t vel, f
      * as in WV_VOICE_GAIN: that is how a solo note ended up at -19 dBFS when this
      * was first written (two 6 dB cuts that neither knew about the other).
      * Headroom is polyphony's problem, and WV_VOICE_GAIN owns it. */
+    /* the envelope starts at the bottom of its attack. A re-used voice restarts it
+     * from wherever the level is, which is what makes voice stealing a crossfade
+     * rather than a click: the level is continuous, only the stage resets. */
+    v->estage = WV_EG_ATTACK;
     v->target = u7_to_f(v->vel);
     if (!was) {
         v->lpf_s1 = 0.0f;
@@ -268,8 +281,10 @@ void wv_note_off(wv_state *s, uint8_t note)
 {
     uint32_t i;
     for (i = 0; i < WV_VOICES; i++)
-        if (s->v[i].active && s->v[i].note == note)
+        if (s->v[i].active && s->v[i].note == note) {
+            s->v[i].estage = WV_EG_RELEASE;        /* from any stage: see eg_step */
             s->v[i].target = 0.0f;                 /* the render frees it below the floor */
+        }
 }
 
 uint32_t wv_active(const wv_state *s)
@@ -282,10 +297,87 @@ uint32_t wv_active(const wv_state *s)
 
 /* ─── the render ──────────────────────────────────────────────────────────── */
 
-/* the VCA's one-pole coefficients: ~2 ms attack, ~10x slower release. Short
- * enough that a key press is not late, long enough that nothing clicks. */
-#define WV_ATK 0.0113f
-#define WV_REL 0.0012f
+/* ─── the VCA envelope ────────────────────────────────────────────────────── */
+
+/* A stage's per-sample slew: the fraction of the remaining distance covered each
+ * sample, chosen so the stage covers 1.0 in exactly `sec`. A one-pole reaches its
+ * target asymptotically, so "covers 1.0" is defined as "arrives within -60 dB",
+ * which is what these two constants set (1 - 0.001 = 0.999).
+ *
+ *     k = 1 - exp(ln(0.001) / (sec * fs))  ~=  6.9078 / (sec * fs)
+ *
+ * A linear ramp is the obvious alternative and it is wrong here: a per-sample
+ * increment has to be recomputed when the stage changes mid-note, while the
+ * coefficient depends only on the time, so a held note can have its attack
+ * lengthened under it without a discontinuity. */
+static float eg_coef(float sec)
+{
+    float n = sec * WV_RATE;
+    if (n < 1.0f)
+        n = 1.0f;
+    return 1.0f - fm_exp2f(-9.96578428f / n);   /* ln(1/0.001) = 6.90776 = 9.96578 * ln2 */
+}
+
+float wv_eg_time(uint32_t stage, uint32_t v127)
+{
+    float t = u7_to_f(v127 > 127u ? 127u : v127);
+    switch (stage) {
+    case WV_EG_ATTACK:  return 0.001f * fm_exp2f(t * 11.9658f);   /* 1 ms .. 4 s */
+    case WV_EG_DECAY:   return 0.002f * fm_exp2f(t * 11.9658f);   /* 2 ms .. 8 s */
+    case WV_EG_RELEASE: return 0.002f * fm_exp2f(t * 11.9658f);   /* 2 ms .. 8 s */
+    default:            return 0.0f;
+    }
+}
+
+float wv_eg_sustain(uint32_t v127) { return u7_to_f(v127 > 127u ? 127u : v127); }
+
+/* Advance one voice's envelope by one sample. The stage decides the target; the
+ * slew follows it; arriving moves the stage on. Note-off sets the target to 0 and
+ * the stage to RELEASE from *any* stage, so a key released during the attack
+ * releases from wherever the level had got to rather than jumping.
+ *
+ * The decay and release use the same coefficient shape, so a note whose release is
+ * shorter than its decay does not click when it changes stage: both are one-poles
+ * heading for a level, and the level is continuous across the change. */
+static void eg_step(wv_state *s, wv_voice *v)
+{
+    float k;
+    switch (v->estage) {
+    case WV_EG_ATTACK:
+        v->target = u7_to_f(v->vel);
+        k = eg_coef(wv_eg_time(WV_EG_ATTACK, s->eg_a));
+        v->level += (v->target - v->level) * k;
+        if (v->level >= v->target - 0.0005f) {
+            v->level = v->target;
+            v->estage = WV_EG_DECAY;
+        }
+        break;
+    case WV_EG_DECAY:
+        v->target = u7_to_f(v->vel) * wv_eg_sustain(s->eg_s);
+        k = eg_coef(wv_eg_time(WV_EG_DECAY, s->eg_d));
+        v->level += (v->target - v->level) * k;
+        if (v->level <= v->target + 0.0005f) {
+            v->level = v->target;
+            v->estage = WV_EG_SUSTAIN;
+        }
+        break;
+    case WV_EG_SUSTAIN:
+        /* the sustain level tracks the knob while the key is held: turning S under a
+         * held note is the one envelope stage that is a level and not a time */
+        v->target = u7_to_f(v->vel) * wv_eg_sustain(s->eg_s);
+        v->level += (v->target - v->level) * 0.0113f;
+        break;
+    default:                                    /* WV_EG_RELEASE */
+        v->target = 0.0f;
+        k = eg_coef(wv_eg_time(WV_EG_RELEASE, s->eg_r));
+        v->level += (v->target - v->level) * k;
+        if (v->level < 0.0005f) {
+            v->level = 0.0f;
+            v->estage = WV_EG_OFF;
+        }
+        break;
+    }
+}
 
 static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
                        float master, uint32_t from, uint32_t to)
@@ -317,13 +409,12 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
 
         for (i = from; i < to; i++) {
             wv_voice *v = &s->v[i];
-            float osel, coef, s1, s2, lp, hp, bp;
+            float osel, s1, s2, lp, hp, bp;
 
             if (!v->active)
                 continue;
 
-            coef = v->target > v->level ? WV_ATK : WV_REL;
-            v->level += (v->target - v->level) * coef;
+            eg_step(s, v);
 
             /* The one place the two sources differ. Everything after this line is
              * shared, which is the whole reason a sample voice is a voice and not a
@@ -374,7 +465,7 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
      * that frees itself mid-block would leave a discontinuity in the block) */
     for (i = from; i < to; i++) {
         wv_voice *v = &s->v[i];
-        if (v->active && v->target == 0.0f && v->level < 0.0005f) {
+        if (v->active && (v->estage == WV_EG_OFF || (v->level < 0.0005f && v->target == 0.0f))) {
             v->active = 0;
             v->level = 0.0f;
             v->lpf_s1 = 0.0f;

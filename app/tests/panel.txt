@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: MPL-2.0
+# fm1-wave: the panel assignment, as assertions.
+#   app/build/host/wave_host app/tests/panel.txt app/build/host
+#
+# docs/panel-map.md says what every control does in every mode. This file checks
+# that claim, because a table nobody runs is a table that drifts. If you change a
+# knob's meaning, one of these lines fails and names the control.
+#
+# The three rules the table has to keep:
+#   1. K1-K4 are CUT/RES/SHAPE/AMOUNT in every source, and A/D/S/R only on the ENV
+#      page, which is a page (a lit button, a fixed set of knobs) and not a mode.
+#   2. MORPH keeps EN_ALGO in SYNTH and SMPL. In GRAN, EN_ALGO is GRAIN SIZE --
+#      MORPH has nothing to read in a grain voice, and GRAN needs seven controls.
+#   3. Nothing a knob does in one mode leaks into another's value.
+#
+# The numbers are exact because every encoder is relative and one detent is known:
+# K1-K4 move 4 per detent, EN_ALGO 8, EN_SELECT (SPRAY) 4, EN_PRESET ±1 slot.
+# An exact expectation catches a knob that moves by the wrong amount, which a
+# "greater than" would wave through.
+
+wait 400
+master 4096
+
+# ── SYNTH: the boot state ────────────────────────────────────────────────────
+expect src 0
+expect env 0
+expect cut 127
+expect res 0
+expect shape 0
+expect amount 0
+expect morph 0
+expect grain 64
+expect spray 0
+expect eg_a 0
+expect eg_d 64
+expect eg_s 127
+expect eg_r 32
+
+# CUT starts at the top of its range, so turn it DOWN: a positive turn clamps and
+# would look like success.
+turn K1 -10
+turn K2 5
+turn K3 1
+turn K4 5
+expect cut 87
+expect res 20
+expect shape 1
+expect amount 20
+# ... and none of that touched the envelope
+expect eg_a 0
+expect eg_d 64
+
+# EN_ALGO is MORPH in SYNTH: 8 per detent
+turn ALGO 10
+expect morph 80
+expect grain 64
+
+# ── the ENV page takes K1-K4 and nothing else ────────────────────────────────
+tap ENV
+expect env 1
+
+turn K1 20
+turn K2 20
+turn K3 -20
+turn K4 20
+expect eg_a 80
+expect eg_d 127
+expect eg_s 47
+expect eg_r 112
+# the tone controls have not moved an inch
+expect cut 87
+expect res 20
+expect shape 1
+expect amount 20
+
+# EN_ALGO still reaches the source's own knob while the page is up: a page does
+# not take the encoders it does not own
+turn ALGO 5
+expect morph 120
+
+tap ENV
+expect env 0
+
+# ── SMPL: same four knobs, MORPH keeps its encoder ───────────────────────────
+tap SEL
+expect src 1
+expect env 0
+expect cut 87
+
+turn ALGO 5
+expect morph 127
+expect grain 64
+
+# K1 is CUT here, not a leftover envelope stage
+turn K1 -1
+expect cut 83
+# and the envelope keeps what the page set
+expect eg_a 80
+expect eg_s 47
+
+# ── GRAN: seven controls on seven encoders ───────────────────────────────────
+tap SEL
+expect src 2
+expect env 0
+
+# EN_ALGO is GRAIN SIZE, and MORPH must not move from where SMPL left it
+expect grain 64
+turn ALGO 10
+expect grain 104
+expect morph 127
+
+# EN_SELECT is SPRAY, and only SPRAY
+expect spray 0
+turn SELECT 20
+expect spray 80
+
+# K1-K4 are still the tone controls: a grain voice runs through the same shaper
+# and filter, so taking them away would remove the filter from the source that
+# needs it most
+turn K1 -1
+turn K2 5
+expect cut 79
+expect res 40
+expect shape 1
+expect amount 20
+
+# EN_PRESET is the material slot in GRAN, as in SMPL
+expect slot 0
+turn PRESET 1
+expect slot 1
+# the slot turn must not have moved the bank
+expect bank 0
+
+# ── back to SYNTH: every knob returns to its own parameter ───────────────────
+tap SEL
+expect src 0
+# MORPH is whatever SMPL's knob left it at, and no GRAN turn touched it
+expect morph 127
+turn K1 -1
+expect cut 75
+# GRAIN SIZE is untouched by SYNTH, and out of reach: EN_ALGO is MORPH here
+expect grain 104
+turn ALGO 1
+expect morph 127
+expect grain 104
+
+# ── the page works in every source ───────────────────────────────────────────
+tap SEL
+tap SEL
+expect src 2
+tap ENV
+expect env 1
+turn K1 2
+expect eg_a 88
+expect cut 75
+tap ENV
+expect env 0
+# leaving the page restores the tone knob
+turn K1 -1
+expect cut 71

@@ -37,6 +37,10 @@ echo "== grain =="
 $CC $FLAGS $INC -o "$OUT/test_grain"  app/tests/test_grain.c  $SRC -lm
 "$OUT/test_grain"
 
+echo "== env =="
+$CC $FLAGS $INC -o "$OUT/test_env"    app/tests/test_env.c    $SRC -lm
+"$OUT/test_env"
+
 echo "== split =="
 $CC $FLAGS $INC -o "$OUT/test_split"  app/tests/test_split.c  $SRC -lm
 "$OUT/test_split"

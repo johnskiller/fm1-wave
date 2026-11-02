@@ -52,8 +52,10 @@ enum { WV_SHAPE_SOFT, WV_SHAPE_HARD, WV_SHAPE_FOLD, WV_SHAPE_SINE, WV_SHAPE_N };
 typedef struct {
     float    phase;        /* 0..1, one cycle (the table source) */
     float    inc;          /* pitch: turns per sample */
-    float    level;        /* VCA, 0..1 */
-    float    target;       /* VCA target (the envelope's block value) */
+    float    level;        /* VCA, 0..1 — the envelope's output */
+    float    target;       /* the level the current envelope stage heads for */
+    uint8_t  estage;       /* WV_EG_*: the stage `level` is travelling through */
+    uint8_t  epad[3];
     float    lpf_s1;       /* SVF state */
     float    lpf_s2;
     /* the sample source. A voice is playing either a table or a sample, never
@@ -83,10 +85,42 @@ typedef struct {
     uint8_t  shape;        /* WV_SHAPE_* */
     uint8_t  grain_size;   /* 0..127: grain length, 10..200 ms (wv_grain_len) */
     uint8_t  spray;        /* 0..127: grain start scatter; 0 makes it a sample player */
+    /* the VCA envelope's four stages, in the panel's units. Before this existed the
+     * shape was two #defines (~2 ms attack, ~10x slower release) with no sustain at
+     * all, so a held note was a gate: it reached full level and stayed there, and
+     * "note off" was the only thing that ever moved the level down. */
+    uint8_t  eg_a, eg_d, eg_s, eg_r;
     /* the block's smoothed values; turning a knob must not click */
     float    cut_z;
     float    amount_z;
 } wv_state;
+
+/* ─── the VCA envelope ────────────────────────────────────────────────────── */
+
+/* Stages. A note begins in ATTACK and walks A → D → S; note-off sends it to R from
+ * wherever it is. That is a one-way walk with one branch, which is why it needs a
+ * stage field and not a timer: the stage decides the target, and the target is what
+ * the per-sample slew follows. */
+enum { WV_EG_ATTACK, WV_EG_DECAY, WV_EG_SUSTAIN, WV_EG_RELEASE, WV_EG_OFF };
+
+/* Stage times, from the panel's 0..127, exponential — the same curve shape as
+ * GRAIN SIZE and CUT, because a linear time control spends most of its travel in
+ * the long end where the difference is least audible.
+ *
+ *     attack   1 ms .. 4 s
+ *     decay    2 ms .. 8 s
+ *     release  2 ms .. 8 s
+ *
+ * A is deliberately the shortest at the low end: the bottom of the range has to be
+ * fast enough that a key press is not late, and 1 ms is.
+ *
+ * SUSTAIN is a level, not a time: 0..127 maps to 0..1 linearly.
+ *
+ * At the default settings (A=0, D=64, S=127, R=32) this reproduces the old
+ * behaviour — a ~2 ms attack and no decay, because sustain is full — so a patch
+ * made before the envelope existed still sounds the same. */
+float wv_eg_time(uint32_t stage, uint32_t v127);
+float wv_eg_sustain(uint32_t v127);
 
 /* ─── tables ──────────────────────────────────────────────────────────────── */
 
