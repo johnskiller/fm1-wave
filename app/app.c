@@ -154,6 +154,29 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 static volatile int16_t wf_buf[WF_SPAN];
 static volatile uint16_t wf_idx;
 
+/* Chop the selected slot, and record that the chops came from it.
+ *
+ * The two have to move together. EN_PRESET changed `smp_i` and left the chops where they
+ * were, so SMPL kept playing the boot slot's slices: the screen said SLOT 2/2 and the
+ * sound was SLOT 1/2, which is exactly the defect this function exists to make
+ * impossible. GRAN differed because it reads `smp[smp_i]` directly, and that difference
+ * -- one source honouring the knob and one not -- is what made it visible at all.
+ *
+ * A slot that is a single hit finds one slice, which is the whole hit, and that is right:
+ * one chop is still a chop.
+ *
+ * Called at boot and on every slot change. Re-chopping on a slot change discards a manual
+ * EDIT, which is correct: a chop belongs to the material it was cut from, so carrying the
+ * old boundaries into new material would play the wrong region of the wrong sample. */
+static void reslice(void)
+{
+    if (smp_count)
+        slice_count = (uint8_t)wv_slices_split(&smp[smp_i], 0.02f, 200, slices, WV_SLICE_MAX);
+    else
+        slice_count = 0;
+    slices_from = smp_i;
+}
+
 static void ui_apply(void)
 {
     dsp.cut = k_cut;
@@ -273,16 +296,23 @@ static void play_note(uint8_t note, uint8_t vel)
 
     /* the slice under this key, 1x from its own start: a chop is played, not
      * detuned, so `note` only decides which chop */
+    /* The chops are only usable if they were cut from the slot that is selected now.
+     * reslice() keeps the two in step, and this check is the belt to that braces: if a
+     * future path changes `smp_i` without re-chopping, the keys fall back to the whole
+     * slot rather than playing one sample's boundaries inside another sample. Silence in
+     * the wrong place would be a bug; the wrong region of the wrong sample is worse
+     * because it still sounds like something. */
     k = (int)note - SLICE_BASE;
-    if (k >= 0 && k < (int)slice_count) {
-        wv_note_on_slice(&dsp, &smp[slices_from], note, vel,
+    if (k >= 0 && k < (int)slice_count && slices_from == smp_i) {
+        wv_note_on_slice(&dsp, &smp[smp_i], note, vel,
                          slices[k].start, slices[k].end, 0);
         return;
     }
 
-    /* no chop under this key: the first slot, pitched from its own root, so a
-     * sample can still be played as an instrument */
-    wv_note_on_sample(&dsp, &smp[0], note, vel, 0, 0, 0);
+    /* no chop under this key: the whole selected slot, pitched from its own root, so a
+     * sample can still be played as an instrument. This was `smp[0]` -- the boot slot --
+     * which made EN_PRESET a display-only control for every key above the chops. */
+    wv_note_on_sample(&dsp, &smp[smp_i], note, vel, 0, 0, 0);
 }
 
 /* the input state, kept for the lamp pass at the end of the frame: the lights are
@@ -393,18 +423,20 @@ static void input(void)
          * material slot (as in SMPL) and MORPH keeps EN_ALGO (as in SYNTH). */
         if ((e = plat_enc(EN_SELECT)) != 0)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
-        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count)
+        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
+            reslice();
+        }
     } else {
-        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count)
+        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
+            reslice();
+        }
         if (btn_pressed(btn, B_EDIT) && smp_count) {
             /* EDIT in SMPL re-chops the current slot from its own material: the
              * keys then play the chops. There is no chop editor on this panel, so
              * detection is the editor. */
-            slice_count = (uint8_t)wv_slices_split(&smp[smp_i], 0.02f, 200,
-                                                  slices, WV_SLICE_MAX);
-            slices_from = smp_i;
+            reslice();
         }
     }
     btn_prev = btn;
@@ -1221,10 +1253,7 @@ void app_init(void)
     /* Chop the first slot at boot so SMPL is playable the moment SOURCE is flipped.
      * A slot that is a single hit finds one slice, which is the whole hit, which is
      * right: one chop is still a chop. */
-    slices_from = 0;
-    if (smp_count && pool)
-        slice_count = (uint8_t)wv_slices_split(&smp[0], 0.02f, 200,
-                                               slices, WV_SLICE_MAX);
+    reslice();
 }
 
 /* app.h asks this at boot (APP_BLE_AT_BOOT). This build has no BLE switch of its

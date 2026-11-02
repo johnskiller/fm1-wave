@@ -409,9 +409,32 @@ SMPL the mapping is two-part:
 - Every other key — including all of them when nothing has been chopped — falls
   back to `wv_note_on_sample`.
 
-**Known defect in that fallback**: it always plays `smp[0]`, not the slot
-`EN_PRESET` selected. The chop path is correct (it uses `slices_from`); only the
-fallback hardcodes index 0.
+Both paths follow `EN_PRESET`. That was not always true, and the defect is worth
+keeping written down because of how it hid:
+
+- the fallback played `smp[0]` -- the boot slot -- so every key above the chops
+  ignored the knob entirely;
+- `slices_from` was set once at boot, and `EN_PRESET` moved `smp_i` without
+  re-chopping, so the chop path also kept playing the boot slot's slices.
+
+The screen read `smp_i`, so it said `SLOT 2/2` while the sound was `SLOT 1/2`. GRAN
+was unaffected (it reads `smp[smp_i]` directly), and **that difference between the
+sources is the only reason the bug was visible at all** -- with all three behaving
+alike there would have been nothing to compare against.
+
+Fixed by `reslice()`, which chops the selected slot and records it in `slices_from`
+in the same breath, called at boot, on every `EN_PRESET` turn, and on `B_EDIT`. The
+chop path additionally refuses to use chops whose `slices_from` is not the selected
+slot, so a future path that moves `smp_i` without re-chopping falls back to the whole
+slot instead of playing one sample's boundaries inside another sample. Re-chopping on
+a slot change discards a manual `B_EDIT`, which is right: a chop belongs to the
+material it was cut from.
+
+Checked by `app/tests/test_slot.py` (8 checks), not by `smpl.txt` -- the two demo
+slots peak only 0.7 dB apart, so a level threshold cannot tell them apart, while their
+envelopes differ completely (slot 0: a transient gone in 4 of 16 segments; slot 1:
+11 of 16 flat). Injecting the old `smp[0]` makes the two envelopes identical, and the
+test fails 3 checks.
 
 ---
 
