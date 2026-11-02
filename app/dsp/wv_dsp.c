@@ -492,11 +492,19 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
  * It also cannot live inside voice_block: with the pool split across two cores each
  * half would limit its own partial sum, and tanh(a) + tanh(b) != tanh(a + b) — the
  * split would change the sound, not just the speed. */
-static void bus_limit(float *out, uint32_t n)
+/* Tap, then the listening level, then the limiter -- in that order. See
+ * render_split_tap's comment: this order is the fix for the hiss a chord had. */
+static void bus_apply(float *out, uint32_t n, float master, float *tap)
 {
     uint32_t k;
+    float m = master * (1.0f / 4096.0f);
+
+    if (tap) {
+        for (k = 0; k < n; k++)
+            tap[k] = out[k];
+    }
     for (k = 0; k < n; k++) {
-        float b = fm_tanhf(out[k]);
+        float b = fm_tanhf(out[k] * m);
         if (b > 1.0f)
             b = 1.0f;
         else if (b < -1.0f)
@@ -504,6 +512,7 @@ static void bus_limit(float *out, uint32_t n)
         out[k] = b;
     }
 }
+
 
 /* Advance the smoothed parameters by one block. Called once per block by whichever
  * entry point ran, never by voice_block: see the note there. */
@@ -588,10 +597,22 @@ static void job_half_u32(uint32_t arg)
     job_half(0);
 }
 
-void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
-                     int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
-                     int (*wait)(void), void (*sync)(void))
+static void render_split_tap(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
+                             int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
+                             int (*wait)(void), void (*sync)(void), float *tap)
 {
+    /* `master` is the app's 0..4096 listening level. It is applied to the summed
+     * voices and BEFORE the limiter, because the limiter is the one thing on the
+     * bus that is not linear: with master applied after it, the limiter saw the
+     * full-scale sum whatever the pot said, and four voices were enough to bend
+     * the bus while the instrument played at -30 dBFS. Measured: a four-note chord
+     * at MASTER 12 o'clock carried -41 dB of non-harmonic content, and -82 dB with
+     * the limiter bypassed. That 40 dB was audible as hiss on every note, and it
+     * was the whole reason a chord sounded dirty and a single note did not.
+     *
+     * `tap`, when given, takes the sum as it is before master and the limiter: the
+     * scope must not shrink when the listening level is turned down, and it has to
+     * be able to show past 0 dBFS, which the limiter's output never does. */
     if (n > WV_JOB_BLOCK_MAX)
         n = WV_JOB_BLOCK_MAX;
 
@@ -651,7 +672,7 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
          * first would serialise them and cost more than one core, because the handover
          * is not free. */
         if (run(job_half_u32, 0u)) {
-            voice_block(s, b, out, n, master, 0u, mid);
+            voice_block(s, b, out, n, 4096.0f, 0u, mid);
 
             /* The wait can fail: the core was retired (cpu2_fallback) and the job
              * dropped. It is never half-done in that case — a fault restarts the
@@ -660,7 +681,7 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
              * Without this the top four voices would simply be missing, and that is
              * the difference between "slower" and "wrong". */
             if (wait() != 0)
-                voice_block(s, b, out, n, master, mid, WV_VOICES);
+                voice_block(s, b, out, n, 4096.0f, mid, WV_VOICES);
             else {
                 uint32_t k;
                 if (sync)
@@ -670,18 +691,25 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
             }
 
             smooth_step(s, n);
-            bus_limit(out, n);
+            bus_apply(out, n, master, tap);
             return;
         }
     }
 
     /* one core: exactly what wv_render does */
-    voice_block(s, b, out, n, master, 0u, WV_VOICES);
+    voice_block(s, b, out, n, 4096.0f, 0u, WV_VOICES);
     smooth_step(s, n);
-    bus_limit(out, n);
+    bus_apply(out, n, master, tap);
+}
+
+void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
+                     int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
+                     int (*wait)(void), void (*sync)(void), float *tap)
+{
+    render_split_tap(s, b, out, n, master, cpu2, run, wait, sync, tap);
 }
 
 void wv_render(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master)
 {
-    wv_render_split(s, b, out, n, master, 0, 0, 0, 0);
+    render_split_tap(s, b, out, n, master, 0, 0, 0, 0, 0);
 }

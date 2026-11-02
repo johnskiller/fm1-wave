@@ -219,8 +219,11 @@ void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
  * that cannot run it loses throughput and nothing else. */
 uint32_t wv_last_split(void);
 const float *wv_last_job_buffer(void);
+/* `tap`, when non-null, receives the voice sum before MASTER and the limiter: the
+ * scope reads it so that turning the listening level down does not shrink the trace.
+ * Pass 0 when the caller does not draw a scope. */
 void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, float master,
                      int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
-                     int (*wait)(void), void (*sync)(void));
+                     int (*wait)(void), void (*sync)(void), float *tap);
 
 #endif /* WV_DSP_H */

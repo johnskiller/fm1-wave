@@ -121,6 +121,7 @@ static void fill_material(void)
 
 static wv_sample smp;
 static wv_bank bank;
+static wv_state g_a;
 
 static void setup(void)
 {
@@ -177,7 +178,7 @@ static void test_split_is_identical(void)
         memset(ob, 0, sizeof ob);
         wv_render(&a, &bank, oa, BLK, 4096.0f);
         jobs_run = 0;
-        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync);
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync, 0);
         ck(jobs_run == 1, "the second core was handed one job per block");
         {
             uint32_t i;
@@ -220,7 +221,7 @@ static void test_split_with_moving_knobs(void)
         memset(oa, 0, sizeof oa);
         memset(ob, 0, sizeof ob);
         wv_render(&a, &bank, oa, BLK, 4096.0f);
-        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync);
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync, 0);
         for (i = 0; i < BLK; i++) {
             float d = fabsf(oa[i] - ob[i]);
             if (d > worst) worst = d;
@@ -277,7 +278,7 @@ static void test_split_follows_the_active_voices(void)
             memset(ob, 0, sizeof ob);
             wv_render(&a, &bank, oa, BLK, 4096.0f);
             jobs_run = 0;
-            wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync);
+            wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run, fake_wait, fake_sync, 0);
             for (i = 0; i < BLK; i++) {
                 float d = fabsf(oa[i] - ob[i]);
                 if (d > worst) worst = d;
@@ -336,7 +337,7 @@ static void test_split_does_not_race_on_the_output(void)
         memset(ob, 0, sizeof ob);
         wv_render(&a, &bank, oa, BLK, 4096.0f);
         jobs_run = 0;
-        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, held_run, held_wait, fake_sync);
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, held_run, held_wait, fake_sync, 0);
         if (wv_last_job_buffer() == (const float *)ob)
             aliased = 1;
         for (i = 0; i < BLK; i++) {
@@ -371,7 +372,7 @@ static void test_refused_job_still_renders(void)
         memset(oa, 0, sizeof oa);
         memset(ob, 0, sizeof ob);
         wv_render(&a, &bank, oa, BLK, 4096.0f);
-        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run_refuse, fake_wait, fake_sync);
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, fake_run_refuse, fake_wait, fake_sync, 0);
         for (i = 0; i < BLK; i++) {
             float d = fabsf(oa[i] - ob[i]);
             if (d > worst) worst = d;
@@ -398,7 +399,7 @@ static void test_dead_core_still_renders(void)
         memset(ob, 0, sizeof ob);
         wv_render(&a, &bank, oa, BLK, 4096.0f);
         /* takes the job, then reports it was retired: the top half never ran */
-        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, dead_run, dead_wait, fake_sync);
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, dead_run, dead_wait, fake_sync, 0);
         for (i = 0; i < BLK; i++) {
             float d = fabsf(oa[i] - ob[i]);
             if (d > worst) worst = d;
@@ -552,6 +553,74 @@ static void test_eight_grain_voices(void)
     printf("  peak %.3f\n", peak);
 }
 
+
+/* ─── the bus limiter must see the master ────────────────────────────────── */
+
+/* A tanh on the full-scale sum bends it whatever the pot says: turn the instrument
+ * down and the distortion stays, because the limiter never saw the pot. The tell is
+ * that the distortion is a FIXED amount subtracted from the peak, so a quiet render
+ * carries a far larger proportion of it. A limiter placed after the master scales
+ * both together and the proportion does not change.
+ *
+ * Measured on the device's own order (master last): a four-note chord at -30 dBFS
+ * read -41 dB of non-harmonic content; with master first, -78 dB. This test asserts
+ * the proportion, not the peak: the peak scales with the master under either order,
+ * which is why a peak-only check passes on the bug. */
+static double chord_distortion(float master)
+{
+    static float o[BLK];
+    double pk = 0.0, mean = 0.0;
+    uint32_t k, i;
+
+    wv_init(&g_a);
+    g_a.cut = 127;
+    g_a.res = 0;
+    g_a.shape = WV_SHAPE_SOFT;      /* tanh: the non-linearity under test */
+    g_a.sh_amount = 0;
+    for (i = 0; i < 8; i++)
+        wv_note_on_sample(&g_a, &smp, (uint8_t)(50 + i * 3), 100, 0, 0, 0);
+
+    for (k = 0; k < 40; k++) {
+        memset(o, 0, sizeof o);
+        wv_render(&g_a, &bank, o, BLK, master);
+        if (k < 8)
+            continue;               /* let the attack through */
+        for (i = 0; i < BLK; i++) {
+            double a = fabs(o[i]);
+            mean += a;
+            if (a > pk)
+                pk = a;
+        }
+    }
+    mean /= (32.0 * BLK);
+    /* crest factor: a bent bus is flatter than the clean sum, so the mean-to-peak
+     * ratio rises as the limiter works. Independent of the master's own scaling. */
+    return (pk > 0.0) ? mean / pk : 0.0;
+}
+
+static void test_limiter_sees_the_master(void)
+{
+    double quiet, loud;
+    char what[160];
+
+    printf("limiter and master:\n");
+    setup();
+    loud = chord_distortion(4096.0f);
+    quiet = chord_distortion(1024.0f);
+
+    /* With master before the limiter, the quiet render is far below the knee and is
+     * therefore CLEANER than the loud one (higher crest). With the limiter first it
+     * is bent just as hard, so the two are equal to within noise. */
+    /* tanh squashes peaks harder than it squashes the mean, so a bent bus has a
+     * HIGHER mean-to-peak ratio. Master before the limiter: 4096 reaches the knee and
+     * 1024 does not, so loud is the more bent of the two. Limiter first: both see the
+     * same full-scale sum, are bent identically, and the two ratios match. */
+    snprintf(what, sizeof what,
+             "master 4096 is more bent than 1024 (crest %.4f vs %.4f): the limiter saw the pot",
+             loud, quiet);
+    ck(loud > quiet + 0.002, what);
+}
+
 int main(void)
 {
     test_split_is_identical();
@@ -560,6 +629,7 @@ int main(void)
     test_split_does_not_race_on_the_output();
     test_refused_job_still_renders();
     test_dead_core_still_renders();
+    test_limiter_sees_the_master();
     test_grain_voice_is_a_voice();
     test_grain_matches_chop_at_spray0();
     test_eight_grain_voices();

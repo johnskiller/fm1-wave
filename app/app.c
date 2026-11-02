@@ -329,8 +329,8 @@ static int cpu2_wait_timed(void)
 void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 {
     static float mono[BLK_MAX];
+    static float scope[BLK_MAX];
     uint32_t i;
-    float m = (float)master_q12 * (1.0f / 4096.0f);
 
     if (n > BLK_MAX)
         n = BLK_MAX;
@@ -345,12 +345,14 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 
     /* Split across both cores when the second one is up. wv_render is the same call
      * with the split off, so a one-core unit is not a different code path. */
-    wv_render_split(&dsp, &bank, mono, n, 4096.0f, cpu2, cpu2_run_timed, cpu2_wait_timed,
-                    plat_cpu2_sync);
-
+    /* MASTER goes into the DSP now, before the bus limiter: the limiter is the only
+     * non-linear stage on the bus, and it used to see the full-scale sum whatever
+     * the pot said. `scope` is the same sum before master and the limiter. */
+    wv_render_split(&dsp, &bank, mono, n, (float)master_q12, cpu2, cpu2_run_timed,
+                    cpu2_wait_timed, plat_cpu2_sync, scope);
 
     for (i = 0; i < n; i++) {
-        float v = mono[i] * m;
+        float v = mono[i];
         int32_t s = (int32_t)(v * 8388607.0f);
         /* 24-bit and clipped here as well as in the DSP: whichever of the two is
          * edited next, the DMA never sees a wrapped sample */
@@ -377,7 +379,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
      * shows is what the instrument produces -- velocity, envelope, polyphony, the
      * shaper, the filter. */
     for (i = 0; i < n; i++) {
-        float v = mono[i] * 32767.0f;
+        float v = scope[i] * 32767.0f;
         int32_t q = (int32_t)v;
         if (q > 32767)
             q = 32767;
