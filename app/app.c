@@ -1688,6 +1688,12 @@ void app_frame(void)
     static uint32_t last;
     uint32_t now = plat_ms();
 
+    /* touch_poll drains the scan's key events into touch_keys/touch_vel -- it is the
+     * ONLY writer of touch_v[], and the template calls it every frame. This app called
+     * it from app_tick, which the platform never calls (app.h has no APP_TICK), so it
+     * never ran: the event ring filled up and every press past the 16th was dropped,
+     * while touch_vel answered its 100 fallback for everything. */
+    touch_poll();
     input();
 
     sk = src_skin();
@@ -2181,6 +2187,30 @@ int app_expect(const char *what, int *got)
      * without reading pixels. */
     if (!strcmp(what, "smp_count"))   { *got = smp_count; return 1; }
     if (!strcmp(what, "midi_seen"))   { *got = (int)midi_seen; return 1; }
+    /* the velocity each sounding voice landed at. The polyphony bug this exists for:
+     * four keys down and only the first is audible, which is either four voices at
+     * four velocities or one voice and three near-silent ones -- and the two look the
+     * same from the output level alone. vel_min is the quietest sounding voice. */
+    if (!strcmp(what, "vel_min")) {
+        uint32_t v; int32_t lo = 1000; int any = 0;
+        for (v = 0; v < WV_VOICES; v++)
+            if (dsp.v[v].active) { any = 1; if ((int32_t)dsp.v[v].vel < lo) lo = dsp.v[v].vel; }
+        *got = any ? lo : 0;
+        return 1;
+    }
+    if (!strcmp(what, "vel_max")) {
+        uint32_t v; int32_t hi = 0;
+        for (v = 0; v < WV_VOICES; v++)
+            if (dsp.v[v].active && (int32_t)dsp.v[v].vel > hi) hi = dsp.v[v].vel;
+        *got = hi;
+        return 1;
+    }
+    if (!strcmp(what, "voices")) {
+        uint32_t v, n = 0;
+        for (v = 0; v < WV_VOICES; v++) n += dsp.v[v].active ? 1u : 0u;
+        *got = (int)n;
+        return 1;
+    }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
