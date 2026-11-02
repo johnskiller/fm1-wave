@@ -45,6 +45,28 @@ static uint8_t src = SRC_SYNTH;
  * note on/off from here; nothing in the audio path reads plat_keys, because the
  * interrupt must not consult the matrix scanner. */
 static uint32_t held_prev;
+
+/* The scope's window is pitch-synchronous: it shows SCOPE_CYCLES whole periods of the
+ * note being played, which is what makes a held note stand still. The alternative --
+ * a fixed window -- was measured shifting -14/+14/0/+27/+14/+40 px between consecutive
+ * frames on a held A440, which is the "sometimes three cycles, sometimes three and a
+ * half" the fixed 384-sample window produced: 440 Hz is not a divisor of the frame
+ * rate, so every frame caught a different phase.
+ *
+ * `scope_note_hz` is set by play_note(), which already computes the Hz for the table
+ * path; the sample paths have no pitch to lock to (a chop is played at 1x, a cloud has
+ * no period), so they leave it alone and the scope keeps the last melodic pitch. */
+static float scope_note_hz;
+static uint8_t scope_note_live;
+
+/* how many periods the scope shows. Three is the number that answers "is this a saw"
+ * with room to see the ramp twice and the edge once, without squeezing anything above
+ * the middle of the keyboard into a comb. */
+#define SCOPE_CYCLES 3
+/* columns one period gets. 60 puts three periods on a 240 px screen with each period
+ * 60 px wide: enough to see a saw's ramp and its edge, not so many that the shape is
+ * compressed into a comb. */
+#define SCOPE_COLS_PER_CYCLE 60
 static uint8_t  bank_i;
 
 /* the panel's four live knobs, as 0..127 */
@@ -194,6 +216,8 @@ static void play_note(uint8_t note, uint8_t vel)
 
     if (src == SRC_SYNTH || !smp_count) {
         float hz = 440.0f * fm_exp2f((float)((int)note - 69) / 12.0f);
+        scope_note_hz = hz;
+        scope_note_live = 1;
         wv_note_on(&dsp, note, vel, hz / WAVE_HZ);
         return;
     }
@@ -247,11 +271,16 @@ static void input(void)
             plat_midi_send(0x09u | 0x90u << 8 | (uint32_t)note << 16
                            | (uint32_t)(vel ? vel : 100) << 24, TO_USB | TO_BLE);
         } else if (!(keys & bit) && (held_prev & bit)) {
+            /* the last key up: the scope can go back to a neutral window. A single
+             * key-up while others are held must not, so the flag is cleared only when
+             * no key is left down -- checked after the loop. */
             wv_note_off(&dsp, note);
             plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)note << 16, TO_USB | TO_BLE);
         }
     }
     held_prev = keys;
+    if (!keys)
+        scope_note_live = 0;
 
     /* the four live knobs: relative, so the panel's position and the value agree
      * from the first turn rather than jumping to wherever the knob happens to be */
@@ -606,15 +635,109 @@ void app_frame(void)
          * stale block, not a torn frame. */
         uint16_t end = wf_idx;
         int32_t x;
-        int32_t lo, hi, peak;
+        int32_t lo, hi, peak, view, tbase;
+
+        /* ── the pitch-synchronous window ────────────────────────────────────────
+         *
+         * The window is an integer number of periods of the note being played, so the
+         * picture stands still. This is the difference between an oscilloscope and a
+         * film of one: 440 Hz against a fixed 8.71 ms window gives 3.83 cycles, so
+         * every frame catches a different phase and the trace slides (measured:
+         * -14/+14/0/+27/+14/+40 px per frame on a held A440).
+         *
+         * Three things have to be true for it to stand still, and the third is the one
+         * that is usually forgotten:
+         *   1. the window length is an integer number of periods;
+         *   2. the newest sample is the window's right edge, so the start is always
+         *      `end - view` and never a frame-rate-dependent quantity;
+         *   3. that length ROUNDS to a whole number of samples. At 440 Hz a period is
+         *      100.2 samples -- 0.2 of a sample of drift per cycle, 0.6 per window,
+         *      which on a 3-cycle window is under one sample and invisible on a 240 px
+         *      screen. It would not be invisible for a window of 100 cycles.
+         *
+         * WF_VIEW is the fallback when no pitch is known (release tail, a sample path).
+         * Keeping it as the default rather than freezing on the last note means the
+         * scope never lies about a period it no longer has. */
+        view = (int32_t)WF_VIEW;
+        if (scope_note_live && scope_note_hz > 20.0f) {
+            float per = WAVE_HZ / scope_note_hz;      /* samples per period */
+            /* The period count is not constant, because the keyboard is not: three
+             * cycles of the lowest key (F3, 174.6 Hz) is 758 samples, and three cycles
+             * of the highest (E5) is 201. A fixed count would either overrun the ring
+             * or draw 15 cycles of a high note. So the count follows the pitch -- as
+             * many whole periods as fit in SCOPE_CYCLES worth of pixels-per-period:
+             * low notes get 1 cycle (visible detail at 240 columns), high notes get 4.
+             * Both are stable; only the zoom differs, which is exactly how a scope
+             * behaves when it auto-ranges instead of sweeping.
+             *
+             * Clamped to the ring, and the ring is 768 samples with the trigger taking
+             * up to one period of it. */
+            int32_t cyc, v2;
+            /* How many whole periods to show: as many as leave at least
+             * SCOPE_COLS_PER_CYCLE columns for each one, capped at SCOPE_CYCLES. The
+             * columns one period occupies is 240 * per / view, and view is per * cyc,
+             * so columns-per-period is 240/cyc -- it does not depend on the pitch at
+             * all. What the pitch decides is how many periods FIT, which is the ring's
+             * limit and the clamp below.
+             *
+             * This started as per/80 rounded, which put 440 Hz (100.2 samples/period)
+             * at one cycle and drew it across all 240 columns: technically stable, and
+             * a single cycle blown up to fill the screen. The column count is the thing
+             * that has to be bounded; the sample count follows from it. */
+            cyc = (int32_t)(240.0f / (float)SCOPE_COLS_PER_CYCLE + 0.5f);
+            if (cyc < 1) cyc = 1;
+            if (cyc > SCOPE_CYCLES) cyc = SCOPE_CYCLES;
+            v2 = (int32_t)(per * (float)cyc + 0.5f);
+            while (v2 > (int32_t)WF_SPAN - (int32_t)per - 2 && cyc > 1) {
+                cyc--;
+                v2 = (int32_t)(per * (float)cyc + 0.5f);
+            }
+            if (v2 >= 32 && v2 <= (int32_t)WF_SPAN - (int32_t)per - 2)
+                view = v2;
+        }
+
+        /* ── the trigger ─────────────────────────────────────────────────────────
+         *
+         * An integer number of periods is NOT enough, and this is the part that is
+         * easy to get wrong: the window still ended at "the newest sample", so each
+         * frame started at a different phase -- measured at 28/14/35/-56/48/-42 px of
+         * shift between frames on a held A440 even with a 301-sample (3-period)
+         * window. A real scope does not do this: it arms on the signal.
+         *
+         * So find the newest rising zero crossing and put the RIGHT edge of the window
+         * on it. Every frame then draws the same phase, because the anchor is a
+         * property of the waveform rather than of when the frame happened to fire.
+         * The cost is that the right edge is up to one period stale; that is the
+         * trigger's own delay and a scope has exactly the same one.
+         *
+         * Rising, not falling: on a saw the rising crossing is the ramp's own zero, so
+         * the discontinuity lands in the middle of the picture instead of at the edge
+         * where it reads as a vertical line on the border.
+         *
+         * If there is no crossing within one window (silence, a DC-ish sample, the
+         * last period of a release tail) there is nothing to trigger on and the window
+         * falls back to the newest sample. It will drift while it does that, which is
+         * honest: there is no period on screen to be stable about. */
+        tbase = 0;
+        {
+            int32_t b;
+            for (b = 0; b + 1 < view; b++) {
+                int32_t c0 = wf_buf[(uint16_t)((end + WF_SPAN - 1u - (uint32_t)b) % WF_SPAN)];
+                int32_t c1 = wf_buf[(uint16_t)((end + WF_SPAN - 2u - (uint32_t)b) % WF_SPAN)];
+                if (c0 >= 0 && c1 < 0) {          /* c1 is one sample older: rising */
+                    tbase = b;
+                    break;
+                }
+            }
+        }
 
         /* a centre line, so silence reads as a flat line and not as nothing */
         cv_rect(0, 34, 240, 1, sk.track);
 
         /* the frame's own peak, for the vertical gain: one pass, before drawing */
         peak = 0;
-        for (x = 0; x < (int32_t)WF_VIEW; x++) {
-            uint16_t at = (uint16_t)((end + WF_SPAN - 1u - (uint32_t)x) % WF_SPAN);
+        for (x = 0; x < view; x++) {
+            uint16_t at = (uint16_t)((end + WF_SPAN - 1u - (uint32_t)(x + tbase)) % WF_SPAN);
             int32_t v = wf_buf[at];
             if (v < 0)
                 v = -v;
@@ -628,8 +751,8 @@ void app_frame(void)
             /* column x is VIEW*(x) .. VIEW*(x+1) back from the newest sample, divided
              * by 240. Both are fixed-point in samples-per-column: 384/240 = 1.6, so
              * a column spans one or two samples. */
-            uint32_t a = (uint32_t)x * WF_VIEW / WF_W;
-            uint32_t b = (uint32_t)(x + 1) * WF_VIEW / WF_W;
+            uint32_t a = (uint32_t)x * (uint32_t)view / WF_W;
+            uint32_t b = (uint32_t)(x + 1) * (uint32_t)view / WF_W;
             int32_t k;
             lo = 127;
             hi = -127;
@@ -637,7 +760,7 @@ void app_frame(void)
                 b = a + 1;
             for (k = (int32_t)a; k < (int32_t)b; k++) {
                 /* `end` is newest-first going backwards, wrapped into the ring */
-                uint32_t back = WF_VIEW - 1u - (uint32_t)k;
+                uint32_t back = (uint32_t)view - 1u - (uint32_t)k + (uint32_t)tbase;
                 uint16_t at = (uint16_t)((end + WF_SPAN - 1u - back) % WF_SPAN);
                 int32_t v = wf_buf[at];
                 if (v < lo)
