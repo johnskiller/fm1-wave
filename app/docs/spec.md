@@ -541,9 +541,16 @@ and the second core's stack watermark (`s412`), which only that core can write. 
 is a substitute for the load comparison: the handover interval covers CPU0's own half
 too, so it reads about half a block whether or not the core did anything.
 
-Still unmeasured: the 8 ms job timeout, the 2816 B stack against the real deepest call
-chain, and the cost of a job running *from flash* while CPU0 reads the same flash. Those
-remain on the Gate B list. The clock cannot be reported at all: `C0_TL_CKCNT` does not
+The stack is measured too, and the reading is the second proof. The debug corner shows
+the second core's stack watermark as `s268`: 268 bytes of its 2816-byte user stack, 9.5%,
+leaving 2548. Only CPU1 writes that area, so a nonzero depth is evidence it executed that
+CPU0 cannot produce -- independent of the load figure, and it agrees with it. (The other
+2816 bytes above are the supervisor stack, 256 bytes for exceptions only: this core takes
+no interrupts, and a fault reaching that stack would be recorded by the platform instead
+of passing silently, so the absence of faults is the reading for it.)
+
+Still unmeasured: the 8 ms job timeout, and the cost of a job running *from flash* while
+CPU0 reads the same flash. Those remain on the Gate B list. The clock cannot be reported at all: `C0_TL_CKCNT` does not
 count on this part (see `fm1_perf.h` — "not verified on hardware" is now settled), so
 the 360 MHz is configuration read from the PLL registers by the BSP, not a measurement,
 and the app cannot see those registers.
