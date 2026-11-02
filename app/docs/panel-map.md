@@ -137,7 +137,8 @@ each canvas is a fixed-size pool and the bands are different heights):
 
 ```
   0.. 83   scope      84 px   the live waveform, fixed linear scale, 0 dBFS = band edge
- 84..175   material   92 px   the table's own shape (SYNTH); icon + material name otherwise
+ 84..175   material   92 px   SYNTH: the table's shape. SMPL: the sample's envelope.
+                              GRAN: that envelope dimmed, with the live grains on top
 176..239   the four   64 px   K1..K4: CUT RES SHAPE AMOUNT, or A D S R on the ENV page
 ```
 
@@ -188,6 +189,71 @@ scope      0..83       33..50    (the trace; centre line at 42)
 material   84..175     91..169   SYNTH (79 px of the 80 px picture), 91..171 ENV/GRAN, 94..160 SMPL
 knobs      176..239    183..221  (39 px of ink, 18 px spare for the round knob art)
 ```
+
+### The three material pictures
+
+Each source draws what it actually is, at the same 176 x 80 px:
+
+| source | picture | what carries which parameter |
+|---|---|---|
+| SYNTH | the wavetable's shape at the current MORPH, fixed phase | shape = the table; MORPH = which frame, printed at the right |
+| SMPL | min/max envelope of the whole slot, one column per 53 samples on the demo kit | the slot's own dynamics; SLOT printed over it |
+| GRAN | the same envelope at 2/5 brightness, with one bar per live grain | bar WIDTH = GRAINSIZE, their SPREAD = SPRAY |
+
+**Why min/max and not the waveform.** DEMO K is 9256 samples across 176 px: 53 samples
+per column. Drawing one sample per column gives a line that changes character with the
+phase and says nothing about the material. A bar from the column's minimum to its maximum
+is a true statement about those 53 samples, and it is what every editor draws.
+
+**Why SMPL is not normalised per column.** SYNTH normalises each frame by its own peak
+because MORPH has to stay readable across frames that differ by 3.4 dB. A sample's
+dynamics ARE its shape: the drum's decaying bars are the information. One scale is chosen
+for the whole slot, so a quiet sample is drawn quiet.
+
+**GRAN: three layers, one per visible parameter.** The design went through two failures
+first, both measured rather than argued:
+
+1. *one 2 px tick per grain* -- grains commonly land 5 px apart, so two ticks read as
+   one. At SPRAY 48 one frame showed two ticks 5 px apart, the next 54 px apart. The
+   picture could not answer "how many grains".
+2. *the sin^2 window drawn as a shape* -- at the default GRAINSIZE of 45 ms a grain is
+   4.0 px wide on the 2 s demo tone and 9.5 px on the 0.84 s kit. Four pixels cannot
+   show a shape, and two overlapping four-pixel shapes cannot show a sum.
+
+What works is noticing that a grain's length **is a length**: 176 px across the slot maps
+GRAINSIZE 0..127 to 2..42 px of material (0.84 s slot) or 1..18 px (2 s slot). So the bar
+width is the grain length -- multiplied by `inc`, because a grain at pitch consumes
+`length * rate` of material, which is why the same GRAINSIZE covers more of the sample as
+you play higher. Drawing at 1x would picture the knob instead of the read.
+
+```
+measured on the demo kit, GRAINSIZE 45 ms, voice at note 53:
+  spray   0   2 bars  w=12,12  x 114,114   gap  0 px   (same material, separate lanes)
+  spray  64   2 bars  w=12,12  x  70,104   gap 34 px
+  spray 127   2 bars  w=12,12  x  28, 95   gap 67 px
+```
+
+Four fixed lanes (heights -7, +7, -3, +3 about the axis) rather than all bars on the axis:
+coincident grains are normal -- SPRAY 0 puts them at the same x by definition -- and a
+merged bar would hide the count. The lanes are fixed, not randomised, so nothing moves
+for no reason.
+
+**SPRAY 0 showing one position is correct, not a bug.** Both grains read the same source
+sample at the same instant, with windows half a grain apart, so sin^2 + cos^2 = 1 and the
+sum is exactly the sample. That is why granular at SPRAY 0 is an ordinary sample player.
+The two bars therefore coincide, and the lanes are what still say "two grains".
+
+**The bar at the right edge.** The loop wrap puts the playhead on `loop_end` = `len - 1`,
+which maps to x = 179.98 -> 180, the outer edge. The first version clamped x into the band
+and then shrank the width to whatever was left -- zero -- and skipped the bar, so the
+picture blinked once per loop pass while the DSP reported two grains. The bar now slides
+back to stay inside at full width: one pixel short of the edge is still a true statement
+that a grain is reading there, while a missing bar says nothing is reading, which is false.
+
+`app/tests/test_grainmap.py` (40 checks) asserts the three parameters separately -- two
+bars visible, each 12 px, gaps 0 / 34 / 67 -- and scans 24 frames of a full loop pass for
+a lost bar. The only frame allowed to show one bar is the wrap itself, where both grains
+leave and re-enter the material in the same sample.
 
 ### How these heights got here
 

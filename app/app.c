@@ -581,13 +581,12 @@ static src_skin_t src_skin(void)
     src_skin_t k;
 
     if (src == SRC_SMPL) {
-        /* green: the three sources read as the three scope colours of the bench,
-         * amber / green / blue-white, and that is what they used to be here before the
-         * ground went inverted. The hue is the platform's own GREEN palette (gfx.c:
-         * 80,220,120 / 150,255,175), so it matches a THEME=GREEN screen instead of
-         * fighting it. SMPL is the odd one out -- SYNTH keeps the wearer's theme and
-         * GRAN its own cyan -- and the sample is the one that used to be "the other
-         * amber". */
+        /* Green: one of the three bench scope colours (amber / green / blue-white).
+         * The hue is the platform's own GREEN palette step (gfx.c: 80,220,120 /
+         * 150,255,175) so it is the same green a THEME=GREEN screen uses, not a fourth
+         * invention. SMPL got this colour because it used to be "the other amber" and
+         * was indistinguishable from SYNTH -- see src_skin's SYNTH branch for why the
+         * three-source mapping wins over THEME here. */
         k.bg     = RGB(13, 41, 22);
         k.track  = RGB(8, 26, 13);
         k.ink    = RGB(80, 220, 120);
@@ -708,6 +707,234 @@ static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  *
  * MORPH goes through the same wv_table_read() the voices use, so the drawn shape is the
  * shape being played -- a 50% morph is the interpolated frame, not frame 3.5 rounded. */
+/* ─── the two sample sources' material pictures ───────────────────────────────
+ *
+ * SYNTH can draw its table directly: 256 points and the picture is the shape you hear.
+ * A sample cannot be drawn that way, and the reason is arithmetic rather than style.
+ *
+ * DEMO K is 9256 samples and the band is 176 px, so each column would stand for 53
+ * samples. Drawing the value at one sample per column gives a line that jumps between
+ * whatever those 53 happened to be at that instant -- the picture would change character
+ * with the phase and tell you nothing. What survives the reduction is the envelope: for
+ * each column, the minimum and the maximum over the samples in it, drawn as a vertical
+ * bar. That is the standard waveform display in every editor, and it is lossless in the
+ * only sense that matters here: a bar from min to max is a true statement about the
+ * material in that column.
+ *
+ * Both pictures answer the same question the table picture answers -- what is in here --
+ * and neither is a level meter. The scope above already shows level.
+ */
+
+/* A sample's own shape: min/max per column, which is the only reduction that stays
+ * honest across 53 samples per pixel.
+ *
+ * `from`/`to` in the slot's samples let the same function draw a slice's region (SMPL
+ * draws the whole slot: the band shows the material, and the chops are what the keys
+ * are for).
+ *
+ * Note what is NOT done here: no per-column peak normalisation. The table picture
+ * normalises per frame because a bank's frames differ in peak by 3.4 dB and MORPH must
+ * stay readable. A sample's own shape is the material, and its dynamics are part of
+ * that shape -- a drum's decaying bars are the information, not a defect to correct.
+ * The only scaling is one common factor to the band's height, chosen once for the whole
+ * slot, so a quiet sample is drawn quiet. */
+static void src_env(const src_skin_t *k, const wv_sample *s, int32_t x0, int32_t y0,
+                    int32_t w, int32_t h, uint32_t from, uint32_t to)
+{
+    int32_t mid = y0 + h / 2, amp = h / 2 - 1;
+    int32_t i;
+    float sc;
+
+    if (!s || !s->data || !s->len || to <= from || to > s->len) {
+        /* nothing to draw: a flat line at zero, which says "no material" rather than
+         * leaving the band empty and looking like a fault */
+        cv_rect(x0, mid, w, 1, k->ink);
+        return;
+    }
+
+    /* one scale for the whole slot: the peak of the region being drawn */
+    {
+        float pk = 0.0f;
+        uint32_t j;
+        for (j = from; j < to; j++) {
+            float v = (float)s->data[j] / 32768.0f;
+            if (v < 0.0f)
+                v = -v;
+            if (v > pk)
+                pk = v;
+        }
+        if (pk < 0.02f)
+            pk = 1.0f;
+        sc = (float)amp / pk;
+    }
+
+    for (i = 0; i < w; i++) {
+        uint32_t a = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)i / (uint32_t)w);
+        uint32_t b = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)(i + 1) / (uint32_t)w);
+        float lo = 0.0f, hi = 0.0f;
+        uint32_t j;
+
+        if (b <= a)
+            b = a + 1;
+        for (j = a; j < b && j < s->len; j++) {
+            float v = (float)s->data[j] / 32768.0f;
+            if (v < lo)
+                lo = v;
+            if (v > hi)
+                hi = v;
+        }
+        {
+            int32_t yh = mid - (int32_t)(hi * sc);
+            int32_t yl = mid - (int32_t)(lo * sc);
+            if (yh < y0)
+                yh = y0;
+            if (yl > y0 + h - 1)
+                yl = y0 + h - 1;
+            if (yl < yh)
+                yl = yh;
+            cv_rect(x0 + i, yh, 1, yl - yh + 1, k->ink_hi);
+        }
+    }
+}
+
+/* GRAN's material picture: three layers, one per parameter that has a position.
+ *
+ *   envelope    dim, the whole slot, min/max per column      what the sample is
+ *   grain bar   bright, x from pos, WIDTH = grain length     GRAINSIZE
+ *   their spread over the map                                SPRAY
+ *
+ * The design went through two wrong versions, and the reason matters more than the
+ * result:
+ *
+ *   1. Ticks at the grain positions. Two grains landed 5 px apart and read as one tick,
+ *      so the picture could not answer "how many grains". Ticks encoded position and
+ *      nothing else.
+ *   2. The sin² window drawn as a shape. Measured, at the default GRAINSIZE of 45 ms a
+ *      grain is 4.0 px wide on a 2 s slot and 9.5 px on an 0.84 s one -- four pixels
+ *      cannot show a shape, and two overlapping four-pixel shapes cannot show a sum.
+ *
+ * What fixed it was noticing that a grain's length IS a length: at 176 px across the
+ * slot, GRAINSIZE 0..127 maps to 2..42 px of material (0.84 s slot) or 1..18 px (2 s
+ * slot). So the width of a grain's mark is the grain length, and the spread of the
+ * marks is SPRAY -- neither needs a symbol, a legend, or a decoded brightness. The
+ * picture is a plan view of what the reader is doing.
+ *
+ * Width uses `inc`, not 1x: a grain at pitch consumes `length * rate` of material, which
+ * is why the same GRAINSIZE covers more of the sample when you play higher. Drawing at
+ * 1x would be a picture of a parameter instead of a picture of the read.
+ *
+ * The bars are stacked at four fixed heights rather than all on the axis, because grains
+ * that overlap horizontally are common (SPRAY 0 puts them at the same x by definition)
+ * and a merged bar would hide the count. Heights are fixed, not randomised: a mark that
+ * moves for no reason looks like a fault.
+ */
+static uint16_t dim(uint16_t c, int32_t num, int32_t den)
+{
+    int32_t r = ((c >> 11) & 0x1Fu) * num / den;
+    int32_t g = ((c >> 5) & 0x3Fu) * num / den;
+    int32_t b = (c & 0x1Fu) * num / den;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, int32_t y0,
+                          int32_t w, int32_t h, const wv_grains *gr)
+{
+    int32_t mid = y0 + h / 2, amp = h / 2 - 1;
+    int32_t i;
+    /* four heights: the grain slots are four, so four lanes are enough for every grain
+     * to have its own row and none can hide another */
+    static const int8_t lane[WV_GRAINS] = { -7, 7, -3, 3 };
+
+    if (!s || !s->data || !s->len) {
+        cv_rect(x0, mid, w, 1, k->ink);
+        return;
+    }
+
+    /* ── layer 1: the material, dim. It is the background, and it must be readable
+     * enough to be a map and dark enough that a bar on top of it is unambiguous. */
+    for (i = 0; i < w; i++) {
+        uint32_t a = (uint32_t)((uint64_t)s->len * (uint32_t)i / (uint32_t)w);
+        uint32_t b = (uint32_t)((uint64_t)s->len * (uint32_t)(i + 1) / (uint32_t)w);
+        float lo = 0.0f, hi = 0.0f;
+        uint32_t q;
+        if (b <= a)
+            b = a + 1;
+        for (q = a; q < b && q < s->len; q++) {
+            float v = (float)s->data[q] / 32768.0f;
+            if (v < lo)
+                lo = v;
+            if (v > hi)
+                hi = v;
+        }
+        {
+            int32_t yh = mid - (int32_t)(hi * (float)amp);
+            int32_t yl = mid - (int32_t)(lo * (float)amp);
+            if (yl < yh)
+                yl = yh;
+            cv_line(x0 + i, yh, x0 + i, yl, dim(k->ink, 2, 5));
+        }
+    }
+
+    /* ── layer 2: the loop range. The playhead wraps at loop_end, so a grain appearing on
+     * the left after being on the right is the loop and not a jump; without the marks
+     * that reads as a fault. Dotted, in the dim ink: it is a boundary, not material. */
+    if (gr && gr->loop && gr->loop_end > gr->loop_start) {
+        int32_t xa = x0 + (int32_t)((float)w * gr->loop_start / (float)s->len);
+        int32_t xb = x0 + (int32_t)((float)w * gr->loop_end / (float)s->len);
+        for (i = 0; i < h; i += 3) {
+            cv_rect(xa, y0 + i, 1, 1, dim(k->ink, 3, 5));
+            cv_rect(xb, y0 + i, 1, 1, dim(k->ink, 3, 5));
+        }
+    }
+
+    /* ── layer 3: the grains. One horizontal bar each: x is where it reads, its width is
+     * GRAINSIZE at this voice's pitch, its lane keeps it from hiding its neighbours, and
+     * how far apart the bars are is SPRAY. */
+    if (gr) {
+        float per_px = (float)s->len / (float)w;
+        for (i = 0; i < (int32_t)WV_GRAINS; i++) {
+            const wv_grain *g = &gr->g[i];
+            int32_t gx, gw, gy;
+            if (!g->on)
+                continue;
+
+            gx = x0 + (int32_t)(g->pos / per_px);
+            /* the material a grain consumes is length * rate; 1x here would draw the knob
+             * instead of the read */
+            gw = (int32_t)((1.0f / g->dt) * g->inc / per_px);
+            if (gw < 2)
+                gw = 2;                     /* a 1 px bar disappears into the material */
+            if (gw > w)
+                gw = w;
+
+            /* A grain near the end of the slot must be drawn shorter, not dropped.
+             *
+             * The bug this replaces: clamp `gx` into the band and then shrink `gw` to
+             * whatever is left, which at the very end is zero, and a zero-width bar was
+             * `continue`d. Measured, the wrap puts the playhead on `loop_end` = len-1, so
+             * a grain starting there maps to x = 179.98 -> 180 = the right edge, and the
+             * bars vanished for a frame -- two grains sounding, nothing drawn. The
+             * picture blinked once per loop pass, which is exactly the kind of fault
+             * that gets read as a broken screen.
+             *
+             * So: slide the bar back so it stays inside, and keep its width. A bar one px
+             * short of the edge is still a true statement -- a grain is reading there --
+             * while a missing bar says nothing is reading, which is false. */
+            if (gx + gw > x0 + w)
+                gx = x0 + w - gw;
+            if (gx < x0)
+                gx = x0;
+
+            gy = mid + lane[i] - 2;
+            if (gy < y0)
+                gy = y0;
+            if (gy + 5 > y0 + h)
+                gy = y0 + h - 5;
+            cv_rect(gx, gy, gw, 5, k->ink_hi);
+        }
+    }
+}
+
 static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
 {
     int32_t i, py = 0, mid = y0 + h / 2, amp = h / 2 - 1;
@@ -1115,24 +1342,48 @@ void app_frame(void)
             cv_text(186, 52, &FONT_XS, b, sk.ink);
             cv_text(186, 70, &FONT_XS, pct(k_morph), sk.ink_hi);
         } else {
-            /* The sample sources have no picture yet -- a sample needs a min/max
-             * envelope and GRAN needs the grain window, and neither has a design. They
-             * get the icon and their material's name at the size the table gets, so the
-             * band is never an empty hole when the source changes. */
-            src_icon(&sk, 4, MAT_PAD, 88, MAT_WAVE);
+            /* The sample sources get the same 176 px the table gets, because it is the
+             * same question -- what is in here -- and because a picture squeezed to make
+             * room for a label is worse than a label printed over the picture. The name
+             * and slot go over the envelope's quiet upper-left, where a sample's own
+             * dynamics leave room; the parameter values keep the right column.
+             *
+             * GRAN adds the live grain positions on top of the envelope. See
+             * src_grain_map: the envelope is the map, the ticks are the weather. */
             if (!smp_count) {
-                cv_text(100, 46, &FONT_XS, "NO SAMPLES", sk.ink);
+                cv_text(4, 46, &FONT_XS, "NO SAMPLES", sk.ink);
+            } else if (src == SRC_GRAN) {
+                /* the voice the cloud is most likely to be heard from: the newest one.
+                 * With several keys down the picture shows one voice's cloud, and the
+                 * newest is the one the player just caused. */
+                const wv_grains *gr = 0;
+                int32_t vi;
+                uint32_t newest = 0;
+                for (vi = 0; vi < (int32_t)WV_VOICES; vi++) {
+                    if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
+                        newest = dsp.v[vi].age;
+                        gr = &dsp.v[vi].gr;
+                    }
+                }
+                src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, gr);
+                cv_text(6, MAT_PAD + 1, &FONT_XS,
+                        smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
             } else {
-                cv_text(100, 40, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL",
-                        sk.ink_hi);
+                src_env(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, 0, smp[smp_i].len);
+                cv_text(6, MAT_PAD + 1, &FONT_XS,
+                        smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+            }
+
+            if (smp_count) {
                 bl = 0;
                 b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'O'; b[bl++] = 'T'; b[bl++] = ' ';
                 b[bl++] = (char)('0' + (smp_i + 1) % 10);
                 b[bl++] = '/';
                 b[bl++] = (char)('0' + (smp_count % 10));
                 b[bl] = 0;
-                cv_text(100, 58, &FONT_XS, b, sk.ink);
+                cv_text(6, MAT_PAD + 12, &FONT_XS, b, sk.ink);
             }
+
             if (src == SRC_GRAN) {
                 cv_text(186, 6, &FONT_XS, "SPRAY", sk.ink);
                 cv_text(186, 24, &FONT_XS, pct(k_spray), sk.ink_hi);
@@ -1217,6 +1468,64 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
     if (!strcmp(what, "active"))     { *got = (int)wv_active(&dsp); return 1; }
+    /* How many grains the newest voice has sounding, and its grain length in px of the
+     * material band. The screen draws one bar per live grain, so "the picture is
+     * missing a bar" and "the DSP has no grain there" are different bugs; this is the
+     * only way to tell them apart from a test. */
+    if (!strcmp(what, "grains")) {
+        int32_t vi;
+        uint32_t newest = 0, found = 0;
+        *got = 0;
+        for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+            if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
+                newest = dsp.v[vi].age;
+                found = 1;
+            }
+        if (found)
+            for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+                if (dsp.v[vi].active && dsp.v[vi].age == newest)
+                    *got = (int)wv_grains_on(&dsp.v[vi].gr);
+        return 1;
+    }
+    if (!strcmp(what, "grainpos")) {
+        int32_t vi;
+        uint32_t newest = 0, found = 0;
+        *got = -1;
+        for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+            if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
+                newest = dsp.v[vi].age;
+                found = 1;
+            }
+        if (found)
+            for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+                if (dsp.v[vi].active && dsp.v[vi].age == newest)
+                    for (int32_t q = 0; q < (int32_t)WV_GRAINS; q++)
+                        if (dsp.v[vi].gr.g[q].on) {
+                            *got = (int)((float)176.0f * dsp.v[vi].gr.g[q].pos
+                                         / (float)smp[smp_i].len);
+                            break;
+                        }
+        return 1;
+    }
+    if (!strcmp(what, "grainpx")) {
+        int32_t vi;
+        uint32_t newest = 0, found = 0;
+        *got = 0;
+        for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+            if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
+                newest = dsp.v[vi].age;
+                found = 1;
+            }
+        if (found && smp_count)
+            for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
+                if (dsp.v[vi].active && dsp.v[vi].age == newest) {
+                    const wv_grains *g = &dsp.v[vi].gr;
+                    float g1 = g->g[0].on ? g->g[0].dt : g->g[1].dt;
+                    if (g1 > 0.0f)
+                        *got = (int)((1.0f / g1) * g->rate / ((float)smp[smp_i].len / 176.0f));
+                }
+        return 1;
+    }
     return 0;
 }
 
