@@ -542,12 +542,12 @@ static src_skin_t src_skin(void)
  * language, one scale down. */
 static void src_icon(const src_skin_t *k)
 {
-    /* The strip's own canvas is 240x40. The icon sits in the left corner and is 56 px
-     * wide rather than centred: the strip's right side carries BANK and SLOT, and a
-     * centred icon measured 78..161, overlapping the BANK text at 112. A corner icon
-     * is also the thing the user asked for -- the bottom band is now free for the
-     * information that has no encoder to sit next to. */
-    int32_t x0 = 6, y0 = 8, w = 56, h = 24;
+    /* The strip's own canvas is 240x40. The icon sits in the left corner: a centred
+     * icon measured 78..161 and overlapped the text that used to be here. In SYNTH the
+     * corner is all it gets -- 32 px wide, because the table's own shape takes the rest
+     * of the strip -- and in the other sources it keeps the 56 px it had. */
+    int32_t wide = (src == SRC_SYNTH);
+    int32_t x0 = 4, y0 = 8, w = wide ? 32 : 56, h = wide ? 20 : 24;
     int32_t mid = y0 + h / 2, amp = h / 2 - 1;
     int32_t i, px = 0, py = 0;
 
@@ -597,6 +597,67 @@ static void src_icon(const src_skin_t *k)
  *
  * The bar is 8 px rather than 6: at the old 30 px width a bar was a tick mark, at
  * 54 it is the thing the eye actually tracks while turning. */
+/* ─── the source shape ────────────────────────────────────────────────────── */
+
+/* What is being FED to the chain, as opposed to what came out of it. The scope at the
+ * top shows the result of shaper -> filter -> VCA, which is what the ear hears; this
+ * shows the material. Without it a dull or thin sound is ambiguous: is the table like
+ * that, or is CUT/SHAPE/AMOUNT doing it? Two pictures answer that, one does not.
+ *
+ * SYNTH only for now. The table is 256 points and the strip is 240 columns, so it maps
+ * almost one to one and every wiggle survives. A sample would need a min/max envelope
+ * (8800 samples into 240 columns: transients visible, individual cycles not) and GRAN
+ * would need the grain window and its overlap rather than a waveform -- and that shape
+ * is already the source icon, so drawing it twice would say nothing.
+ *
+ * THE PHASE IS FIXED, and that is the whole design rather than a shortcut. Reading the
+ * table at the audio phase would scroll, which is the defect the scope was just cured
+ * of. Stepping a local phase 0..1 across the width makes this a still picture of the
+ * material: it moves when BANK or MORPH moves, and at no other time. It follows the
+ * sound, not the moment, which is the job.
+ *
+ * MORPH goes through the same wv_table_read() the voices use, so the drawn shape is the
+ * shape being played -- a 50% morph is the interpolated frame, not frame 3.5 rounded. */
+static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
+{
+    int32_t i, py = 0, mid = y0 + h / 2, amp = h / 2 - 1;
+    float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+    float pk = 0.0f;
+
+    /* Normalise by the frame's own peak, the same decision the scope's auto-gain makes
+     * and for the same reason: the question is "what shape is this", not "how loud".
+     * It is not cosmetic here -- measured, the SAW SQR bank's frames fall from 32767 to
+     * 19892 across MORPH (the banks are peak-normalised per frame, and a triangle at the
+     * same peak has less area than a saw), so drawing at a fixed scale made the last
+     * frames look almost flat while they are in fact a clean triangle. Normalising lets
+     * every frame fill the band and the shape stays readable end to end. */
+    for (i = 0; i < w; i++) {
+        float v = wv_table_read(&bank, (float)i / (float)w, mf);
+        if (v < 0.0f)
+            v = -v;
+        if (v > pk)
+            pk = v;
+    }
+    if (pk < 0.05f)
+        pk = 1.0f;                      /* an empty table: draw it flat, not amplified */
+    else
+        pk = 1.0f / pk;
+
+    for (i = 0; i < w; i++) {
+        float v = wv_table_read(&bank, (float)i / (float)w, mf) * pk;
+        int32_t y = mid - (int32_t)(v * (float)amp);
+        if (y < y0)
+            y = y0;
+        if (y > y0 + h - 1)
+            y = y0 + h - 1;
+        if (i == 0)
+            cv_rect(x0, y, 2, 2, k->ink_hi);
+        else
+            cv_line(x0 + i - 1, py, x0 + i, y, k->ink_hi);
+        py = y;
+    }
+}
+
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
                  int32_t v127, int lit)
 {
@@ -932,11 +993,25 @@ void app_frame(void)
      * that changes them is. What is left here is the source icon (the only thing that
      * says which engine without being read) and the page marker. */
     cv_begin(240, 40, sk.bg);
-    src_icon(&sk);
-    if (env_page)
-        cv_text(112, 14, &FONT_XS, "ENV PAGE", sk.ink_hi);
-    else if (!smp_count && src != SRC_SYNTH)
-        cv_text(112, 14, &FONT_XS, "NO SAMPLES", sk.ink);
+    if (src == SRC_SYNTH) {
+        /* The strip carries the material: the source's own shape on the left, the
+         * selected table on the right. The icon still earns its corner -- it is the one
+         * thing that names the source without being read -- so it shrinks rather than
+         * leaves.
+         *
+         * Split at 40 px: the icon is 32 wide and the wave needs the rest. The wave is
+         * drawn a pixel inside the band at each end so its first and last columns do not
+         * sit on the border where they read as clipping. */
+        src_shape(&sk, 44, 6, 192, 28);
+        if (env_page)
+            cv_text(2, 2, &FONT_XS, "ENV", sk.ink);
+    } else {
+        src_icon(&sk);
+        if (env_page)
+            cv_text(112, 14, &FONT_XS, "ENV PAGE", sk.ink_hi);
+        else if (!smp_count)
+            cv_text(112, 14, &FONT_XS, "NO SAMPLES", sk.ink);
+    }
     cv_blit(0, 200);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
