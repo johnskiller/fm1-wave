@@ -372,6 +372,39 @@ shot grn.png
     ck(expect("tap ENV\ntap LFO\n", "env", 0), "LFO closes the ENV page")
     ck(expect("tap LFO\ntap ENV\n", "lfo", 0), "ENV closes the LFO page")
 
+    # ── the scope's vertical reference ──────────────────────────────────────────
+    # SCOPE_REF is 0.5 (eight voices, pre-master, wide open -- measured), not digital
+    # full scale. The bug this pins is "you can barely see the waveform": with full
+    # scale as the reference a single note drew 2 px from the centre and the user
+    # could not read the trace at all.
+    #
+    # Measured on the host through the real render path: 1 voice 36 px of 84, 4 voices
+    # 47 px, 8 voices 43 px. The check is that one note is at least a third of the
+    # band, which is the difference between a waveform and a line.
+    INK = (255, 186, 65)                      # SYNTH ink_hi
+    def trace_extent(keys):
+        out = tempfile.mkdtemp()
+        script = "res 1\nwait 200\n" + "".join(f"key {k} down\n" for k in keys)
+        script += "wait 600\nshot s.png\n"
+        sp = os.path.join(out, "s.txt")
+        open(sp, "w").write(script)
+        subprocess.run([HOST, sp, out], capture_output=True, text=True, timeout=120, cwd=out)
+        im = Image.open(os.path.join(out, "s.png")).convert("RGB")
+        rows = []
+        for y in range(84):
+            for x in range(64, 240):          # skip the debug corner
+                px = im.getpixel((x, y))
+                if px == INK:
+                    rows.append(y)
+                    break
+        return (max(rows) - min(rows) + 1) if rows else 0
+
+    one = trace_extent([13])
+    four = trace_extent([10, 13, 16, 19])
+    print(f"scope: 1 voice {one} px, 4 voices {four} px of 84")
+    ck(one >= 28, "one note draws at least a third of the scope band")
+    ck(four > one, "a chord draws taller than one note (the scope tracks polyphony)")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

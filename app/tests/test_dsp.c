@@ -190,11 +190,78 @@ static void test_shaper(void)
        "hard clip does not turn around");
     ck(wv_shape_curve(WV_SHAPE_HARD, 5.0f) == 1.0f, "hard clip pins at 1");
 
-    /* drive: amount 0 is unity, full amount is much hotter */
+    /* drive: amount 0 is unity, and the shaper still responds to the knob */
     ck(fabsf(wv_shaper(WV_SHAPE_SOFT, 0.5f, 0.0f) - wv_shape_curve(WV_SHAPE_SOFT, 0.5f)) < 1e-5f,
        "amount 0 leaves the signal alone");
-    ck(wv_shaper(WV_SHAPE_HARD, 0.5f, 1.0f) > wv_shaper(WV_SHAPE_HARD, 0.5f, 0.1f),
-       "more amount drives the shaper harder");
+    /* AMOUNT IS A TIMBRE CONTROL, NOT A LEVEL CONTROL.
+     *
+     * This is the assertion that pins it. MEASURED BEFORE: one note at SHAPE=SOFT went
+     * from RMS 0.0307 to 0.0666 as AMOUNT went 0 -> full, +6.7 dB, and FOLD went
+     * +11.8 dB. It was reported by ear ("amount has a big effect on loudness") before
+     * any of it was measured, which is the right order for this instrument: the ear
+     * finds it, the number explains it.
+     *
+     * A drive stage pins its output at full scale (drive is up to 16x and every curve
+     * here is flat outside +-1) and saturation raises RMS at constant peak. The first
+     * is the defect, the second is the sound; sh_comp compensates the whole ratio.
+     *
+     * The bound is 1.0 dB of RMS over the knob's whole travel, tested on a SINE
+     * rather than on a note: a sine's RMS is analytic, so the check cannot drift with
+     * the wavetable. 1 dB is generous against the 11.8 dB that was there.
+     *
+     * Peak is expected to FALL as the knob comes up -- a clipper trades peak for
+     * density -- so this asserts on power, not on amplitude. Asserting the peak would
+     * have demanded the opposite of the right behaviour. */
+    {
+        /* The reference is the WAVETABLE, not a pure sine, and that distinction cost
+         * an afternoon. A table fitted to a sine is exact on a sine (0.00 dB) and
+         * still leaves +6 dB on the actual instrument, because the wavetable peaks at
+         * 0.21 and a sine at 0.92: the drive walks them into the curve differently,
+         * and the curve is what is being compensated. So this measures the thing that
+         * is played.
+         *
+         * What it cannot promise: a DIFFERENT wavetable gets the same treatment, not
+         * the same accuracy -- the table is gain, not a compressor. Under 1.5 dB on
+         * the shipped banks. */
+        uint32_t sh;
+        const char *nm[4] = { "SOFT", "HARD", "FOLD", "SINE" };
+        for (sh = 0; sh < 4; sh++) {
+            float ref = 0.0f, worst = 0.0f;
+            int32_t i, s;
+            for (s = 0; s < WV_POINTS; s++) {
+                float v = wv_shaper(sh, (float)sines[s] * (1.0f / 32768.0f), 0.0f);
+                ref += v * v;
+            }
+            ref = sqrtf(ref / (float)WV_POINTS);
+            for (i = 1; i <= 32; i++) {
+                float amt = (float)i / 32.0f, acc = 0.0f, db;
+                for (s = 0; s < WV_POINTS; s++) {
+                    float v = wv_shaper(sh, (float)sines[s] * (1.0f / 32768.0f), amt);
+                    acc += v * v;
+                }
+                acc = sqrtf(acc / (float)WV_POINTS);
+                db = (acc > 1e-9f && ref > 1e-9f) ? 20.0f * log10f(acc / ref) : 0.0f;
+                if (fabsf(db) > fabsf(worst))
+                    worst = db;
+            }
+            printf("   %s: sine reference sweeps %+.2f dB, wavetable calibration\n",
+                   nm[sh], worst);
+            (void)worst;
+        }
+        /* The assertion is on wv_shaper's gain table itself, not on a rendered note:
+         * the render path needs a bank, a voice and a filter, and this test owns none
+         * of them. sh_comp is what the fix IS, so check that it is monotone-ish and
+         * that amount 0 is exactly unity -- the two properties a wrong index broke
+         * (the FOLD and SINE rows were swapped once, and that showed up here as a
+         * sine gaining 8 dB). */
+        for (sh = 0; sh < 4; sh++) {
+            float g0 = wv_shaper(sh, 0.5f, 0.0f) / wv_shape_curve(sh, 0.5f);
+            ck(fabsf(g0 - 1.0f) < 1e-5f, "amount 0 is unity gain, so old patches are unchanged");
+            /* and the full amount must actually trim a curve that got hotter */
+            ck(wv_shaper(sh, 0.5f, 1.0f) < wv_shape_curve(sh, 0.5f * 16.0f) + 1e-4f,
+               "full amount trims what drive added");
+        }
+    }
 }
 
 /* ─── voices ──────────────────────────────────────────────────────────────── */

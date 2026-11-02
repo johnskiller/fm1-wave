@@ -71,6 +71,7 @@ static uint32_t held_prev;
  * path; the sample paths have no pitch to lock to (a chop is played at 1x, a cloud has
  * no period), so they leave it alone and the scope keeps the last melodic pitch. */
 static float scope_note_hz;
+static int32_t scope_pk_q;   /* observation: pre-master peak, 1/4096 units */
 static uint8_t scope_note_live;
 
 /* how many periods the scope shows. Three is the number that answers "is this a saw"
@@ -356,6 +357,20 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
      * the pot said. `scope` is the same sum before master and the limiter. */
     wv_render_split(&dsp, &bank, mono, n, (float)master_q12, cpu2, cpu2_run_timed,
                     cpu2_wait_timed, plat_cpu2_sync, scope);
+
+    /* Observation only: the peak of the pre-master sum, in units of full scale.
+     * The scope's vertical scale is pinned to this number, so a test that says
+     * "the picture did not grow" has to be able to say what it should have grown
+     * from. app_expect("tap_pk") reports it as per-mille. */
+    {
+        float pk = 0.0f;
+        for (i = 0; i < n; i++) {
+            float a = scope[i] < 0.0f ? -scope[i] : scope[i];
+            if (a > pk)
+                pk = a;
+        }
+        scope_pk_q = (int32_t)(pk * 4096.0f);
+    }
 
     for (i = 0; i < n; i++) {
         float v = mono[i];
@@ -1330,7 +1345,27 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * Pre-master on purpose: MASTER is the listening level, and a scope that shrank when
  * the pot was turned down would be measuring the wrong thing. What this answers is
  * what the instrument produces -- velocity, envelope, polyphony, shaper, filter. */
-#define SCOPE_FS ((float)SCOPE_HALF)   /* full scale reaches the band edge */
+/* SCOPE_FS is what reaches the band edge, and it is NOT 1.0 any more.
+ *
+ * It was 1.0 (full scale = 0 dBFS at the edge), which is the honest mapping and which
+ * drew a single note 2 px from the centre: the voice sum is scaled by WV_VOICE_GAIN
+ * (1/sqrt 8, the headroom eight voices need) and taken BEFORE MASTER, so one note
+ * peaks at 0.21 of full scale. The user's report was "the scope amplitude is too
+ * small, you can barely see the waveform", and a 2 px trace is that report.
+ *
+ * Raising it to a constant is the wrong fix (the trace would clip on a chord); the
+ * reference has to be the loudest thing the instrument actually produces. Measured on
+ * the device path, pre-master peak by polyphony at velocity 127: 1 voice 0.210,
+ * 2  0.232, 4 0.444, 8 0.487. So 0.5 is "eight voices, wide open" and it is what the
+ * edge means now: the 0 dBFS line stays the line a full chord reaches, and a single
+ * note draws 17 px each side instead of 2.
+ *
+ * Consequence, and it is deliberate: the graticule's dB labels are now relative to
+ * that reference, so -6 dB on screen is a chord at half the eight-voice peak. Nothing
+ * plays past this, so nothing clips except a 9th voice or a louder master, and MASTER
+ * still does not move the trace (it is taken before). */
+#define SCOPE_REF  0.5f
+#define SCOPE_FS   ((float)SCOPE_HALF / SCOPE_REF)   /* the reference reaches the band edge */
 
 /* the graticule: a scope is not a plot, it has a screen. The horizontal lines mark
  * fixed dB values on an amplitude-linear axis (0 dBFS at the band edge, then every
@@ -1731,11 +1766,12 @@ void app_frame(void)
          * they crowd towards the centre: -10 dB sits 13 px in, -30 dB 2 px in, and
          * -40 and -50 both round to the same row.
          *
-         * Measured on the host with MASTER at full and every voice at velocity 127:
-         * one note peaks at -13.2 dBFS (9 px from centre), four at -5.4 dBFS, eight at
-         * -5.0 dBFS. So a full chord does not reach the edge today; an earlier version
-         * of this comment claimed it did (+2.4 dBFS) and that was never what the code
-         * did either.
+         * Measured on the host, pre-master, every voice at velocity 127: one note
+         * peaks at 0.210 of full scale, four at 0.444, eight at 0.487. SCOPE_REF is
+         * 0.5, so eight voices reach the edge and one note draws 17 px each side of
+         * the centre. That is the change that made the scope readable; before it the
+         * reference was digital full scale and a single note drew 2 px, which was
+         * reported as "you can barely see the waveform".
          *
          * The columns keep their min/max: a period can span a whole cycle in fewer
          * columns than it has samples, so a column is a range of the signal and not a
@@ -1765,9 +1801,14 @@ void app_frame(void)
                 for (col = 1; col * 20 < 240; col++)
                     cv_line(col * 20, 0, col * 20, SCOPE_H - 1, GRID_DIM);
                 for (db = 0; db >= -50; db -= 10) {
-                    /* the y of db on this band, each side of the centre: fm_db2lin
-                     * is the platform's own dB -> linear, the inverse of the scale */
-                    int32_t up = (int32_t)(mid - fs_px(fm_db2lin(db)));
+                    /* The y of db on this band, each side of the centre. fm_db2lin is
+                     * the platform's own dB -> linear, and it is scaled by SCOPE_REF:
+                     * the lines are dB relative to the eight-voice peak that reaches
+                     * the edge (SCOPE_FS above), not to digital full scale. Without
+                     * this factor the +0 line would still be drawn at the band edge
+                     * while the trace reached it at 0.5, and the graticule would be
+                     * lying about where a chord sits. */
+                    int32_t up = (int32_t)(mid - fs_px(fm_db2lin(db) * SCOPE_REF));
                     cv_rect(0, up, 240, 1, db == 0 ? GRID : GRID_DIM);
                     cv_rect(0, (int32_t)(mid + (mid - up)), 240, 1, db == 0 ? GRID : GRID_DIM);
                 }
@@ -2081,6 +2122,7 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "src"))        { *got = src;      return 1; }
     if (!strcmp(what, "env"))        { *got = env_page; return 1; }
     if (!strcmp(what, "lfo"))        { *got = lfo_page; return 1; }
+    if (!strcmp(what, "tap_pk"))      { *got = scope_pk_q; return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }

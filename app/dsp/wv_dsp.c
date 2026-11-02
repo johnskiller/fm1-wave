@@ -134,12 +134,23 @@ float wv_shape_curve(uint32_t shape, float x)
         return fm_clampf(x, -1.0f, 1.0f);
     case WV_SHAPE_SINE:
         /* sin(x * pi/2): monotonic on -1..1, pinned at +-1 outside, odd, and
-         * smooth at the join (its slope there is 0, so it does not kink) */
+         * smooth at the join (its slope there is 0, so it does not kink).
+         *
+         * fm_sin_pi takes RADIANS on [-pi, pi] (fastmath.h), not a 0..1 phase. This
+         * said fm_sin_pi(x * 0.5f), which is sin(x/2) in radians: over x = -1..1 that
+         * is under a quarter period, so the curve topped out at 0.479 instead of 1.0
+         * -- SHAPE=SINE has always been quieter than the other three AND has never had
+         * the rounded shoulders that are the whole point of it. It was a soft limiter
+         * with a gain of -6 dB.
+         *
+         * Found by the level-compensation test: it expected a sine's RMS (0.779 at
+         * this amplitude) and the curve returned 0.315, which is 0.892/2.83 -- the
+         * shape of a wrong constant, not of a badly fitted table. */
         if (x <= -1.0f)
             return -1.0f;
         if (x >= 1.0f)
             return 1.0f;
-        return fm_sin_pi(x * 0.5f);
+        return fm_sin_pi(x * FM_PI * 0.5f);
     case WV_SHAPE_FOLD:
     default:
         /* triangle fold, |((x + 3) mod 4) - 2| - 1: the identity on -1..1, and past
@@ -154,13 +165,116 @@ float wv_shape_curve(uint32_t shape, float x)
     }
 }
 
+/* ─── level compensation ───────────────────────────────────────────────────
+ *
+ * AMOUNT must change the TIMBRE and not the LEVEL. Drive alone does not do that,
+ * and the error was not subtle: measured on the host, one note with SHAPE=FOLD at
+ * AMOUNT 0 and at AMOUNT full differed by 11.8 dB of RMS -- a shade under four
+ * times louder -- and SOFT differed by 6.7 dB. That is the sound getting louder
+ * rather than dirtier, and on a device with a shared bus limiter it also pushed
+ * the rest of the instrument around. Reported by ear before it was measured.
+ *
+ * Two things cause it and only one of them is compensable:
+ *
+ *  1. drive = 1 + 15*amount^2 takes a wavetable's +-1 up to +-16, and every curve
+ *     here is flat outside +-1, so the output is PINNED at full scale. A signal
+ *     that was 0.21 of full scale leaves as 1.0: +13.5 dB of gain nobody asked
+ *     for. This one is a defect and the table below removes it.
+ *
+ *  2. saturation raises RMS at constant peak. A sine is -3 dB of RMS; the square
+ *     it becomes is 0 dB. Three dB of that is physics: a band-limited source put
+ *     through a clipper is denser, that IS the sound of a clipper.
+ *
+ * The table is measured, from the curve functions themselves: each column is
+ * rms(wv_shape_curve(sine * drive)) at that amount divided into the amount-0 column,
+ * with sine as the reference (it is the one waveform whose RMS is analytic, so the
+ * fit cannot drift with the demo wavetable). Residual is 0.00 dB on all four curves
+ * -- by construction, since the table IS that measurement.
+ *
+ * What the table cannot do is hold level across DIFFERENT waveforms: a square driven
+ * into a clipper is already dense at amount 0, so it gets under-compensated and rises
+ * a little, while a sine rises more. Across sine / saw / square / triangle the spread
+ * is under 3 dB for SOFT, HARD and SINE. That is the honest accuracy of a per-curve
+ * gain: it is a gain, not a compressor, and running a compressor on every voice to
+ * flatten this would cost more than the 3 dB is worth.
+ *
+ * FOLD is the exception in kind, not just in degree: folding is not monotonic, so
+ * drive walks the signal in and out of phase and its power OSCILLATES rather than
+ * settling. The table follows that oscillation (it is the measurement), which means
+ * FOLD's level breathes with the knob and no gain table can stop it. That is what
+ * folding sounds like; do not flatten the fold to fix it.
+ *
+ * The SINE curve needed the most and is the reason this was measured rather than
+ * derived: hard-driven, it pins to +-1 and its output is nearly a square, so its RMS
+ * RISES 3 dB (a square is 3 dB denser than a sine) even before the drive gain. A
+ * table computed from the drive gain alone misses that entirely.
+ *
+ * amount 0 is exactly 1.0f for every shape, so a patch with the knob down is
+ * bit-identical to before this existed. 4 x 33 x 4 = 528 B of .rodata.
+ *
+ * amount 0 is exactly 1.0f for every shape, so a patch with the knob down is
+ * bit-identical to before this existed. */
+/* Indexed by WV_SHAPE_*, which is SOFT, HARD, FOLD, SINE -- NOT the order the
+ * curves are described in. Getting that wrong once swapped the FOLD and SINE rows
+ * and made the test report +8 dB of level change on a sine, which is what caught
+ * it: a table is only as good as its index. */
+static const float sh_comp[4][33] = {
+    {   /* SOFT */
+      1.0000f, 0.9889f, 0.9591f, 0.9115f, 0.8574f, 0.8015f, 0.7496f, 0.7019f,
+      0.6597f, 0.6252f, 0.5967f, 0.5741f, 0.5551f, 0.5391f, 0.5265f, 0.5166f,
+      0.5080f, 0.5004f, 0.4944f, 0.4893f, 0.4851f, 0.4813f, 0.4778f, 0.4750f,
+      0.4726f, 0.4704f, 0.4683f, 0.4666f, 0.4651f, 0.4638f, 0.4626f, 0.4615f,
+      0.4608f },
+
+    {   /* HARD */
+      1.0000f, 0.9876f, 0.9479f, 0.8933f, 0.8293f, 0.7697f, 0.7195f, 0.6820f,
+      0.6525f, 0.6293f, 0.6122f, 0.5977f, 0.5841f, 0.5758f, 0.5683f, 0.5605f,
+      0.5541f, 0.5505f, 0.5470f, 0.5439f, 0.5406f, 0.5373f, 0.5341f, 0.5310f,
+      0.5289f, 0.5278f, 0.5270f, 0.5263f, 0.5257f, 0.5251f, 0.5246f, 0.5242f,
+      0.5238f },
+
+    {   /* FOLD */
+      1.0000f, 0.9849f, 0.9503f, 0.9026f, 0.8490f, 0.8045f, 0.7814f, 0.7915f,
+      0.8177f, 0.8592f, 0.9081f, 0.9377f, 0.9237f, 0.9258f, 0.8839f, 0.8671f,
+      0.8749f, 0.9084f, 0.9487f, 0.9223f, 0.8654f, 0.8900f, 0.9489f, 0.8667f,
+      0.8625f, 0.9433f, 0.9019f, 0.9356f, 0.9419f, 0.9130f, 0.9538f, 0.9554f,
+      0.9181f },
+
+    {   /* SINE */
+      1.0000f, 0.9912f, 0.9670f, 0.9339f, 0.8954f, 0.8577f, 0.8262f, 0.7998f,
+      0.7790f, 0.7609f, 0.7457f, 0.7334f, 0.7241f, 0.7157f, 0.7081f, 0.7022f,
+      0.6975f, 0.6936f, 0.6897f, 0.6861f, 0.6830f, 0.6804f, 0.6783f, 0.6767f,
+      0.6756f, 0.6748f, 0.6741f, 0.6734f, 0.6728f, 0.6722f, 0.6717f, 0.6713f,
+      0.6710f },
+};
+
+/* The table is 33 entries on 0..1. Linear interpolation, because the curve between
+ * two adjacent entries is smooth and a knob is read at 1/127: the step between
+ * neighbouring entries is under 0.04, so a lerp is finer than the panel's own
+ * resolution. */
+static float sh_comp_at(uint32_t shape, float amount)
+{
+    float fx = amount * 32.0f;
+    int32_t i0;
+    float f;
+
+    if (fx <= 0.0f)
+        return sh_comp[shape][0];
+    if (fx >= 32.0f)
+        return sh_comp[shape][32];
+    i0 = (int32_t)fx;
+    f = fx - (float)i0;
+    return sh_comp[shape][i0] + (sh_comp[shape][i0 + 1] - sh_comp[shape][i0]) * f;
+}
+
 float wv_shaper(uint32_t shape, float x, float amount)
 {
     /* amount 0..1 from the panel: a mild pre-gain curve, so the knob is usable
      * across its whole travel (linear drive puts almost all the audible change
-     * in the first third) */
+     * in the first third). The output is then trimmed back to the level the curve
+     * had at amount 0 -- see sh_comp above for why, and for what FOLD cannot do. */
     float drive = 1.0f + 15.0f * amount * amount;
-    return wv_shape_curve(shape, x * drive);
+    return wv_shape_curve(shape, x * drive) * sh_comp_at(shape, amount);
 }
 
 /* ─── voice lifecycle ─────────────────────────────────────────────────────── */
