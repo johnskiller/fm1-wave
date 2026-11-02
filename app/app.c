@@ -44,14 +44,7 @@ static uint8_t        smp_i;      /* which slot EN_PRESET picked, in SMPL */
  *
  * Per slot, because the position belongs to the material: switching slots and back
  * returns to where that sample was left. */
-static float          gran_resume[WV_SMP_MAX];
-/* Not "has a cloud ever run" -- the picture should be there from power-on, because the
- * point of parking the playhead is that the band is always legible. With gran_seen
- * starting clear, the first sight of GRAN was the envelope alone and the reference
- * appeared only after the first note, which is exactly the disappearing the player
- * complained about, just moved to boot. The playhead starts at 0, which is true: the
- * first note will read from there. */
-static uint8_t        gran_seen = 1;
+
 static uint8_t        slices_from; /* the slot the current chops came out of */
 
 /* SOURCE: which thing a key plays. SYNTH reads the wavetable, SMPL reads the pool as
@@ -310,30 +303,24 @@ static void play_note(uint8_t note, uint8_t vel)
      * over a single chop is a legitimate sound but a confusing default, so the keys
      * stay melodic in GRAN and the material knob chooses the slot. */
     if (src == SRC_GRAN) {
-        /* start where this slot was left, not at the loop start: see gran_resume */
-        uint32_t from = 0;
-        if (gran_resume[smp_i] > 0.0f
-            && gran_resume[smp_i] < (float)(smp[smp_i].len - 1u))
-            from = (uint32_t)gran_resume[smp_i];
-        wv_note_on_grain(&dsp, &smp[smp_i], note, vel, from, 0);
-        /* Resuming must not move the loop. wv_note_on_grain passes `from` as both the
-         * playhead and the loop start, which is right for a fresh note and wrong here:
-         * measured, resuming at 85 % of the slot shrank the loop to x 88..179, so the
-         * cloud read only the tail of the material and wrapped there. The loop is the
-         * whole slot until there is a way to set it. */
-        {
-            int32_t vi2;
-            uint32_t newest2 = 0, found2 = 0;
-            for (vi2 = 0; vi2 < (int32_t)WV_VOICES; vi2++)
-                if (dsp.v[vi2].active && dsp.v[vi2].age >= newest2) {
-                    newest2 = dsp.v[vi2].age;
-                    found2 = 1;
-                }
-            for (vi2 = 0; found2 && vi2 < (int32_t)WV_VOICES; vi2++)
-                if (dsp.v[vi2].active && dsp.v[vi2].age == newest2)
-                    wv_grains_loop(&dsp.v[vi2].gr, 0, smp[smp_i].len);
-        }
-        gran_seen = 1;
+        /* Always from the start of the material.
+         *
+         * A grain fades in and out over the same piece of the sample that a one-shot
+         * would have fired once, so the sound of a note is decided by the material at
+         * the point it starts reading. The playhead used to resume where the last note
+         * parked, which makes that point depend on when the previous note was RELEASED:
+         * measured on the demo kit, the first 100 ms of a cloud started at 50 % of the
+         * slot is 25.7 dB below one started at 0, and at 100 % it is 57.2 dB down. The
+         * same key at the same velocity would be near-silent because of history, and that
+         * is not an instrument.
+         *
+         * The cost is one-sided and known: scatter cannot reach backwards past sample 0,
+         * so at high SPRAY the cloud is denser at the start of the material than it would
+         * be in the middle (measured, 11.7 % of grains in the first 5 % of the slot
+         * against 5 % uniform). That is a bias toward the transient, which is the
+         * direction a player would accept.
+         */
+        wv_note_on_grain(&dsp, &smp[smp_i], note, vel, 0u, 0);
         return;
     }
 
@@ -387,26 +374,6 @@ static void input(void)
             /* the last key up: the scope can go back to a neutral window. A single
              * key-up while others are held must not, so the flag is cleared only when
              * no key is left down -- checked after the loop. */
-            /* Leaving a granular note: remember where the playhead was, so the next
-             * note on this slot carries on from there. Read before note_off, because
-             * the voice is freed once its envelope reaches the floor and the position
-             * goes with it. The newest granular voice is the one the player just let
-             * go of; with several held, keeping the last one is the useful answer --
-             * it is the one whose picture was on screen. */
-            if (src == SRC_GRAN) {
-                int32_t vi;
-                uint32_t newest = 0, found = 0;
-                for (vi = 0; vi < (int32_t)WV_VOICES; vi++)
-                    if (dsp.v[vi].active && dsp.v[vi].src == WV_SRC_GRAIN
-                        && dsp.v[vi].note == note && dsp.v[vi].age >= newest) {
-                        newest = dsp.v[vi].age;
-                        found = 1;
-                    }
-                for (vi = 0; found && vi < (int32_t)WV_VOICES; vi++)
-                    if (dsp.v[vi].active && dsp.v[vi].src == WV_SRC_GRAIN
-                        && dsp.v[vi].note == note && dsp.v[vi].age == newest)
-                        gran_resume[smp_i] = dsp.v[vi].gr.play;
-            }
             wv_note_off(&dsp, note);
             plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)note << 16, TO_USB | TO_BLE);
         }
@@ -801,26 +768,44 @@ static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * that shape -- a drum's decaying bars are the information, not a defect to correct.
  * The only scaling is one common factor to the band's height, chosen once for the whole
  * slot, so a quiet sample is drawn quiet. */
-static void src_env(const src_skin_t *k, const wv_sample *s, int32_t x0, int32_t y0,
-                    int32_t w, int32_t h, uint32_t from, uint32_t to)
+/* The material's envelope: one thin line, mirrored, drawn dim.
+ *
+ * min/max per column is what a waveform display wants and what this used to do, and it
+ * is why the envelope read as a solid block. Measured on the demo kit, 53 samples per
+ * column and a drum hit oscillates fast enough to span 60 of the 78 px in a single
+ * column -- so every column of every hit is filled, and a hit becomes a rectangle. The
+ * second demo slot is worse in a different way: a sustained tone spans a constant
+ * 66/78 px, so at min/max it is a full-height block from end to end with no shape at all.
+ *
+ * Peak magnitude per column is the envelope, and it is what the player is reading: "how
+ * loud is the material here". Measured, it gives 0..39 px of usable shape on the kit and
+ * a flat 38..39 px on the tone -- and the tone genuinely IS flat, so a flat line is the
+ * true answer there rather than a drawing artefact.
+ *
+ * Both source painters share this so SMPL and GRAN cannot drift apart in brightness.
+ */
+static uint16_t dim6(uint16_t c, int32_t num, int32_t den);
+
+static void env_line(const wv_sample *s, int32_t x0, int32_t y0, int32_t w, int32_t h,
+                     uint32_t from, uint32_t to, uint16_t colour)
 {
     int32_t mid = y0 + h / 2, amp = h / 2 - 1;
     int32_t i;
-    float sc;
+    float pk = 0.0f, sc;
+    int32_t prev = -1;
 
     if (!s || !s->data || !s->len || to <= from || to > s->len) {
         /* nothing to draw: a flat line at zero, which says "no material" rather than
          * leaving the band empty and looking like a fault */
-        cv_rect(x0, mid, w, 1, k->ink);
+        cv_rect(x0, mid, w, 1, colour);
         return;
     }
 
-    /* one scale for the whole slot: the peak of the region being drawn */
-    {
-        float pk = 0.0f;
+    {   /* one scale for the whole slot, from its own peak: the picture shows shape,
+         * not absolute level (the scope is where level is read) */
         uint32_t j;
         for (j = from; j < to; j++) {
-            float v = (float)s->data[j] / 32768.0f;
+            float v = (float)s->data[j] * (1.0f / 32768.0f);
             if (v < 0.0f)
                 v = -v;
             if (v > pk)
@@ -834,29 +819,30 @@ static void src_env(const src_skin_t *k, const wv_sample *s, int32_t x0, int32_t
     for (i = 0; i < w; i++) {
         uint32_t a = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)i / (uint32_t)w);
         uint32_t b = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)(i + 1) / (uint32_t)w);
-        float lo = 0.0f, hi = 0.0f;
+        float m = 0.0f;
         uint32_t j;
+        int32_t y;
 
         if (b <= a)
             b = a + 1;
         for (j = a; j < b && j < s->len; j++) {
-            float v = (float)s->data[j] / 32768.0f;
-            if (v < lo)
-                lo = v;
-            if (v > hi)
-                hi = v;
+            float v = (float)s->data[j] * (1.0f / 32768.0f);
+            if (v < 0.0f)
+                v = -v;
+            if (v > m)
+                m = v;
         }
-        {
-            int32_t yh = mid - (int32_t)(hi * sc);
-            int32_t yl = mid - (int32_t)(lo * sc);
-            if (yh < y0)
-                yh = y0;
-            if (yl > y0 + h - 1)
-                yl = y0 + h - 1;
-            if (yl < yh)
-                yl = yh;
-            cv_rect(x0 + i, yh, 1, yl - yh + 1, k->ink_hi);
-        }
+        y = mid - (int32_t)(m * sc);
+        if (y < y0)
+            y = y0;
+        /* a vertical join keeps the line continuous where the peak jumps by more than a
+         * pixel between columns: a broken line reads as gaps in the material */
+        if (prev >= 0 && y != prev)
+            cv_line(x0 + i, prev < y ? prev : y, x0 + i, prev < y ? y : prev, colour);
+        else
+            cv_rect(x0 + i, y, 1, 1, colour);
+        cv_rect(x0 + i, mid + (mid - y), 1, 1, colour);   /* mirrored: a waveform, not a level */
+        prev = y;
     }
 }
 
@@ -900,10 +886,9 @@ static uint16_t dim(uint16_t c, int32_t num, int32_t den)
 }
 
 static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, int32_t y0,
-                          int32_t w, int32_t h, const wv_grains *gr, float idle_pos,
-                          int32_t show_idle)
+                          int32_t w, int32_t h, const wv_grains *gr)
 {
-    int32_t mid = y0 + h / 2, amp = h / 2 - 1;
+    int32_t mid = y0 + h / 2;
     int32_t i;
     /* four heights: the grain slots are four, so four lanes are enough for every grain
      * to have its own row and none can hide another */
@@ -915,29 +900,10 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
     }
 
     /* ── layer 1: the material, dim. It is the background, and it must be readable
-     * enough to be a map and dark enough that a bar on top of it is unambiguous. */
-    for (i = 0; i < w; i++) {
-        uint32_t a = (uint32_t)((uint64_t)s->len * (uint32_t)i / (uint32_t)w);
-        uint32_t b = (uint32_t)((uint64_t)s->len * (uint32_t)(i + 1) / (uint32_t)w);
-        float lo = 0.0f, hi = 0.0f;
-        uint32_t q;
-        if (b <= a)
-            b = a + 1;
-        for (q = a; q < b && q < s->len; q++) {
-            float v = (float)s->data[q] / 32768.0f;
-            if (v < lo)
-                lo = v;
-            if (v > hi)
-                hi = v;
-        }
-        {
-            int32_t yh = mid - (int32_t)(hi * (float)amp);
-            int32_t yl = mid - (int32_t)(lo * (float)amp);
-            if (yl < yh)
-                yl = yh;
-            cv_line(x0 + i, yh, x0 + i, yl, dim(k->ink, 2, 5));
-        }
-    }
+     * enough to be a map and dark enough that a bar on top of it is unambiguous. Same
+     * painter and same 2/5 brightness as SMPL: the complaint was that SMPL's envelope was
+     * much brighter, which was true -- it was drawn in ink_hi at full strength. */
+    env_line(s, x0, y0, w, h, 0, s->len, dim(k->ink, 2, 5));
 
     /* ── layer 2: the loop range. The playhead wraps at loop_end, so a grain appearing on
      * the left after being on the right is the loop and not a jump; without the marks
@@ -954,6 +920,14 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
             le = (float)(s->len - 1u);
         xa = x0 + (int32_t)((float)w * ls / (float)s->len);
         xb = x0 + (int32_t)((float)w * le / (float)s->len);
+        /* the loop is the whole slot until there is a way to set a range, so both marks
+         * land on the band's own edges and are indistinguishable from its border. Nudged
+         * one pixel in so they are visible at all: a mark you cannot see is a mark that
+         * is not there. */
+        if (xa <= x0)
+            xa = x0 + 1;
+        if (xb >= x0 + w - 1)
+            xb = x0 + w - 2;
         for (i = 0; i < h; i += 3) {
             cv_rect(xa, y0 + i, 1, 1, dim(k->ink, 3, 5));
             cv_rect(xb, y0 + i, 1, 1, dim(k->ink, 3, 5));
@@ -979,47 +953,18 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
      *     settings is 17 px in a 176 px band -- easy to miss, and with nothing to measure
      *     it against it does not read as "scatter" at all, just as "two bars somewhere".
      *
-     *     The fix is to draw what the scatter is relative to: THE PLAYHEAD. `gr->play` is
-     *     where a grain would spawn at SPRAY 0, and `spawn` offsets from it. So a dim tick
-     *     marks the playhead and the bright bars are the grains that were thrown away
-     *     from it. SPRAY is then the distance between the tick and the bars: at 0 the bars
-     *     sit exactly on it, and as SPRAY rises they stand increasingly far off. That is
-     *     a comparison against a fixed reference instead of a distance between two moving
-     *     things, which is why it reads at 17 px and not only at 68.
-     *
-     *     It also makes the loop legible for free: the tick wraps at loop_end and the bars
-     *     land back on the left with it.
+     *     A dim playhead tick was added as a reference for that distance, and then
+     *     removed on the player's judgement: a grain mark is a claim about reading, so it
+     *     must not be drawn when nothing is read -- and by the same argument the playhead
+     *     is not a thing you would look at either, since the interesting fact is always
+     *     "where are the grains". SPRAY is read from the two bars' separation, and the
+     *     mark that carries it is that SPRAY 0 puts them on top of each other.
      *
      * The width is constant -- `length * rate` -- because that is what GRAINSIZE sets. An
      * earlier attempt drew the *remaining* read range, which shrank as the window closed;
      * that made the width breathe with the grain phase, and the width is the one thing
      * here that must not move.
      */
-    {
-        float per_px = (float)s->len / (float)w;
-
-        /* The playhead first, underneath: it is the reference, not a grain.
-         *
-         * It is drawn even with no cloud running, at the resume position. That is the
-         * whole point of the change the player asked for: at 210 px/s on the demo kit a
-         * bar crosses the band in 0.84 s, so while playing the picture is a blur and
-         * when the note stops it used to empty out completely. Now the material, the
-         * parked playhead and the loop marks are always there, and a note demonstrates
-         * the motion -- which is the only thing a still frame cannot show.
-         *
-         * Bars are NOT drawn when nothing sounds: a bar would claim a grain is reading,
-         * and "two bars, then none" is the honest statement. */
-        if ((gr && gr->started) || show_idle) {
-            float pp = (gr && gr->started) ? gr->play : idle_pos;
-            int32_t px = x0 + (int32_t)(pp / per_px);
-            if (px < x0)
-                px = x0;
-            if (px > x0 + w - 1)
-                px = x0 + w - 1;
-            for (i = 0; i < h; i += 2)
-                cv_rect(px, y0 + i, 1, 1, dim(k->ink, 4, 5));
-        }
-    }
     if (gr) {
         float per_px = (float)s->len / (float)w;
         int32_t order[WV_GRAINS];
@@ -1498,12 +1443,12 @@ void app_frame(void)
                         gr = &dsp.v[vi].gr;
                     }
                 }
-                src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, gr,
-                              gran_resume[smp_i], gran_seen);
+                src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, gr);
                 cv_text(6, MAT_PAD + 1, &FONT_XS,
                         smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
             } else {
-                src_env(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, 0, smp[smp_i].len);
+                env_line(&smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, 0, smp[smp_i].len,
+                         dim(sk.ink, 2, 5));
                 cv_text(6, MAT_PAD + 1, &FONT_XS,
                         smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
             }
@@ -1606,7 +1551,6 @@ int app_expect(const char *what, int *got)
      * material band. The screen draws one bar per live grain, so "the picture is
      * missing a bar" and "the DSP has no grain there" are different bugs; this is the
      * only way to tell them apart from a test. */
-    if (!strcmp(what, "resume")) { *got = (int)gran_resume[smp_i]; return 1; }
     if (!strcmp(what, "grains")) {
         int32_t vi;
         uint32_t newest = 0, found = 0;

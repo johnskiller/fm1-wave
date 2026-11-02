@@ -146,6 +146,28 @@ shot grn.png
                "syn: the table picture uses its full height",
                f"{wave[-1] - wave[0] + 1 if wave else 0} px of {MAT_WAVE}")
 
+    # ── the envelope must read as a line, not as a filled block ────────────────
+    # It used to draw min/max per column, which is what a waveform display wants: on the
+    # demo kit a drum hit spans 60 of the 78 px inside a single 53-sample column, so
+    # every column of every hit was filled and a hit became a rectangle. Measured, 23.6 %
+    # of the material band was ink. Peak magnitude per column gives 7.6 %, and the fill
+    # is what the player reported as "the sampling is so dense it is a solid shape".
+    for name in ("smp", "grn"):
+        im = shots[name]
+        band_bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
+        total = 0
+        for x in range(5, 179):
+            for y in range(SCOPE_H + 4, SCOPE_H + MAT_H - 4):
+                if im.getpixel((x, y)) != band_bg:
+                    total += 1
+        pct = 100.0 * total / (174 * (MAT_H - 8))
+        print(f"{name}: material band is {pct:.1f} % ink")
+        # A filled envelope sits near 20-25 %; a line sits under 10 %. The threshold is
+        # where "block" becomes "line" rather than a tuned value: at 15 % the picture
+        # already has whole columns filled from top to bottom in the loud passages.
+        ck(pct < 15.0, f"{name}: the envelope reads as a line, not a filled block",
+           f"{pct:.1f} % of the band is ink")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

@@ -210,37 +210,70 @@ because MORPH has to stay readable across frames that differ by 3.4 dB. A sample
 dynamics ARE its shape: the drum's decaying bars are the information. One scale is chosen
 for the whole slot, so a quiet sample is drawn quiet.
 
-**The picture stays put when you stop playing.** Two complaints, one cause:
+**The playhead is gone, and why that is the right answer.** Three versions, and the
+last one is the one the player reasoned to:
 
-- *while playing the bars and the line move too fast to see.* Measured, 210 px/s on the
-  demo kit -- a bar crosses the 176 px band in 0.84 s, faster than the eye resolves.
-- *when it stops, everything disappears.* The playhead was drawn only while a cloud was
-  running, so a still frame had nothing to look at.
+1. A dim playhead tick drawn while a cloud ran, as a reference for SPRAY.
+2. Parked where the note stopped, drawn always, resuming from there.
+3. Removed. A grain mark is a claim that something is being read, so it must not be
+   drawn when nothing is read -- and by the same argument the playhead is not worth
+   drawing either, because the interesting fact is always "where are the grains".
+   With no playhead there is nothing to resume, so GRAN starts every note from 0.
 
-So the playhead now parks where the note left it and the next note resumes from there,
-per slot (`gran_resume[]`). The playhead is drawn at all times; the bars are not, because
-a bar would claim a grain is reading and "two bars, then none" is the honest statement.
-The loop marks are always drawn.
+The reason is not aesthetic. A grain fades in and out over the piece of the sample that a
+one-shot would have fired once, so the sound of a note is decided by where it starts
+reading. Resuming makes that point depend on when the previous note was RELEASED.
+Measured on the demo kit, the first 100 ms of a cloud started at 50 % of the slot is
+25.7 dB below one started at 0, and at 100 % it is 57.2 dB down. The same key at the same
+velocity would be near-silent because of history -- and a note's attack must be a
+property of the note.
+
+The cost is one-sided and known: scatter cannot reach backwards past sample 0, so at high
+SPRAY the cloud is denser at the start of the material than it would be in the middle
+(measured, 11.7 % of grains in the first 5 % of the slot against 5 % uniform). That is a
+bias toward the transient, which is the direction a player would accept.
+
+The loop marks stay. They sit at the band's edges nudged in one pixel, because the loop
+is the whole slot until there is a way to set a range, and a mark on the border is
+indistinguishable from the border itself.
+
+**The envelope: one line, drawn dim, shared by SMPL and GRAN.** Two separate complaints
+turned out to be the same defect.
+
+*The brightness.* SMPL drew its envelope in `ink_hi` at full strength while GRAN drew the
+same material at 2/5 of `ink`. Both now call `env_line()` at `dim(ink, 2, 5)`, so they
+cannot drift apart again.
+
+*The solidity.* "The sampling is so dense it comes out as a solid shape" -- but the
+column count was never the cause. Measured, **fewer** columns made it worse, because a
+wider window means a wider min/max range:
 
 ```
-measured: idle x=4 (bar 0)  play x=86 (bars 2)  stopped x=88 (bars 0)
-          stopped+500ms x=88  next note x=169 (bars 2)  stopped x=172 (bars 0)
+DEMO K   176 cols: 15.6 px tall   88 cols: 17.7   44 cols: 21.0   22 cols: 25.1
 ```
 
-**A consequence worth knowing**: positions accumulate. Each note parks where it stopped,
-so a run of short notes walks forward and wraps around the slot rather than returning to
-the same place. That is the resume behaviour working, but it means SPRAY's standoff from
-the playhead varies with where the material happens to be parked -- and near the slot's
-edges the scattered bars clamp (spawn clamps rather than wraps), so "distance from the
-playhead" stops meaning "how far the grain was scattered". The test therefore asserts the
-standoff only at SPRAY 0, where it is exactly zero wherever the playhead is, and uses the
-gap between the two bars for the rest.
+The cause was `min/max` per column drawn as a filled bar. A drum hit oscillates fast
+enough to span 60 of the 78 px inside one 53-sample column, so every column of every hit
+was filled from the peak down to the trough: a hit became a rectangle. And DEMO T, a
+sustained tone, spans a constant 66/78 px, so at min/max it was a full-height block end
+to end with no shape at all.
 
-**Resuming must not move the loop.** `wv_note_on_grain` passes its `start` as both the
-playhead and the loop start, which is right for a fresh note. Measured, resuming at 85 %
-of the slot shrank the loop to x 88..179, so the cloud read only the tail of the material
-and wrapped there. `wv_grains_loop` exists to set the range without touching the
-playhead, and GRAN calls it after starting a resumed note.
+Peak magnitude per column is the envelope, and it is what the player reads -- "how loud
+is the material here". Measured coverage of the material band:
+
+```
+                 min/max fill    peak line
+SMPL DEMO K         23.6 %          6.7 %
+SMPL DEMO T         20.9 %          3.6 %
+GRAN DEMO K         20.9 %          4.0 %
+GRAN DEMO T         23.6 %          7.9 %
+```
+
+`test_screen.py` asserts under 15 %, and an injected return to min/max fill measures
+24.9 % / 25.2 % and fails both checks.
+
+DEMO T's line is flat, and that is the honest answer: the material really is a constant
+amplitude from start to finish. There is no envelope to show because there is none.
 
 **GRAN: what the player reported, and what it was.** Two defects, and the first one is
 worth keeping because the guess was reasonable and wrong:

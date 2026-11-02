@@ -128,7 +128,7 @@ wait 200
     lane_frames = "".join(f"shot a{i}.png\nwait 61\n" for i in range(12))
     shots = (["sp0.png", "sp0b.png", "sp64.png", "sp127.png"]
              + [f"e{i}.png" for i in range(24)] + [f"a{i}.png" for i in range(12)])
-    # The spray sections MUST start from the same playhead, or the standoff measured
+    # The spray sections must each be a fresh note from the same place, or the measured
     # against it means nothing: measured, resuming accumulates (each note parks where it
     # stopped), so by the third section the playhead was at x=5 and the "standoff" was
     # 163 px against a 68 px gap -- a failing check that was really a test-ordering bug.
@@ -172,13 +172,13 @@ wait 200
         print(f"checks {checks}, failed {fails}")
         return 1
 
-    # colours from src_skin: GRAN ink_hi is the bars, and the playhead is ink dimmed to
+    # colours from src_skin: GRAN ink_hi is the bars, dim ink is the envelope, and the
     # 4/5 and drawn every second row. Both are measured off the screenshot rather than
     # recomputed, so a change to src_skin shows up as a failing check instead of a
     # silently mismatched constant.
     INK_HI = (148, 226, 255)
-    PLAYHEAD = (41, 145, 189)
     LOOP_MARK = (32, 109, 139)
+    DIM_INK = (16, 72, 90)
 
     b0 = bars(os.path.join(out, "sp0.png"), INK_HI)
     b0b = bars(os.path.join(out, "sp0b.png"), INK_HI)
@@ -290,26 +290,16 @@ wait 200
        "the lanes are stable across respawns (not tied to the rotating slot index)",
        f"lane heights varied: {sorted(set(tuple(l) for l in lanes))}")
 
-    # ── the playhead is the SPRAY reference ───────────────────────────────────
-    # SPRAY used to be readable only as the distance between two bars, which at 17 px in
-    # a 176 px band does not read as scatter. The dim dotted line is where a grain would
-    # spawn at SPRAY 0, so the offset from it is the scatter -- a distance to a fixed
-    # reference instead of between two moving things.
-    def playhead_x(nm):
-        im = Image.open(os.path.join(out, nm)).convert("RGB")
-        px = im.load()
-        best, bx = 0, -1
-        for x in range(BAND_X0, BAND_X1):
-            n = sum(1 for y in range(90, 170) if px[x, y] == PLAYHEAD)
-            if n > best:
-                best, bx = n, x
-        return bx if best >= 5 else -1
+    # ── SPRAY, from the two bars' separation ─────────────────────────────────
+    def gap(nm):
+        xs = sorted(x0 for x0, _, _ in bars(os.path.join(out, nm), INK_HI))
+        return (xs[-1] - xs[0]) if len(xs) >= 2 else 0
 
-    ph0, ph64, ph127 = (playhead_x("a0.png"), playhead_x("sp64.png"),
-                        playhead_x("sp127.png"))
-    print(f"playhead x: {ph0} / {ph64} / {ph127}")
-    ck(ph0 >= 0 and ph64 >= 0 and ph127 >= 0, "the playhead tick is drawn",
-       f"{ph0}, {ph64}, {ph127}")
+    def px_has(nm, colour):
+        im = Image.open(nm).convert("RGB")
+        px = im.load()
+        return any(px[x, y] == colour
+                   for x in range(BAND_X0, BAND_X1) for y in range(92, 168))
 
     def loop_x(nm):
         """The two loop marks, as the dimmer dotted columns."""
@@ -325,74 +315,69 @@ wait 200
                 found.append(x)
         return found
 
-    def off(nm, ph):
-        return max(abs(x0 - ph) for x0, _, _ in bars(os.path.join(out, nm), INK_HI))
+    # SPRAY is read from the separation between the two bars and from nothing else. A
+    # dim playhead tick used to give it a fixed reference, and was removed on the
+    # player's judgement: a mark is a claim about reading, so when nothing is read
+    # neither the grains nor the playhead should be drawn. What is left is the one
+    # honest reading -- SPRAY 0 puts both grains on the same spot, so the separation is
+    # 0 and grows from there.
+    g0, g64, g127 = gap("a0.png"), gap("sp64.png"), gap("sp127.png")
+    print(f"bar separation: {g0} / {g64} / {g127} px")
+    ck(g0 <= 2, "spray 0: the two bars overlap, so the separation is 0", f"{g0} px")
+    ck(g64 > g0, "spray 64 separates them", f"{g64} px")
+    ck(g127 > g64, "spray 127 separates them further", f"{g127} px")
+    lx = loop_x("a0.png")
+    print(f"loop marks at {lx}")
+    ck(len(lx) == 2 and lx[0] > BAND_X0 and lx[1] < BAND_X1,
+       "the loop marks are inside the band, not on its border", f"{lx}")
 
-    o0, o64, o127 = off("a0.png", ph0), off("sp64.png", ph64), off("sp127.png", ph127)
-    print(f"largest offset from the playhead: {o0} / {o64} / {o127} px")
-
-    # Only the SPRAY 0 case is asserted against the playhead, and deliberately so: it is
-    # the one that is position-independent. At SPRAY 0 the scatter is zero, so both bars
-    # sit exactly on the playhead wherever it happens to be.
-    #
-    # The others are not asserted, because the playhead now resumes where the last note
-    # parked, so by the third section it can be anywhere -- the sprayed bars then get
-    # clamped at the material's edge (spawn clamps, it does not wrap) and "distance from
-    # the playhead" stops meaning "how far the grain was scattered". Measured, an earlier
-    # version of this check read 163 px against a 68 px spread and failed, which was the
-    # test measuring the wrong thing, not the picture being wrong. The spread check below
-    # is the position-independent way to say the same thing about SPRAY.
-    ck(o0 <= 2, "spray 0: both bars sit on the playhead", f"offset {o0} px")
-    ck(ph64 >= 0 and ph127 >= 0, "the playhead is drawn at every spray setting",
-       f"{ph64}, {ph127}")
-
-    # ── the picture must be legible when the note stops ────────────────────────
-    # The report: "while playing the bars and the line move too fast to see, and when it
-    # stops everything disappears". At 210 px/s on the demo kit a bar crosses the band in
-    # 0.84 s, so motion is unreadable and a still frame is the only way to see the layout.
-    # The playhead therefore parks where the note left it, and the next note resumes from
-    # there instead of from 0.
-    idle_script = base + (
-        "shot g0.png\n"
+    # ── nothing is drawn that claims a read is happening ──────────────────────
+    # The material stays, because it is a fact about the sample; a bar does not,
+    # because it says "a grain is reading here". And a second note sounds like the
+    # first, not like a resume: the attack must belong to the note.
+    quiet = base + (
+        "shot q0.png\n"
         "key 5 down\n"
-        "wait 300\n"
-        "shot g1.png\n"
+        "wait 200\n"
+        "shot q1.png\n"
         "key 5 up\n"
         "wait 400\n"
-        "shot g2.png\n"
+        "shot q2.png\n"
         "wait 500\n"
-        "shot g3.png\n"
+        "shot q3.png\n"
         "key 5 down\n"
-        "wait 300\n"
-        "shot g4.png\n"
-        "key 5 up\n"
-        "wait 400\n"
-        "shot g5.png\n"
+        "wait 200\n"
+        "shot q4.png\n"
     )
-    run(idle_script, out, [f"g{i}.png" for i in range(6)])
-    if fails:
-        print(f"checks {checks}, failed {fails}")
-        return 1
+    run(quiet, out, [f"q{i}.png" for i in range(5)])
+    qb = [len(bars(os.path.join(out, f"q{i}.png"), INK_HI)) for i in range(5)]
+    print(f"bars across a note: idle {qb[0]}, playing {qb[1]}, stopped {qb[2]}, "
+          f"+500 ms {qb[3]}, again {qb[4]}")
+    ck(qb[0] == 0, "no bars before the first note", f"{qb[0]}")
+    ck(qb[1] == 2, "two bars while the note sounds", f"{qb[1]}")
+    ck(qb[2] == 0, "no bars after the note stops", f"{qb[2]}")
+    ck(qb[3] == 0, "still none half a second later", f"{qb[3]}")
+    ck(qb[4] == 2, "a second note shows the same two bars, not a resumed position",
+       f"{qb[4]}")
 
-    g = [playhead_x(f"g{i}.png") for i in range(6)]
-    gb = [len(bars(os.path.join(out, f"g{i}.png"), INK_HI)) for i in range(6)]
-    print(f"idle sequence: playhead {g}  bars {gb}")
+    # the material is a map at all times
+    ck(any(px_has(os.path.join(out, f"q{i}.png"), DIM_INK) for i in range(5)),
+       "the dim envelope is drawn whether or not a note sounds", "")
 
-    ck(g[0] >= 0, "the playhead is drawn before the first note", f"x {g[0]}")
-    ck(gb[0] == 0, "no bars before the first note", f"{gb[0]} bars")
-    ck(gb[2] == 0, "no bars after the note stops", f"{gb[2]} bars")
-    ck(g[2] == g[3], "the playhead stays put after the note stops (does not vanish)",
-       f"x {g[2]} then {g[3]}")
-    ck(g[2] > 20, "it parks where the note left it, not back at the loop start",
-       f"x {g[2]}")
-    # the resume: the second note continues from where the first stopped, so 300 ms
-    # later it is further right than the parked position, not back near 0
-    ck(g[4] > g[2], "the next note resumes from the parked position",
-       f"parked {g[2]}, resumed to {g[4]}")
-    ck(g[5] > g[2], "and parks further on again", f"{g[2]} -> {g[5]}")
-    ck(abs(loop_x("g2.png")[0] - 4) <= 1 and abs(loop_x("g2.png")[1] - 179) <= 1,
-       "the loop range did not move when the playhead resumed",
-       f"loop marks at {loop_x('g2.png')}")
+    # The loop is the whole slot, and it must stay the whole slot when a note starts.
+    # wv_note_on_grain sets the loop start from its `start` argument, so a note started
+    # anywhere but 0 silently shrinks the loop to the tail of the material -- the cloud
+    # then reads only that part and wraps there, which sounds like a shorter sample
+    # rather than a fault. Injected a mid-slot start and measured the marks move to
+    # x 92..178, so this check is the one that catches it.
+    lp = loop_x("q1.png")
+    print(f"loop marks while a note sounds: {lp}")
+    # Pinned to the material's own ends, not "the same as before the note": an injected
+    # mid-slot start moved BOTH readings to 92..178, so comparing them to each other
+    # passed while the loop was plainly wrong. The loop is the whole slot, which is the
+    # band's edges nudged in one pixel.
+    ck(len(lp) == 2 and lp[0] <= BAND_X0 + 3 and lp[1] >= BAND_X1 - 3,
+       "the loop stays the whole slot while a note sounds", f"{lp}")
 
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
