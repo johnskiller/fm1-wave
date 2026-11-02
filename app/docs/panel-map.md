@@ -136,36 +136,79 @@ power-on.
 each canvas is a fixed-size pool and the bands are different heights):
 
 ```
-  0.. 68   scope      the live waveform after shaper -> filter -> VCA, auto-gained
- 68..176   material   the table's own shape (SYNTH); icon + material name otherwise
-176..240   the four   K1..K4: CUT RES SHAPE AMOUNT, or A D S R on the ENV page
+  0.. 91   scope      92 px   the live waveform, fixed linear scale, 0 dBFS = band edge
+ 92..175   material   84 px   the table's own shape (SYNTH); icon + material name otherwise
+176..239   the four   64 px   K1..K4: CUT RES SHAPE AMOUNT, or A D S R on the ENV page
 ```
 
-**Why the material sits in the middle and the knobs at the bottom.** The scope shows
-the result, which is what the ear hears; the material shows the input, so a dull or
-thin sound can be attributed -- the table, or CUT/SHAPE/AMOUNT? Two pictures answer
-that, one does not. The table's own shape is also why BANK and MORPH lost their cells:
-those are exactly the two parameters it draws, and a number beside a waveform that
-shows that number's effect is a worse use of a cell than the waveform at a readable
-size. Their values are printed over the picture instead, in the right column.
+### How these heights got here
 
-The first version of this was a 28 px strip at the bottom, measured and signed off --
-and too short to read. It is 100 px now, which also multiplied the MORPH differences
-from 0.59 px (invisible) to 2.9 / 6.7 / 12.0 / 19.4 px per step.
+They are not arbitrary, and they are not computed from content either -- they are
+whatever each band was squeezed to. The history, from `git show <rev>:app/app.c`:
 
-The knobs being last is also where the hand is: the bottom of the screen is nearest the
-bottom row of keys, in the physical order left to right.
+```
+920761e  112 + 68              = 180  (60 px unused; no bottom band yet)
+fecd1a3  112 + 68 + 60         = 240  (the strip appears)
+9743f27   68 + 56 + 76 + 40    = 240  (scope cut 112 -> 68 to fit two knob rows)
+bb55fd3   68 + 108 + 64        = 240  (material takes the middle, knobs to the bottom)
+this      92 + 84 + 64         = 240  (scope takes 24 px back from material)
+```
 
-Measured, per source, dominant colour of each of the three bands: SYNTH and SYNTH+ENV
-`(0,0,0)` on all three, SMPL `(49,32,0)`, GRAN `(8,36,49)`. Material-band ink covers
-x=4..231 in SYNTH (wave 4..180, values 186..231), and x=4..143 in SMPL (icon plus name,
-no wave yet).
+The 92/84 split is the first one chosen from a measurement rather than from "make it
+fit": the scope gained 24 px because a fixed scale needs the height (see below), and the
+material kept 84 px because at 84 the table still uses 76 px of vertical extent, which
+was the thing the 28 px strip failed to do at 13.
 
-**A known gap, recorded rather than hidden:** SMPL and GRAN have no picture in the
-material band -- only the source icon and the material's name. A sample needs a min/max
-envelope (8800 samples into 176 columns: transients visible, individual cycles not) and
-GRAN needs the grain window and its overlap rather than a waveform. Neither has a design
-yet, and the shape a waveform would give GRAN is already the source icon.
+### Why the scope has a fixed scale, and why not dB
+
+It had a per-frame peak normaliser, and the measurement that condemned it is that
+velocity 20, 60 and 127 all drew **63 px**: an auto-gained scope carries no level at all.
+
+A dB axis is the obvious replacement and it is wrong for a *trace*: the instantaneous
+value of a waveform crosses zero twice per cycle, and in dB a zero crossing is
+-infinity, so the trace plunges to the floor at every crossing. Tried and measured:
+**47 px of ink in each of the 240 columns** -- a filled band, the same defect the
+original `fabsf` peak code had.
+
+So the scale is **linear in amplitude and fixed**: full scale is the band edge, 46 px
+each side of the centre line, pre-master (MASTER is the listening level; a scope that
+shrank when the pot turned down would be measuring the wrong thing). The DSP's own
+numbers then read directly:
+
+```
+1 voice  v127   0.256 of full scale   -> 11.8 px/side   (measured 20 px span)
+2 voices v127   0.512                 -> 23.5           (measured 34)
+3 voices v127   0.744                 -> 34.2           (measured 35)
+8 voices v127   1.316                 -> clipped to edge (measured 41)
+```
+
+Amplitude now IS level: velocity, envelope, polyphony and the shaper all move it. The
+8-voice case exceeds the band, which is correct for a scope -- the signal is above 0
+dBFS and the drawing says so.
+
+**Velocity cannot be tested on the host**: `touch_vel()` is the app's only velocity path
+and `APP_KEY_SENSE` is not enabled, so `key <n> down <vel>` changes nothing. Polyphony is
+the stand-in, and the DSP-level sweep (velocity 1 -> 0.00201, 127 -> 0.25586, linear in
+amplitude) is measured directly in a throwaway harness instead.
+
+The ring is `int16` (units of full scale) rather than `int8`: a fixed scale has to see
+past 0 dBFS, and eight voices measure +2.4 dBFS. 768 samples of int16 is 1536 B of the
+98304 available.
+
+### The material band
+
+The table's own shape, 176 x 100 in SYNTH, with BANK and MORPH printed in the right
+column because they are exactly the two parameters it draws. Those two lost their cells
+in `bb55fd3` for that reason: a number beside a waveform that shows that number's effect
+is a worse use of a cell than the waveform at a readable size.
+
+At 28 px (the first version) the wave used 13 px of height and the MORPH steps measured
+0.59 px apart. At 100 px they measure 2.90 / 6.74 / 12.00 / 19.44 px.
+
+SMPL and GRAN have no picture yet: the band carries the source icon and the material's
+name. A sample needs a min/max envelope (8800 samples into 176 columns: transients
+visible, individual cycles not) and GRAN needs the grain window and its overlap. Neither
+has a design, and the waveform shape GRAN would get is already its icon.
 
 ## Source indication
 

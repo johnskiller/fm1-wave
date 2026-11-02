@@ -122,7 +122,7 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 #define WF_W   240
 #define WF_SPAN 768                      /* samples held: 3 windows' worth, so the reader never wraps mid-frame */
 #define WF_VIEW 384                      /* samples on screen: 8.7 ms, 1.6 columns per sample */
-static volatile int8_t  wf_buf[WF_SPAN];
+static volatile int16_t wf_buf[WF_SPAN];
 static volatile uint16_t wf_idx;
 
 static void ui_apply(void)
@@ -174,17 +174,28 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         lr[2 * i + 1] = s;
     }
 
-    /* The scope's ring: one write per sample, -127..127. Clamped rather than
-     * scaled, because the DSP already bounds its output; a sample that needed
-     * clamping is a defect to see, not a level to hide. */
+    /* The scope's ring: one write per sample, in 16-bit units of full scale.
+     *
+     * It was int8 (-127..127) while the scope normalised every frame to its own peak,
+     * and that made the resolution floor the reason for the normalisation rather than
+     * a separate decision. It is int16 now because the scope has a FIXED scale and a
+     * fixed scale has to be able to see past 0 dBFS: eight voices at full velocity
+     * measure +2.4 dBFS (1.32 of full scale), so an int8 ring would have clipped the
+     * one case the scale exists to show. 768 samples of int16 is 1536 B of the 98304
+     * the platform gives us, against the 768 the int8 ring took.
+     *
+     * Pre-master on purpose: MASTER is the listening level, and a scope that shrank
+     * when the pot was turned down would be measuring the wrong thing. What this
+     * shows is what the instrument produces -- velocity, envelope, polyphony, the
+     * shaper, the filter. */
     for (i = 0; i < n; i++) {
-        float v = mono[i] * 127.0f;
+        float v = mono[i] * 32767.0f;
         int32_t q = (int32_t)v;
-        if (q > 127)
-            q = 127;
-        if (q < -127)
-            q = -127;
-        wf_buf[wf_idx] = (int8_t)q;
+        if (q > 32767)
+            q = 32767;
+        if (q < -32767)
+            q = -32767;
+        wf_buf[wf_idx] = (int16_t)q;
         wf_idx = (uint16_t)((wf_idx + 1u) % WF_SPAN);
     }
 }
@@ -670,6 +681,43 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
     }
 }
 
+
+/* ---------------------------------------------------------------- scope --- */
+
+/* The vertical scale is FIXED and LINEAR in amplitude: full scale (0 dBFS) is the
+ * edge of the band, and a sample at 0.256 of full scale sits a quarter of the way out.
+ *
+ * This was a per-frame peak normaliser, and the measurement that condemned it is that
+ * velocity 20, 60 and 127 all drew 63 px: a scope that auto-gains carries no level at
+ * all. But the replacement cannot be a dB axis either, and that is the trap: the
+ * instantaneous value of a waveform crosses zero twice a cycle, and in dB a zero
+ * crossing is -infinity. A dB scale on a trace plunges to the floor at every crossing
+ * and the picture becomes a filled band -- tried, measured, 47 px of ink in every one
+ * of the 240 columns.
+ *
+ * So: linear, fixed, and referenced to full scale. Then amplitude IS level, the shape
+ * survives, and the numbers are the DSP's own -- a single note at velocity 127 peaks
+ * at 0.256 of full scale (measured), so it draws 12 px each side of the centre in a
+ * 92 px band, and velocity 32 draws 3. The eight-voice headroom is above full scale,
+ * so a full chord runs into the edge of the band, which is exactly what a scope does
+ * when the signal exceeds the screen.
+ *
+ * Pre-master on purpose: MASTER is the listening level, and a scope that shrank when
+ * the pot was turned down would be measuring the wrong thing. What this answers is
+ * what the instrument produces -- velocity, envelope, polyphony, shaper, filter. */
+#define SCOPE_FS 46.0f          /* half the 92 px band: full scale reaches this */
+
+/* amplitude as a fraction of full scale (-1..1) to a distance from the centre line */
+static float fs_px(float a)
+{
+    float v = a * SCOPE_FS;
+    if (v > SCOPE_FS)
+        v = SCOPE_FS;
+    if (v < -SCOPE_FS)
+        v = -SCOPE_FS;
+    return v;
+}
+
 void app_frame(void)
 {
     static uint32_t last;
@@ -681,7 +729,7 @@ void app_frame(void)
 
     /* the scope redraws every frame: it is the one thing on screen that must not
      * look frozen while a note is held */
-    cv_begin(240, 68, sk.bg);
+    cv_begin(240, 92, sk.bg);
     {
         /* Read the ring backwards from where the audio has got to, so the newest
          * sample is at the right edge: a scope that scrolls the other way reads as
@@ -689,7 +737,7 @@ void app_frame(void)
          * stale block, not a torn frame. */
         uint16_t end = wf_idx;
         int32_t x;
-        int32_t lo, hi, peak, view, tbase;
+        int32_t lo, hi, view, tbase;
 
         /* ── the pitch-synchronous window ────────────────────────────────────────
          *
@@ -785,62 +833,66 @@ void app_frame(void)
             }
         }
 
-        /* a centre line, so silence reads as a flat line and not as nothing */
-        cv_rect(0, 34, 240, 1, sk.track);
+        /* ── the vertical scale: fixed, in dBFS ──────────────────────────────────
+         *
+         * This was a per-frame peak normaliser, and the measurement that condemned it
+         * is that velocity 20, 60 and 127 all drew 63 px: a scope that auto-gains is
+         * answering "what shape is this", and the shape is already answered one band
+         * down by the material picture. So the question here is the scope's own --
+         * how loud, and when -- and a fixed scale answers it.
+         *
+         * The scale is linear in dB, from SCOPE_DB_TOP down to SCOPE_DB_BOT, mapped
+         * onto the half-height each side of the centre. A linear-in-dB axis is what
+         * makes velocity read as a step: the DSP's velocity curve is linear in
+         * amplitude (measured: 0.00201 at velocity 1 up to 0.25586 at 127), so on a
+         * dB axis those equal amplitude steps arrive as a curve, and on a linear axis
+         * the same notes would all crowd the top.
+         *
+         * +6 dB at the top because eight voices at full velocity measure +2.4 dBFS of
+         * full scale (1.316); the headroom bar is drawn against 0 dBFS so that number
+         * has somewhere to go. -54 dB at the bottom: quiet enough for the tail of a
+         * release, and shallow enough that 60 dB of range still uses the height.
+         *
+         * The columns keep their min/max: a period can span a whole cycle in fewer
+         * columns than it has samples, so a column is a range of the signal and not a
+         * point on it. */
+        {
+            const float mid = 46.0f;
 
-        /* the frame's own peak, for the vertical gain: one pass, before drawing */
-        peak = 0;
-        for (x = 0; x < view; x++) {
-            uint16_t at = (uint16_t)((end + WF_SPAN - 1u - (uint32_t)(x + tbase)) % WF_SPAN);
-            int32_t v = wf_buf[at];
-            if (v < 0)
-                v = -v;
-            if (v > peak)
-                peak = v;
-        }
-        if (peak < 24)
-            peak = 24;
+            /* a centre line, so silence reads as a flat line and not as nothing */
+            cv_rect(0, (int32_t)mid, 240, 1, sk.track);
 
-        for (x = 0; x < WF_W; x++) {
-            /* column x is VIEW*(x) .. VIEW*(x+1) back from the newest sample, divided
-             * by 240. Both are fixed-point in samples-per-column: 384/240 = 1.6, so
-             * a column spans one or two samples. */
-            uint32_t a = (uint32_t)x * (uint32_t)view / WF_W;
-            uint32_t b = (uint32_t)(x + 1) * (uint32_t)view / WF_W;
-            int32_t k;
-            lo = 127;
-            hi = -127;
-            if (b <= a)
-                b = a + 1;
-            for (k = (int32_t)a; k < (int32_t)b; k++) {
-                /* `end` is newest-first going backwards, wrapped into the ring */
-                uint32_t back = (uint32_t)view - 1u - (uint32_t)k + (uint32_t)tbase;
-                uint16_t at = (uint16_t)((end + WF_SPAN - 1u - back) % WF_SPAN);
-                int32_t v = wf_buf[at];
-                if (v < lo)
-                    lo = v;
-                if (v > hi)
-                    hi = v;
-            }
-            /* Vertical gain. A fixed 127->50 px mapping is the obvious choice and it
-             * is what made this unreadable: one voice at full velocity is 0.21 of the
-             * DSP's full scale (eight voices share the headroom, see WV_VOICE_GAIN),
-             * so a single note drew 27 counts = 10 px in a 112 px band. Measuring the
-             * frame's own peak and filling the band is what a scope with an auto-gain
-             * does, and it is the right thing here because the question is "what shape
-             * is this", not "what level is this" -- MASTER and the peak are elsewhere.
-             *
-             * Floor of 24 counts (~ -14 dBFS) so silence does not amplify its own
-             * dither into a full-height block, and a ceiling so a loud eight-voice
-             * chord cannot clip the drawing into a square wave. */
-            lo = lo * 31 / peak;
-            hi = hi * 31 / peak;
-            if (hi - lo < 1) {
-                /* a quiet or steady column is a dot, not a gap: a scope that drops
-                 * columns looks broken */
-                cv_rect(x, 34 - hi, 1, 1, sk.ink_hi);
-            } else {
-                cv_line(x, 34 - hi, x, 34 - lo, sk.ink_hi);
+            for (x = 0; x < WF_W; x++) {
+                uint32_t a = (uint32_t)x * (uint32_t)view / WF_W;
+                uint32_t b = (uint32_t)(x + 1) * (uint32_t)view / WF_W;
+                int32_t k, yup, ydn;
+
+                lo = 32767;
+                hi = -32767;
+                if (b <= a)
+                    b = a + 1;
+                for (k = (int32_t)a; k < (int32_t)b; k++) {
+                    uint32_t back = (uint32_t)view - 1u - (uint32_t)k + (uint32_t)tbase;
+                    uint16_t at = (uint16_t)((end + WF_SPAN - 1u - back) % WF_SPAN);
+                    int32_t v = wf_buf[at];
+                    if (v < lo)
+                        lo = v;
+                    if (v > hi)
+                        hi = v;
+                }
+
+                /* min/max preserved: a column can span more than one sample, so it is a
+                 * range of the signal and both ends of that range are drawn */
+                yup = (int32_t)(mid - fs_px((float)hi * (1.0f / 32767.0f)));
+                ydn = (int32_t)(mid - fs_px((float)lo * (1.0f / 32767.0f)));
+
+                if (yup == ydn) {
+                    /* a quiet or steady column is a dot, not a gap: a scope that drops
+                     * columns looks broken */
+                    cv_rect(x, yup, 1, 1, sk.ink_hi);
+                } else {
+                    cv_line(x, yup, x, ydn, sk.ink_hi);
+                }
             }
         }
     }
@@ -904,7 +956,7 @@ void app_frame(void)
      * The knobs being last is also where the hand is: the bottom row of the screen is
      * nearest the bottom row of keys. K1..K4 sit in the physical order left to right,
      * which is the rule this panel has kept since the first layout. */
-    cv_begin(240, 108, sk.bg);
+    cv_begin(240, 84, sk.bg);
     {
         char b[12];
         int32_t bl;
@@ -958,7 +1010,7 @@ void app_frame(void)
         if (env_page)
             cv_text(4, 92, &FONT_XS, "ENV PAGE", sk.ink);
     }
-    cv_blit(0, 68);
+    cv_blit(0, 92);
 
     cv_begin(240, 64, sk.bg);
     if (env_page) {
