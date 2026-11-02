@@ -119,6 +119,35 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
  * The reader takes a snapshot of the write index and reads *backwards* from it, so
  * a block arriving mid-read cannot tear the picture: the worst case is that the
  * frame shows data one block old. */
+/* ─── the three bands ─────────────────────────────────────────────────────────
+ *
+ * Every height here is derived from what the band has to draw. The first version had
+ * the numbers as literals and got this wrong in a way that does not look like a bug:
+ * the material band was cut from 108 to 84 while its contents stayed where they were,
+ * so src_shape drew to y=103 inside an 84 px canvas and its bottom 20 px were clipped,
+ * and the "ENV PAGE" line at y=92 vanished entirely. gfx clips at the canvas edge
+ * (cv_rect: `if (y1 > cv_y1) y1 = cv_y1;`) with no warning, so an overrun reads as a
+ * missing element rather than as an error.
+ *
+ * So: content first, height second, and the sum is checked by an assertion below.
+ */
+#define KNOB_TOP   4                                  /* knob(): where its ink starts */
+#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* label, value, bar = 46 px */
+#define KNOB_H     64                                 /* 18 px spare: the round knob art
+                                                       * that replaces the bar is not written yet */
+
+#define MAT_PAD    6                                  /* above and below the picture */
+#define MAT_WAVE   80                                 /* the table picture's own height */
+#define MAT_H      (MAT_PAD + MAT_WAVE + MAT_PAD)     /* 92 */
+
+#define SCOPE_H    (240 - MAT_H - KNOB_H)             /* 84 */
+#define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
+#define SCOPE_HALF ((SCOPE_H - 2) / 2)                /* 41: 0 dBFS stays inside the band */
+
+#if (MAT_H + KNOB_H + SCOPE_H) != 240
+#error "the three bands must fill the 240 px screen"
+#endif
+
 #define WF_W   240
 #define WF_SPAN 768                      /* samples held: 3 windows' worth, so the reader never wraps mid-frame */
 #define WF_VIEW 384                      /* samples on screen: 8.7 ms, 1.6 columns per sample */
@@ -705,16 +734,17 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * Pre-master on purpose: MASTER is the listening level, and a scope that shrank when
  * the pot was turned down would be measuring the wrong thing. What this answers is
  * what the instrument produces -- velocity, envelope, polyphony, shaper, filter. */
-#define SCOPE_FS 46.0f          /* half the 92 px band: full scale reaches this */
+#define SCOPE_FS ((float)SCOPE_HALF)   /* full scale reaches the band edge */
 
 /* amplitude as a fraction of full scale (-1..1) to a distance from the centre line */
 static float fs_px(float a)
 {
-    float v = a * SCOPE_FS;
-    if (v > SCOPE_FS)
-        v = SCOPE_FS;
-    if (v < -SCOPE_FS)
-        v = -SCOPE_FS;
+    float f = SCOPE_FS;
+    float v = a * f;
+    if (v > f)
+        v = f;
+    if (v < -f)
+        v = -f;
     return v;
 }
 
@@ -729,7 +759,7 @@ void app_frame(void)
 
     /* the scope redraws every frame: it is the one thing on screen that must not
      * look frozen while a note is held */
-    cv_begin(240, 92, sk.bg);
+    cv_begin(240, SCOPE_H, sk.bg);
     {
         /* Read the ring backwards from where the audio has got to, so the newest
          * sample is at the right edge: a scope that scrolls the other way reads as
@@ -857,7 +887,7 @@ void app_frame(void)
          * columns than it has samples, so a column is a range of the signal and not a
          * point on it. */
         {
-            const float mid = 46.0f;
+            const float mid = (float)SCOPE_MID;
 
             /* a centre line, so silence reads as a flat line and not as nothing */
             cv_rect(0, (int32_t)mid, 240, 1, sk.track);
@@ -956,7 +986,7 @@ void app_frame(void)
      * The knobs being last is also where the hand is: the bottom row of the screen is
      * nearest the bottom row of keys. K1..K4 sit in the physical order left to right,
      * which is the rule this panel has kept since the first layout. */
-    cv_begin(240, 84, sk.bg);
+    cv_begin(240, MAT_H, sk.bg);
     {
         char b[12];
         int32_t bl;
@@ -965,7 +995,7 @@ void app_frame(void)
             /* the table: 176 px wide and 100 tall, leaving the right column for the two
              * values that describe it -- a shape with no label is a mystery, and these
              * are the two knobs that have no cell any more. */
-            src_shape(&sk, 4, 4, 176, 100);
+            src_shape(&sk, 4, MAT_PAD, 176, MAT_WAVE);
 
             bl = 0;
             b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
@@ -973,20 +1003,20 @@ void app_frame(void)
             b[bl++] = '/';
             b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
             b[bl] = 0;
-            cv_text(186, 8, &FONT_XS, b, sk.ink);
-            cv_text(186, 26, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
+            cv_text(186, 6, &FONT_XS, b, sk.ink);
+            cv_text(186, 24, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
 
             bl = 0;
             b[bl++] = 'M'; b[bl++] = 'O'; b[bl++] = 'R'; b[bl++] = 'P'; b[bl++] = 'H';
             b[bl] = 0;
-            cv_text(186, 56, &FONT_XS, b, sk.ink);
-            cv_text(186, 74, &FONT_XS, pct(k_morph), sk.ink_hi);
+            cv_text(186, 52, &FONT_XS, b, sk.ink);
+            cv_text(186, 70, &FONT_XS, pct(k_morph), sk.ink_hi);
         } else {
             /* The sample sources have no picture yet -- a sample needs a min/max
              * envelope and GRAN needs the grain window, and neither has a design. They
              * get the icon and their material's name at the size the table gets, so the
              * band is never an empty hole when the source changes. */
-            src_icon(&sk, 4, 4, 88, 100);
+            src_icon(&sk, 4, MAT_PAD, 88, MAT_WAVE);
             if (!smp_count) {
                 cv_text(100, 46, &FONT_XS, "NO SAMPLES", sk.ink);
             } else {
@@ -1001,33 +1031,33 @@ void app_frame(void)
                 cv_text(100, 58, &FONT_XS, b, sk.ink);
             }
             if (src == SRC_GRAN) {
-                cv_text(186, 8, &FONT_XS, "SPRAY", sk.ink);
-                cv_text(186, 26, &FONT_XS, pct(k_spray), sk.ink_hi);
-                cv_text(186, 56, &FONT_XS, "GRAINSZ", sk.ink);
-                cv_text(186, 74, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
+                cv_text(186, 6, &FONT_XS, "SPRAY", sk.ink);
+                cv_text(186, 24, &FONT_XS, pct(k_spray), sk.ink_hi);
+                cv_text(186, 52, &FONT_XS, "GRAINSZ", sk.ink);
+                cv_text(186, 70, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
             }
         }
         if (env_page)
-            cv_text(4, 92, &FONT_XS, "ENV PAGE", sk.ink);
+            cv_text(4, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
     }
-    cv_blit(0, 92);
+    cv_blit(0, SCOPE_H);
 
-    cv_begin(240, 64, sk.bg);
+    cv_begin(240, KNOB_H, sk.bg);
     if (env_page) {
         /* The ENV page: the same four bars in the same four positions, so the hand
          * does not move — only what they mean. Time in ms/s as text, because "37" on
          * an envelope is unreadable and "37 ms" is not. */
-        knob(4,   4, 54, "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
-        knob(62,  4, 54, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
-        knob(120, 4, 54, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
-        knob(178, 4, 54, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
+        knob(4,   KNOB_TOP, 54, "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
+        knob(62,  KNOB_TOP, 54, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
+        knob(120, KNOB_TOP, 54, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
+        knob(178, KNOB_TOP, 54, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
     } else {
-        knob(4,   4, 54, "CUT",    pct(k_cut), k_cut, 0);
-        knob(62,  4, 54, "RES",    pct(k_res), k_res, 0);
-        knob(120, 4, 54, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
-        knob(178, 4, 54, "AMOUNT", pct(k_amount), k_amount, 0);
+        knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
+        knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
+        knob(120, KNOB_TOP, 54, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
+        knob(178, KNOB_TOP, 54, "AMOUNT", pct(k_amount), k_amount, 0);
     }
-    cv_blit(0, 176);
+    cv_blit(0, SCOPE_H + MAT_H);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the

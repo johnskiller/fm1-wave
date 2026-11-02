@@ -136,9 +136,57 @@ power-on.
 each canvas is a fixed-size pool and the bands are different heights):
 
 ```
-  0.. 91   scope      92 px   the live waveform, fixed linear scale, 0 dBFS = band edge
- 92..175   material   84 px   the table's own shape (SYNTH); icon + material name otherwise
+  0.. 83   scope      84 px   the live waveform, fixed linear scale, 0 dBFS = band edge
+ 84..175   material   92 px   the table's own shape (SYNTH); icon + material name otherwise
 176..239   the four   64 px   K1..K4: CUT RES SHAPE AMOUNT, or A D S R on the ENV page
+```
+
+**These are derived, not filled in.** `app/app.c` computes them from what each band has
+to draw and refuses to compile if they do not sum to 240:
+
+```c
+#define MAT_PAD    6
+#define MAT_WAVE   80
+#define MAT_H      (MAT_PAD + MAT_WAVE + MAT_PAD)     /* 92 */
+#define SCOPE_H    (240 - MAT_H - KNOB_H)             /* 84 */
+#define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
+#define SCOPE_HALF ((SCOPE_H - 2) / 2)                /* 41 */
+#define KNOB_TOP   4
+#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* 46 */
+#define KNOB_H     64
+#if (MAT_H + KNOB_H + SCOPE_H) != 240
+#error "the three bands must fill the 240 px screen"
+#endif
+```
+
+### The clipping bug this replaced (and why it looked like overlap)
+
+The heights started as literals. When the material band was cut from 108 to 84 px, only
+`cv_begin` and `cv_blit` were changed -- every coordinate inside stayed at its 108-era
+value:
+
+```
+src_shape(&sk, 4, 4, 176, 100);   // draws to y = 103, inside an 84 px canvas
+cv_text(4, 92, ... "ENV PAGE");   // entirely outside an 84 px canvas
+```
+
+`gfx.c` clips at the canvas edge (`cv_rect`: `if (y1 > cv_y1) y1 = cv_y1;`) with no
+warning, so this is not a crash and not a drawing artefact: the bottom 20 px of the
+picture and the whole "ENV PAGE" marker simply did not appear. On a 240 px screen that
+reads as "the knobs are covering it", which is how it was reported.
+
+`app/tests/test_screen.py` now checks by pixel that each band stays inside its own rows,
+that the material band clears the knobs band, and that the table picture uses its full
+height. Verified against the bug by injecting it: with `MAT_H` forced to 75 the material
+ink ran to row 175 (the knobs boundary) and 5 checks failed.
+
+Measured, with the derivation in place:
+
+```
+band       rows        ink extent
+scope      0..83       33..50    (the trace; centre line at 42)
+material   84..175     91..169   SYNTH (79 px of the 80 px picture), 91..171 ENV/GRAN, 94..160 SMPL
+knobs      176..239    183..221  (39 px of ink, 18 px spare for the round knob art)
 ```
 
 ### How these heights got here
@@ -151,7 +199,8 @@ whatever each band was squeezed to. The history, from `git show <rev>:app/app.c`
 fecd1a3  112 + 68 + 60         = 240  (the strip appears)
 9743f27   68 + 56 + 76 + 40    = 240  (scope cut 112 -> 68 to fit two knob rows)
 bb55fd3   68 + 108 + 64        = 240  (material takes the middle, knobs to the bottom)
-this      92 + 84 + 64         = 240  (scope takes 24 px back from material)
+cea807b   92 + 84 + 64         = 240  (scope takes 24 px back from material -- CLIPPED)
+this      84 + 92 + 64         = 240  (derived; the material's contents fit again)
 ```
 
 The 92/84 split is the first one chosen from a measurement rather than from "make it
