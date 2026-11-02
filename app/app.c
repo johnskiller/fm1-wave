@@ -1797,14 +1797,35 @@ void app_frame(void)
          * the discontinuity lands in the middle of the picture instead of at the edge
          * where it reads as a vertical line on the border.
          *
-         * If there is no crossing within one window (silence, a DC-ish sample, the
-         * last period of a release tail) there is nothing to trigger on and the window
+         * ── the search is bounded by the ring, and that is not a detail ──────────
+         *
+         * The window is [tbase, tbase + view) samples back from the newest one, so the
+         * furthest sample it reads is view - 1 + tbase back. WF_SPAN is 768 and a
+         * three-period window at 175 Hz is 758 samples on its own: the ring does NOT
+         * hold "3 windows' worth" (the comment there said so and was wrong), and a
+         * trigger found near the far end of the search ran off it. Past WF_SPAN the
+         * modulo does not read history, it reads the cell the next block overwrote, so
+         * the picture was two instants spliced together -- per note, because it
+         * depended on both the window length and where the crossing happened to land.
+         * Measured against the same window read straight out of the signal, the trace
+         * correlated 0.04-0.46 at notes 53/58/60/65 and 0.997+ at 64/69/76.
+         *
+         * So the search stops where the window still fits: at most WF_SPAN - view
+         * samples back. A note whose window does not fit at all (view > WF_SPAN/2)
+         * keeps tbase = 0 and simply does not trigger, which is what it already did
+         * when it found no crossing.
+         *
+         * If there is no crossing in that range (silence, a DC-ish sample, the last
+         * period of a release tail) there is nothing to trigger on and the window
          * falls back to the newest sample. It will drift while it does that, which is
          * honest: there is no period on screen to be stable about. */
         tbase = 0;
         {
             int32_t b;
-            for (b = 0; b + 1 < view; b++) {
+            int32_t bmax = (int32_t)WF_SPAN - view;      /* window still inside the ring */
+            if (bmax > view - 1)
+                bmax = view - 1;
+            for (b = 0; b < bmax; b++) {
                 int32_t c0 = wf_buf[(uint16_t)((end + WF_SPAN - 1u - (uint32_t)b) % WF_SPAN)];
                 int32_t c1 = wf_buf[(uint16_t)((end + WF_SPAN - 2u - (uint32_t)b) % WF_SPAN)];
                 if (c0 >= 0 && c1 < 0) {          /* c1 is one sample older: rising */
