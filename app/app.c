@@ -784,10 +784,11 @@ static void midi_in(void)
             else
                 play_note((uint8_t)d1, (uint8_t)d2);
         } else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) {
-            if (arp_on())
-                arp_hold_del((uint8_t)d1);
-            else
-                wv_note_off(&dsp, (uint8_t)d1);
+            /* both, for the reason the panel's key-up gives: a note-on and a note-off
+             * can land on different sides of an ARP page change, and a note-off that
+             * only knows about one engine hangs the other. */
+            wv_note_off(&dsp, (uint8_t)d1);
+            arp_hold_del((uint8_t)d1);
         }
         else if (st == 0xB0u && (d1 == 123u || d1 == 120u)) {
             /* all notes off / all sound off: CC123 releases what is sounding,
@@ -838,13 +839,25 @@ static void input(void)
             /* the last key up: the scope can go back to a neutral window. A single
              * key-up while others are held must not, so the flag is cleared only when
              * no key is left down -- checked after the loop. */
-            /* the arp's set, or the voice: a key that the arp was holding has no
-             * voice of its own to end, and wv_note_off on it would be a no-op that
-             * looked like one */
-            if (arp_on())
-                arp_hold_del(note);
-            else
-                wv_note_off(&dsp, note);
+            /* BOTH, and not a choice between them.
+             *
+             * A note-on goes to the arp's held set when the arp is running and to a
+             * voice when it is not, so a key that is held across a page change has
+             * been started by one engine and is being let go by the other. Choosing
+             * by the arp's state at the moment of the KEY-UP therefore strands the
+             * note: hold a chord, open the ARP page, turn RATE up, release -- the
+             * three voices are never released and sound until the unit is powered
+             * off (measured: `expect active 0` read 2 afterwards). The other way
+             * round leaves a note in the held set that plays again the next time
+             * RATE leaves zero.
+             *
+             * Releasing both is what makes the two paths agree whatever the order
+             * was: wv_note_off on a note with no voice is already a no-op (it walks
+             * the eight voices and matches none), and arp_hold_del on a note that is
+             * not in the set is too. The cost is one eight-iteration scan per key-up,
+             * which is not a cost. */
+            wv_note_off(&dsp, note);
+            arp_hold_del(note);
             plat_midi_send(0x08u | 0x80u << 8 | (uint32_t)note << 16, TO_USB | TO_BLE);
         }
     }

@@ -191,6 +191,35 @@ def main():
                      "midi USB 80 3C 00\nexpect arp_held 1\n")
     check("a MIDI note off leaves the set", ok, "" if ok else bad[0].strip())
 
+    # ── pages switched under a held key ─────────────────────────────────────
+    # A note-on and a note-off have to agree about which engine owns the note, and
+    # the panel lets that agreement be broken: hold a chord, open the ARP page, turn
+    # RATE up, let go. The note-ons went to the voices (the arp was off) and the
+    # note-offs went to the held set (the arp was on), so the voices were never
+    # released -- a note that sounds until the unit is powered off.
+    #
+    # The same shape the other way round: start a note with the arp running, turn it
+    # off while the key is down, lift the key -- the note-off goes to the voice and
+    # the held set keeps a note that will play again the moment RATE goes up.
+    #
+    # Both are asserted through `active` (the voices the engine still thinks are
+    # sounding), because that is the quantity a hang is made of.
+    print("arp: pages switched under a held key")
+    ok, bad = all_ok("key 7 down\nkey 9 down\nwait 40\n"
+                     "tap ARP\nturn K1 16\n"
+                     "key 7 up\nkey 9 up\n"
+                     "wait 40\nturn K1 -16\ntap ARP\n"
+                     "wait 300\nexpect active 0\n")
+    check("a chord held into the arp lets go of its voices", ok, "" if ok else bad[0].strip())
+
+    ok, bad = all_ok("tap ARP\nturn K1 16\nkey 7 down\nwait 40\n"
+                     "tap ARP\nturn K1 -16\n"      # the arp off while the key is down
+                     "key 7 up\n"
+                     "tap ARP\nturn K1 16\n"       # and on again
+                     "wait 300\nexpect arp_held 0\nexpect active 0\n")
+    check("a note started by the arp lets go when the arp is switched off under it", ok,
+          "" if ok else bad[0].strip())
+
     print(f"\n{checks} checks, {failures} failed")
     return 1 if failures else 0
 
