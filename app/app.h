@@ -10,6 +10,12 @@
 #define APP_SPLASH_RGB RGB(40, 180, 220)
 #define APP_BLOCK 256u                   /* frames per audio block: 5.8 ms at 44.1 kHz */
 #define APP_TOUCH                        /* velocity and pressure from the keys (lib/touch.h) */
+
+/* The scope's debug corner (app.c dbg_draw): the render's load, the second core, and
+ * the core clock. A build for playing does not want it; a build for measuring does.
+ * Comment it out for a release -- it is not a runtime toggle, because the measurement
+ * itself costs a render's worth of time at boot and the strings cost flash. */
+#define DBG_ON
 #define APP_BTDEV                        /* Bluetooth MIDI devices (lib/btdev.h) */
 #define APP_BLE_AT_BOOT (!template_ble_off())   /* Bluetooth at power-on: as the player left it (REC held) */
 int template_ble_off(void);

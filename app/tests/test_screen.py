@@ -256,6 +256,31 @@ shot grn.png
     ck(42 - 41 == 1 and 42 + 41 == 83,
        "the scope's full scale reaches the band edge, leaving no headroom above 0 dBFS")
 
+    # ── the debug corner (app.c dbg_draw, DBG_ON) ──────────────────────────────
+    # Three rows at the top left: the render's load, the second core, the clock. What
+    # this checks is that it draws at all and where it sits, not its values: the values
+    # are the platform's and change with what is playing.
+    im = shots["syn"]
+    INK_HI = (255, 186, 65)                       # SYNTH's ink_hi, what dbg_draw uses
+    BG = (41, 28, 8)                              # SYNTH's bg: the backing box
+    # Glyphs are anti-aliased, so only the stems land on ink_hi exactly (10 px for
+    # "0% xr0"); counting exact matches measures the font's hinting, not whether the
+    # row drew. What is counted is bright pixels -- anything well above the backing box
+    # and the graticule, which is what a glyph's core is.
+    for name, y0, y1 in (("row 1", 4, 16), ("row 2", 16, 28), ("row 3", 28, 40)):
+        n_ink = sum(1 for y in range(y0, y1) for x in range(0, 64)
+                    if sum(im.getpixel((x, y))) > 300)
+        ck(n_ink > 15, f"debug {name} is drawn", f"{n_ink} px of ink")
+
+    # The backing box must NOT cover the 0 dBFS line at row 1: the graticule's reference
+    # is the scale's anchor, and a debug overlay that hides it makes the scope unreadable
+    # to check. (This check earned its place: the first version covered rows 0-36 and the
+    # 0 dBFS line went from 240 px of GRID to 178, which the check above caught.)
+    dbg_bg = sum(1 for x in range(0, 64) if im.getpixel((x, 3)) == BG)
+    ck(dbg_bg > 40, "the debug box's backing reaches row 3", f"{dbg_bg} px")
+    ck(im.getpixel((0, 1)) == SCOPE_GRID,
+       "the debug box leaves the 0 dBFS line at row 1 intact")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

@@ -21,6 +21,7 @@
 #define SMP_MAX   8
 
 static wv_state dsp;
+static uint8_t  cpu2;            /* the second core took the job (app_init's plat_cpu2_set) */
 static wv_bank  bank = { WV_BANKS[0] };
 
 /* The sample pool, as the platform handed it over. `pool` points into the resource
@@ -273,7 +274,10 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         lr[2 * i + 1] = 0;
     }
 
-    wv_render(&dsp, &bank, mono, n, 4096.0f);
+    /* Split across both cores when the second one is up. wv_render is the same call
+     * with the split off, so a one-core unit is not a different code path. */
+    wv_render_split(&dsp, &bank, mono, n, 4096.0f, cpu2, plat_cpu2_run, plat_cpu2_wait,
+                    plat_cpu2_sync);
 
     for (i = 0; i < n; i++) {
         float v = mono[i] * m;
@@ -1212,6 +1216,154 @@ static float fs_px(float a)
     return v;
 }
 
+/* ---------------------------------------------------------------- debug --- */
+
+/* The debug corner: what the instrument is doing, three short rows at the scope's top
+ * left. Compiled in only with DBG_ON (fm1.toml dbg = true -> -DDBG_ON), because a
+ * release's screen should be the instrument, not its instrumentation.
+ *
+ * Row 1: the audio render's load, in % of its budget, and the xruns since boot. This is
+ * plat_cpu_pct(), the platform's own reading, smoothed over ~16 blocks: it times the
+ * interrupt, which is the only place a late block can come from.
+ *
+ * Row 2: the second core. "c2 --" one core (never started, or retired and the fallback
+ * took over), "c2 ok" on and idle, "c2 wt" on with a job outstanding at this instant.
+ * The platform does not report the second core's load, so what is shown is the thing
+ * that actually costs the render: a handover still in flight when the first core has
+ * finished its half means the first core waits, and a render can miss its deadline
+ * without ever looking loaded. "w!" marks a run that saw at least one.
+ *
+ * Row 3: the core clock in MHz, measured rather than read. The platform has no clock
+ * query -- fm1_clock.h's registers are behind the MMIO ban that keeps this app out of
+ * a register -- so it is timed against the 24 MHz crystal with a fixed count of
+ * dependent float multiply-adds. Dependent, because then the FPU's latency is timed and
+ * not its width: throughput would measure the machine's shape, which is the same at
+ * both clocks. A compiler that unrolls the loop changes the count and the number goes
+ * wrong by exactly that factor, so the result is only accepted when it lands on one of
+ * the two clocks this chip is found at. */
+#ifdef DBG_ON
+
+/* The clocks an FM-1 runs at (fm1_clock.h): 360 MHz under M-VAVE's bootloader, 320
+ * under m-bootloader 1.2. A reading within 30 MHz of one is rounded to it: the loop's
+ * cycle count is fixed at -O2, so a percent or two of error is expected, and "358 MHz"
+ * would be a worse answer than "360". */
+static const uint16_t MPU_CLKS[] = { 240, 320, 360, 480 };
+
+static uint32_t dbg_mhz;            /* the reading, MHz: 0 = not measured */
+static uint8_t  dbg_mhz_ok;         /* 1 = it landed on a known clock */
+static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least once */
+
+#define DBG_LOOP 2000u
+#define DBG_CPL  8u                 /* dependent vmul+vadd pairs per iteration */
+
+static void dbg_measure_clock(void)
+{
+    uint32_t t0, t1, i, n;
+    float a = 1.0f, b = 1.000001f, m;
+
+    t0 = plat_ticks24();
+    for (i = 0; i < DBG_LOOP; i++) {
+        a = a * b + 1e-7f;
+        a = a * b + 1e-7f;
+        a = a * b + 1e-7f;
+        a = a * b + 1e-7f;
+    }
+    t1 = plat_ticks24();
+    if (a == 0.0f || t1 == t0)
+        return;                     /* dead code or a stopped counter: no reading */
+
+    /* ticks are 1/24 us:  MHz = loops * cycles / ticks * 24 */
+    m = (float)DBG_LOOP * (float)DBG_CPL * 24.0f / (float)(t1 - t0);
+
+    /* Accepted only when it lands on a clock this chip runs at. A reading of 1555 MHz
+     * is not a measurement of the FM-1, it is a measurement of the machine the host
+     * build runs on (and a real reading that misses every candidate means the loop was
+     * not compiled as the cycle count here assumes -- an unrolled or vectorised body
+     * changes cycles-per-iteration). Showing the number anyway would put a plausible
+     * looking figure on screen that is wrong by an unknown factor, which is worse than
+     * an empty row: a debug readout that can lie is a debug readout that misleads. */
+    for (n = 0; n < sizeof MPU_CLKS / sizeof MPU_CLKS[0]; n++) {
+        float d = m - (float)MPU_CLKS[n];
+        if (d > -30.0f && d < 30.0f) {
+            dbg_mhz = MPU_CLKS[n];
+            dbg_mhz_ok = 1;
+            return;
+        }
+    }
+    /* Not a known clock: show the number anyway, marked. A blank row would say "the
+     * counter did not move" and leave nothing to work with on the first real run; the
+     * figure with a "?" says which way the cycle count is wrong (half of 360 means the
+     * loop is four instructions an iteration, not eight: the core has an FMA). That is
+     * a calibration, and it can only be done on the device. */
+    dbg_mhz = (uint32_t)(m + 0.5f);
+
+}
+
+/* The corner. Drawn after the trace, on purpose: an overlay the waveform can hide is an
+ * overlay that lies about what it is not covering. */
+static void dbg_draw(const src_skin_t *k)
+{
+    char r[20], t[8];
+    uint32_t pct = plat_cpu_pct();
+    int32_t c2 = plat_cpu2_on();
+    int32_t busy = plat_cpu2_busy();
+    char *q;
+
+    if (busy)
+        dbg_seen_wait = 1;
+
+    /* A backing box, because the graticule runs straight through these rows and a
+     * scope trace runs through them too: text over a grid at this size is unreadable,
+     * and a debug readout that cannot be read is not a debug readout. 62 px covers the
+     * widest row ("c2 wt!", "360M?"). */
+    cv_rect(0, 3, 62, 36, k->bg);
+
+    /* row 1: "12% xr0" -- the load and the xruns, the two numbers a render that is
+     * running out of time shows first */
+    q = r;
+    num(t, (int32_t)pct);
+    for (const char *p = t; *p; )
+        *q++ = *p++;
+    *q++ = '%';
+    *q++ = ' ';
+    *q++ = 'x';
+    *q++ = 'r';
+    num(t, (int32_t)plat_xruns());
+    for (const char *p = t; *p; )
+        *q++ = *p++;
+    *q = 0;
+    cv_text(1, 4, &FONT_T, r, k->ink_hi);
+
+    /* row 2: "c2 ok" / "c2 --" / "c2 wt", and a "!" once a wait has been seen */
+    q = r;
+    *q++ = 'c';
+    *q++ = '2';
+    *q++ = ' ';
+    if (c2 <= 0) { *q++ = '-'; *q++ = '-'; }
+    else if (busy) { *q++ = 'w'; *q++ = 't'; }
+    else { *q++ = 'o'; *q++ = 'k'; }
+    if (c2 > 0 && dbg_seen_wait) *q++ = '!';
+    *q = 0;
+    cv_text(1, 16, &FONT_T, r, k->ink_hi);
+
+    /* row 3: "360M" */
+    if (dbg_mhz) {
+        q = r;
+        num(t, (int32_t)dbg_mhz);
+        for (const char *p = t; *p; )
+            *q++ = *p++;
+        *q++ = 'M';
+        if (!dbg_mhz_ok)
+            *q++ = '?';
+        *q = 0;
+        cv_text(1, 28, &FONT_T, r, k->ink_hi);
+    }
+}
+#else
+#define dbg_draw(k)         ((void)0)
+#define dbg_measure_clock() ((void)0)
+#endif
+
 void app_frame(void)
 {
     static uint32_t last;
@@ -1431,6 +1583,7 @@ void app_frame(void)
             }
         }
     }
+    dbg_draw(&sk);
     cv_blit(0, 0);                 /* without this the band is drawn and never shown */
 
     /* ─── the panel body ──────────────────────────────────────────────────────
@@ -1762,6 +1915,16 @@ void app_input_only(void)
 
 void app_init(void)
 {
+    dbg_measure_clock();
+
+    /* The second core, started here because app_init is the only time it may start
+     * (plat.h, cpu2.c: at power-on, before the audio and the timers). Its result is
+     * kept rather than checked: a unit where it does not come up renders on one core,
+     * which is slower and not different -- the fallback in wv_render_split covers the
+     * rest. fm1.toml has had cpu2 = true since the DSP was split in half; what was
+     * missing was this call, so the core was started at boot and then never given a
+     * job: the split existed and ran as one core. */
+    cpu2 = plat_cpu2_set(1) == 0;
     wv_init(&dsp);
     ui_apply();
     bank_i = 0;
