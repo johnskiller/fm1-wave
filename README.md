@@ -1,65 +1,81 @@
-# The template
+# fm1-wave
 
-The smallest complete fm1-base firmware. Copy this directory to start your own: it builds, installs, updates, runs
-in the host simulator and in the browser, speaks to a screen reader, and publishes a site with an installer and a
-manual.
+A polyphonic wavetable instrument for the M-VAVE FM-1, with a waveshaper, a
+sample-as-wavetable mode, slices, and granular.
 
-| File | What |
+MPL-2.0. Built on [fm1-base](https://github.com/zvenson/fm1-base).
+
+## Documents
+
+All of them are in **`app/docs/`**.
+
+| File | What it is |
 | --- | --- |
-| `app.h` | The app's settings (name, block size, the store's objects) and its half of the contract with the platform |
-| `app.c` | The app: input, sound, screen, saving |
-| `fm1.toml` | Build and site settings: name, package identity, USB names, tagline, source, licence |
-| `words.tsv` | The screen reader's words (fm1-reader): the screen's text and how to say it |
-| `tests/basic.txt` | Host simulator checks: keys, MIDI, settings across a reboot, the sound, the screen reader |
-| `tests/screens.txt` | The manual's screenshots |
-| `docs/MANUAL.md` | The manual (an example to rewrite) |
-| `site/landing.md` | The site's front page |
-| `.github/workflows/release.yml` | Signed releases built on GitHub (moved to the repository's root: Make it your own) |
+| [`app/docs/spec.md`](app/docs/spec.md) | **The spec.** What the instrument is and why, the signal path, the panel's design intent, the budgets, the storage format, what v1 does not do. Start here. |
+| [`app/docs/panel-map.md`](app/docs/panel-map.md) | **What every control actually does**, per source and per page, and which controls are free. Authoritative over spec.md §3 for what is *wired*; checked by `app/tests/panel.txt`. |
+| [`app/docs/MANUAL.md`](app/docs/MANUAL.md) | The player's manual (still the template's example). |
+| [`app/docs/background-wavetable-and-waveshaper.md`](app/docs/background-wavetable-and-waveshaper.md) | Why a wavetable engine and a waveshaper, against the alternatives. The background reading behind spec.md §0. |
+| [`platform/`](platform) | fm1-base as a submodule. Unmodified. |
+
+Two rules about these files:
+
+- **`spec.md` is the design intent; `panel-map.md` is what the code does.** When
+  they disagree, panel-map.md wins for behaviour and spec.md wins for intent — and
+  the disagreement is a bug in one of them.
+- **Do not re-derive a control's meaning by grepping `app.c`.** panel-map.md is the
+  answer, and `app/tests/panel.txt` fails the build if it stops being true.
 
 ## Build, test, install
 
-From the fm1-base directory:
+From the directory that contains `platform/` and `app/`:
 
-    tools/build.py template                     # template/build/template.fwsc (JieLi toolchain, AC79 SDK)
-    tools/build.py template --host              # the host simulator, then:
-    template/build/host/template_host template/tests/basic.txt template/build/host
-    tools/build.py template --web               # the browser emulator: template/build/emu/
-    python3 tools/fm1_install.py template/build/template.fwsc
+    export AC79_SDK=/path/to/fw-AC79_AIoT_SDK
+    export JIELI_TOOLCHAIN=/path/to/jieli/toolchain
 
-For the toolchain, the SDK and the container the build runs in, see fm1-base's README.
+    python3 platform/tools/build.py app               # app/build/wave.fwsc
+    python3 platform/tools/build.py app --host        # the host simulator
+    python3 platform/tools/build.py app --web         # the browser emulator: app/build/emu/
 
-## Release and site
+Tests:
 
-    tools/build.py template --release 0.1       # template/build/template-0.1.fwsc, identity FM-1_11000100
-    tools/publish_site.sh template 0.1          # builds the release, the emulator and the site; pushes gh-pages
+    sh app/tests/run_dsp.sh                           # the DSP, plain cc: 242 checks
 
-The site has the front page, the installer, the emulator, the manual and the screen reader's words. To build it
-without publishing, run `tools/make_site.py template template/build/template-0.1.fwsc 0.1 OUT_DIR`.
+    app/build/host/wave_host app/tests/play.txt  app/build/host
+    app/build/host/wave_host app/tests/smpl.txt  app/build/host
+    app/build/host/wave_host app/tests/panel.txt app/build/host   # the panel map
 
-In a firmware's own repository, a release is built on GitHub from its tag by `.github/workflows/release.yml`, which
-calls the shared FM-1 builder ([`zvenson/fm1-build` at `v1`](https://github.com/zvenson/fm1-build/tree/v1)). The
-builder runs `./build.sh --release X.Y` and `tests/run_tests.sh` (a failing test stops the release) and signs build
-provenance for `NAME-X.Y.fwsc` and `NAME-X.Y-app.bin`; the FM-1 Firmware Hub shows such packages as built from
-source. The workflow makes a draft release (or keeps the one you wrote, with its notes), checks the sums and the
-signatures, then publishes it. A tag with a suffix (`v0.2-beta`) is a prerelease; a published release is never
-rebuilt. For the site, download that package and give it to `publish_site.sh`, so the site has the attested one:
+`play.txt`/`smpl.txt`/`panel.txt` are host-simulator scripts: they drive the real
+app through its controls and assert on its state and its audio. `panel.txt` is the
+one that checks `docs/panel-map.md`.
 
-    gh release download v0.1 --pattern '*.fwsc' --dir app/build
-    base/tools/publish_site.sh app 0.1 app/build/NAME-0.1.fwsc
+To listen without a device, render to a file:
 
-## Make it your own
+    sh app/tools/render_smpl.sh                       # app/build/smpl.wav
+    sh app/tools/render_gran.sh                       # app/build/gran.wav
 
-1. Copy `template/` to your firmware's repository, with fm1-base beside it as a git submodule.
-2. In `app.h`, set `APP_NAME`, and the store's objects and their flash offsets (`APP_STORE_MAP`).
-3. In `fm1.toml`, set the name, an `id_prefix` of your own (`FM-1_` and digits; each firmware has its own), the USB
-   names, and the site's tagline, source and credits.
-4. In `words.tsv`, set the `# url:` line to where your site publishes its words.
-5. Write your app in `app.c`: `app_render` for the sound, `app_frame` for the screen and the controls, and the rest
-   of the contract in `app.h`.
-6. Rewrite `docs/MANUAL.md` and `site/landing.md`, and the tests.
-7. For signed releases, move `.github/workflows/release.yml` to the repository's root (`.github/workflows/`) and
-   change the lines marked `# <- yours`: the name in the release title and the concurrency group, `pkg=` (fm1.toml's
-   name in lower case), any other assets, and what the tests need. Then a pushed tag `vX.Y` builds, tests, attests
-   and publishes the release.
+Install:
 
-fm1-base is MPL-2.0: changes to its files are published under MPL-2.0, and your own files may use any licence.
+    python3 platform/tools/fm1_install.py app/build/wave.fwsc
+
+## What is in here
+
+| Path | What |
+| --- | --- |
+| `app/app.c` | The app: input, the panel, the screen, the voice allocation hand-off |
+| `app/dsp/` | The engine: `wv_dsp` (voices, shaper, SVF, envelope, the split render), `wv_sample` (the pool and its reader), `wv_slice` (chop detection), `wv_grain` (the granular cloud) |
+| `app/tests/` | The DSP tests (plain `cc`, ASan/UBSan) and the host scripts |
+| `app/tools/` | The pool packer, the demo-pool generator, the wavetable bank generator, the WAV renderers |
+| `app/docs/` | The documents above |
+| `app/fm1.toml` | Build and site settings: name, package identity, USB names, the resource region |
+| `app/words.tsv` | The screen reader's words |
+| `platform/` | fm1-base, unmodified, as a submodule |
+
+## State
+
+Playable on the host and in the browser emulator. **Not yet verified on hardware**
+— no FM-1 has run this build, so dual-core gains, the 22.05 vs 44.1 kHz slice rate,
+and real DAC headroom are all unanswered (see spec.md §9e and the Gate A/Gate B
+notes).
+
+fm1-base is MPL-2.0: changes to its files are published under MPL-2.0, and this
+app's own files are MPL-2.0 as well.

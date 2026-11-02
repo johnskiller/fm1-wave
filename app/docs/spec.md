@@ -617,21 +617,55 @@ have shown:
    instead. The symptom was "SOURCE does nothing". Two identical WAVs from two
    different SOURCE states is what pointed at the pool rather than at the switch.
 
-### 9e. Planned
+### 9e. Built: the envelope (`sh app/tests/run_dsp.sh`, `test_env.c`)
 
-- envelope timing; a stolen voice never leaves a non-zero level (partly there)
-- grain overlap-add sums to a constant
-- EN_PRESET is BANK in SYNTH and SAMPLE in SMPL; BTN_EDIT re-chops the current slot
-- the screen redraws the band that changed and not the others
-- on hardware: both gates, and audio *heard*, not measured
+The VCA used to be two `#define`s -- `WV_ATK 0.0113` (~2 ms) and `WV_REL 0.0012`
+-- with a `target` and no sustain, so a held note was a gate: it reached full level
+and stayed there. A patch with sustain 0, or any decay, could not be expressed.
 
-### 9f. The panel, as built (differs from §3 in one place)
+Now `eg_a/eg_d/eg_s/eg_r` and a per-voice stage walk. What is asserted, against
+rendered audio rather than against fields:
 
-`B_SEL` toggles SOURCE. §3 gave SOURCE to `EN_SELECT` as a dead stop and the ENV
-page to `B_ENV`; the ENV page does not exist yet, so the switch that makes the
-sample path reachable took the first free button. When the ENV page is written it
-takes `B_ENV` back and SOURCE returns to `EN_SELECT`. Recorded here so the
-difference is a decision with an expiry, not a drift.
+- the time curves' end points: attack 1 ms..4 s, decay and release 2 ms..8 s
+- a 100 ms attack reaches 93% of its level at its nominal time, and is not a step
+  at a quarter of it
+- a 1 ms attack's largest sample-to-sample step is 0.0189, so it does not click
+- **sustain 0 decays to silence with the key still down** -- the case the old code
+  could not produce at all
+- note-off during a long attack releases from the level it had reached (0.096 ->
+  0.005 over 10 ms) rather than jumping to full first
+- the defaults (A=0, D=64, S=127, R=32) hold a level exactly as the old gate did,
+  so a patch made before the envelope sounds the same after it
+- one voice releasing leaves the other seven at their levels
+
+### 9e-bis. Built: the panel map (`app/tests/panel.txt`)
+
+49 assertions in the host simulator, through `app_expect`. They expect **exact**
+values, not bounds, because every encoder is relative and one detent is known.
+They check all seven encoders in all three sources, the ENV page's takeover and
+return, that a page's edits do not leak into the tone controls, and that GRAN's
+`EN_ALGO` moves GRAIN SIZE without moving MORPH.
+
+Confirmed the script can fail: putting MORPH back on `EN_ALGO` in GRAN produces
+three failures naming `grain`. A test that cannot fail is not a test.
+
+### 9f. The panel, as built
+
+`docs/panel-map.md` is the authority on this and is checked by `panel.txt`; this
+section only records where the built panel differs from §3's intent.
+
+§3 gave SOURCE to `EN_SELECT` as a detented stop. It is on `B_SEL` instead, and
+**that is now the intended arrangement, not a stopgap**: a three-state switch on a
+button plus an on-screen indicator costs one button, while a detented encoder for
+the same thing spends a knob that GRAN needs for SPRAY. The earlier version of this
+section said SOURCE would return to `EN_SELECT` when the ENV page was written; the
+page now exists and SOURCE did not return, because the button plus the screen turned
+out to be the better trade. `EN_SELECT` carries SPRAY in GRAN and is free otherwise.
+
+The one place §3 is genuinely overridden is `EN_ALGO` in GRAN, where it is GRAIN
+SIZE rather than MORPH. The reason is arithmetic and is argued in panel-map.md: GRAN
+needs seven controls, the panel has seven encoders, and MORPH is the only one of the
+seven that a grain voice never reads. K1-K4 do not move in any source.
 
 `SOURCES` in the UI band shows what the keys are playing: the bank's name in SYNTH,
 the slot's name and its chop count in SMPL, and `NONE` when the resource region is
