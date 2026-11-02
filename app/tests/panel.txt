@@ -9,12 +9,14 @@
 # The three rules the table has to keep:
 #   1. K1-K4 are CUT/RES/SHAPE/AMOUNT in every source, and A/D/S/R only on the ENV
 #      page, which is a page (a lit button, a fixed set of knobs) and not a mode.
-#   2. MORPH keeps EN_ALGO in SYNTH and SMPL. In GRAN, EN_ALGO is GRAIN SIZE --
-#      MORPH has nothing to read in a grain voice, and GRAN needs seven controls.
+#   2. EN_SELECT picks the material in every source (bank or slot), because SELECT
+#      is the knob named after that job. EN_ALGO is MORPH in SYNTH and GRAIN SIZE in
+#      GRAN -- MORPH has nothing to read in a grain voice. EN_PRESET is SPRAY in
+#      GRAN and free elsewhere, which is why GRAN fits seven controls on six knobs.
 #   3. Nothing a knob does in one mode leaks into another's value.
 #
 # The numbers are exact because every encoder is relative and one detent is known:
-# K1-K4 move 4 per detent, EN_ALGO 8, EN_SELECT (SPRAY) 4, EN_PRESET ±1 slot.
+# K1-K4 move 4 per detent, EN_ALGO 8, EN_PRESET (SPRAY) 4, EN_SELECT ±1 material.
 # An exact expectation catches a knob that moves by the wrong amount, which a
 # "greater than" would wave through.
 
@@ -87,6 +89,13 @@ expect src 1
 expect env 0
 expect cut 87
 
+# EN_SELECT is the material slot in SMPL: SELECT is the knob named after it
+expect slot 0
+turn SELECT 1
+expect slot 1
+turn SELECT 1
+expect slot 0
+
 turn ALGO 5
 expect morph 127
 expect grain 64
@@ -109,10 +118,13 @@ turn ALGO 10
 expect grain 104
 expect morph 127
 
-# EN_SELECT is SPRAY, and only SPRAY
+# EN_PRESET is SPRAY, on the bottom-left knob, next to GRAIN SIZE on bottom-right
 expect spray 0
-turn SELECT 20
+turn PRESET 20
 expect spray 80
+turn SELECT 1
+expect spray 80
+expect slot 1
 
 # K1-K4 are still the tone controls: a grain voice runs through the same shaper
 # and filter, so taking them away would remove the filter from the source that
@@ -124,12 +136,12 @@ expect res 40
 expect shape 1
 expect amount 20
 
-# EN_PRESET is the material slot in GRAN, as in SMPL
+# EN_SELECT is the material slot in GRAN, as in SMPL -- and it is not SPRAY
+turn SELECT 1
 expect slot 0
-turn PRESET 1
-expect slot 1
-# the slot turn must not have moved the bank
+# the slot turn must not have moved the bank, and PRESET stays SPRAY
 expect bank 0
+expect spray 80
 
 # ── back to SYNTH: every knob returns to its own parameter ───────────────────
 tap SEL

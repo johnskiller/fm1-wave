@@ -23,13 +23,30 @@ Three sources own a control, and the difference matters:
 
 | Encoder | Printed | SYNTH | SMPL | GRAN | Owner | app.c |
 |---|---|---|---|---|---|---|
-| `EN_SELECT` | SELECT | — | — | **SPRAY** 0–127 | app | 47 |
+| `EN_SELECT` | SELECT | **BANK** 0–7, detented | **SLOT** | **SLOT** | app | 47 |
 | `EN_ALGO` | ALGORITHM | **MORPH** 0–127 | **MORPH** *(no effect)* | **GRAIN SIZE** 10–200 ms | app | 47 |
-| `EN_PRESET` | PRESETS | **BANK** 0–7, detented | **SLOT** | **SLOT** | app | 47 |
+| `EN_PRESET` | PRESETS | — | — | **SPRAY** 0–127 | app | 47 |
 | `EN_K1` | KNOB 1 | **CUT** | CUT | CUT | app | 47 |
 | `EN_K2` | KNOB 2 | **RES** | RES | RES | app | 47 |
 | `EN_K3` | KNOB 3 | **SHAPE** 0–3 detented | SHAPE | SHAPE | app | 47 |
 | `EN_K4` | KNOB 4 | **AMOUNT** | AMOUNT | AMOUNT | app | 47 |
+
+**Why SELECT holds the material.** SELECT is the knob whose name says "which thing is
+loaded", so it holds the material in every source: BANK in SYNTH, SLOT in SMPL and GRAN.
+It used to hold SPRAY in GRAN only, because the material had to live on PRESETS -- which
+meant the knob marked SELECT did nothing in two of three modes while the knob marked
+PRESETS picked the bank. Both names were wrong for what they did.
+
+With the material on SELECT, SPRAY moves to PRESETS and GRAIN SIZE stays on ALGORITHM.
+That is also the better hand arrangement: PRESETS is bottom-left and ALGORITHM is
+bottom-right, so GRAN's two most-turned knobs are the two lower knobs.
+
+**The screen is laid out as the panel is.** The material band keeps its picture on the
+left and puts the labels on the right in the panel's own arrangement: SELECT top-right,
+and the bottom row split PRESET left / ALGO right. A label printed where its knob is does
+not have to be read; the previous version stacked all of them in a single column beside
+the picture, which made a legend where a map was wanted. The picture is 112 px wide as a
+result, down from 176.
 
 **K1–K4 never move.** They are CUT / RES / SHAPE / AMOUNT in every source, because
 a grain voice runs through the *same* shaper → SVF → VCA as a table voice
@@ -237,43 +254,35 @@ The loop marks stay. They sit at the band's edges nudged in one pixel, because t
 is the whole slot until there is a way to set a range, and a mark on the border is
 indistinguishable from the border itself.
 
-**The envelope: one line, drawn dim, shared by SMPL and GRAN.** Two separate complaints
-turned out to be the same defect.
+**The envelope: filled min/max, drawn dim, shared by SMPL and GRAN.**
 
-*The brightness.* SMPL drew its envelope in `ink_hi` at full strength while GRAN drew the
-same material at 2/5 of `ink`. Both now call `env_line()` at `dim(ink, 2, 5)`, so they
-cannot drift apart again.
+*The brightness was the real defect.* SMPL drew its envelope in `ink_hi` at full strength
+while GRAN drew the same material at 2/5 of `ink`, so the two sources disagreed about
+their own background. Both now call `env_line()` at `dim(ink, 2, 5)`.
 
-*The solidity.* "The sampling is so dense it comes out as a solid shape" -- but the
-column count was never the cause. Measured, **fewer** columns made it worse, because a
-wider window means a wider min/max range:
+*The fill went away and came back.* It was changed to a 1 px peak line on my reading of
+"the sampling is so dense it comes out as a solid shape", and restored to a filled
+min/max band on the player's judgement after seeing both. The measurements that motivated
+the removal are still true -- 53 samples per column, a drum hit spanning 60 of the 78 px
+inside a single column -- but they describe why the band is dense, not why dense is wrong:
+a filled band is how much energy is at this moment, and a 1 px outline of a loud passage
+does not read as loud at all.
+
+What the column count does, for the record: **fewer** columns make it denser, because a
+wider window means a wider min/max range.
 
 ```
 DEMO K   176 cols: 15.6 px tall   88 cols: 17.7   44 cols: 21.0   22 cols: 25.1
 ```
 
-The cause was `min/max` per column drawn as a filled bar. A drum hit oscillates fast
-enough to span 60 of the 78 px inside one 53-sample column, so every column of every hit
-was filled from the peak down to the trough: a hit became a rectangle. And DEMO T, a
-sustained tone, spans a constant 66/78 px, so at min/max it was a full-height block end
-to end with no shape at all.
-
-Peak magnitude per column is the envelope, and it is what the player reads -- "how loud
-is the material here". Measured coverage of the material band:
+Measured coverage of the material picture, filled:
 
 ```
-                 min/max fill    peak line
-SMPL DEMO K         23.6 %          6.7 %
-SMPL DEMO T         20.9 %          3.6 %
-GRAN DEMO K         20.9 %          4.0 %
-GRAN DEMO T         23.6 %          7.9 %
+SMPL DEMO K  24.7 %      GRAN  25.0 %
 ```
 
-`test_screen.py` asserts under 15 %, and an injected return to min/max fill measures
-24.9 % / 25.2 % and fails both checks.
-
-DEMO T's line is flat, and that is the honest answer: the material really is a constant
-amplitude from start to finish. There is no envelope to show because there is none.
+DEMO T is a sustained tone, so its band is full height end to end. That is the material,
+not the drawing: there is no envelope to show because the sample has none.
 
 **GRAN: what the player reported, and what it was.** Two defects, and the first one is
 worth keeping because the guess was reasonable and wrong:

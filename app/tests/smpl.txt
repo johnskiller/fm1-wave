@@ -61,7 +61,7 @@ expect peak_db_min -50
 key 20 up
 wait 300
 
-# ── EN_PRESET must change the sound, not just the label ──────────────────────
+# ── EN_SELECT must change the sound, not just the label ──────────────────────
 #
 # Asserted in app/tests/test_slot.py, not here. The two demo slots peak only 0.7 dB apart
 # at the same key and velocity (-14.4 and -15.1 dBFS), so a `peak_db_min` threshold loose
@@ -70,10 +70,10 @@ wait 300
 # envelope SHAPE instead: slot 0 decays in 4 of 16 segments (a drum transient), slot 1
 # holds 11 of 16 flat (a 220 Hz tone).
 expect slot 0
-turn PRESET 1
+turn SELECT 1
 wait 400
 expect slot 1
-turn PRESET 1
+turn SELECT 1
 wait 400
 expect slot 0
 

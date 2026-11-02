@@ -150,8 +150,21 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
                                                        * that replaces the bar is not written yet */
 
 #define MAT_PAD    6                                  /* above and below the picture */
-#define MAT_WAVE   80                                 /* the table picture's own height */
+#define MAT_WAVE   80                                 /* the picture's own height */
 #define MAT_H      (MAT_PAD + MAT_WAVE + MAT_PAD)     /* 92 */
+/* The picture is 148 px wide and the right 60 px are the panel's own two columns of
+ * labels, laid out where the knobs actually are: SELECT top-right, and the lower knob
+ * bottom-right. The picture used to run the full 176 px, which left the labels as a
+ * list in a corner that did not correspond to anything. A label that is not where its
+ * knob is has to be read; one that is where its knob is does not. */
+/* The picture keeps the left side and the right side is a 2x2 of labels laid out in
+ * the panel's own arrangement: SELECT top-right, and the two lower knobs along the
+ * bottom, PRESET left and ALGO right. */
+#define MAT_W      112                                /* the picture, x 4..115 */
+#define MAT_LAB_L  122                                /* the label grid's two columns */
+#define MAT_LAB_R  180
+#define MAT_ROW_TOP 10                                /* SELECT's row */
+#define MAT_ROW_BOT 44                                /* PRESET / ALGO's row */
 
 #define SCOPE_H    (240 - MAT_H - KNOB_H)             /* 84 */
 #define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
@@ -434,34 +447,38 @@ static void input(void)
     /* EN_PRESET is a different control depending on SOURCE (see docs/spec.md):
      * SYNTH picks the bank, SMPL picks the sample. One knob, two jobs, because the
      * panel has one knob and both jobs are "which material". */
-    if (src == SRC_SYNTH) {
-        if ((e = plat_enc(EN_PRESET)) != 0) {
+    /* EN_SELECT picks the material in every source, because it is the knob marked
+     * SELECT and that is what SELECT means: which thing is loaded. In SYNTH that is the
+     * bank, in SMPL and GRAN it is the sample slot. It sits top-right on the screen
+     * because it sits top-right on the panel.
+     *
+     * The rest follows the same rule -- the screen's corners are the panel's corners:
+     *
+     *              SELECT   (top right)    material: BANK / SLOT
+     *              PRESET   (bottom left)  GRAN only: SPRAY
+     *              ALGO     (bottom right) SYNTH: MORPH   GRAN: GRAIN SIZE
+     *
+     * Both lower knobs are free in every mode except GRAN, where SPRAY and GRAIN SIZE
+     * are the two things a granular player reaches for. That is why SPRAY could leave
+     * EN_SELECT without costing anything: the knob that used to hold it now holds the
+     * material, which is the job it is named after. */
+    if ((e = plat_enc(EN_SELECT)) != 0) {
+        if (src == SRC_SYNTH) {
             bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
             bank.frames = WV_BANKS[bank_i];
+        } else if (smp_count) {
+            smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
+            reslice();
         }
-    } else if (src == SRC_GRAN) {
-        /* SPRAY moves to EN_SELECT, so MORPH keeps its own knob in every mode.
-         *
-         * The first version put SPRAY on EN_PRESET and the material slot on EN_ALGO,
-         * which read well on paper ("which material" is one job in both sample modes)
-         * and was wrong in the hand: MORPH then had no knob at all in GRAN, and a
-         * control that moves between modes is worse than a control that is off in one
-         * of them. EN_SELECT is free while a source is selected (SOURCE is B_SEL), so
-         * it takes SPRAY and nothing else changes position between modes.
-         *
-         * SPRAY on EN_SELECT is a 32-turn knob for a 0..127 range; EN_PRESET keeps the
-         * material slot (as in SMPL) and MORPH keeps EN_ALGO (as in SYNTH). */
-        if ((e = plat_enc(EN_SELECT)) != 0)
+    }
+    if (src == SRC_GRAN) {
+        /* SPRAY on EN_PRESET: bottom-left, next to GRAIN SIZE on bottom-right, because
+         * those are the two knobs a granular player turns together. It was on EN_SELECT
+         * only because the material had to live somewhere else; now the material is on
+         * SELECT and this knob is free. */
+        if ((e = plat_enc(EN_PRESET)) != 0)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
-        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count) {
-            smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
-            reslice();
-        }
-    } else {
-        if ((e = plat_enc(EN_PRESET)) != 0 && smp_count) {
-            smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
-            reslice();
-        }
+    } else if (src == SRC_SMPL) {
         if (btn_pressed(btn, B_EDIT) && smp_count) {
             /* EDIT in SMPL re-chops the current slot from its own material: the
              * keys then play the chops. There is no chop editor on this panel, so
@@ -768,21 +785,20 @@ static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * that shape -- a drum's decaying bars are the information, not a defect to correct.
  * The only scaling is one common factor to the band's height, chosen once for the whole
  * slot, so a quiet sample is drawn quiet. */
-/* The material's envelope: one thin line, mirrored, drawn dim.
+/* The material's envelope: min/max per column, filled, drawn dim.
  *
- * min/max per column is what a waveform display wants and what this used to do, and it
- * is why the envelope read as a solid block. Measured on the demo kit, 53 samples per
- * column and a drum hit oscillates fast enough to span 60 of the 78 px in a single
- * column -- so every column of every hit is filled, and a hit becomes a rectangle. The
- * second demo slot is worse in a different way: a sustained tone spans a constant
- * 66/78 px, so at min/max it is a full-height block from end to end with no shape at all.
+ * A filled min/max band is what a waveform display wants, and it was removed once on my
+ * reading of "the sampling is so dense it comes out as a solid shape" -- the reasoning
+ * was that 53 samples per column let a drum hit span 60 of the 78 px, so every column of
+ * every hit was filled. That measurement was right and the conclusion was wrong: the
+ * player has now seen both and wants the fill back. A filled band is how much energy is
+ * at this moment in the material; a peak line is only its outline, and at 1 px on a dark
+ * ground the outline of a loud passage is a thin thing that does not read as loud.
  *
- * Peak magnitude per column is the envelope, and it is what the player is reading: "how
- * loud is the material here". Measured, it gives 0..39 px of usable shape on the kit and
- * a flat 38..39 px on the tone -- and the tone genuinely IS flat, so a flat line is the
- * true answer there rather than a drawing artefact.
- *
- * Both source painters share this so SMPL and GRAN cannot drift apart in brightness.
+ * So: fill, at 2/5 of the ink. The brightness is the part that was actually wrong -- SMPL
+ * used to draw this at full ink_hi strength while GRAN drew the same material dim, so the
+ * two sources disagreed about how loud their own background was. Both now call this with
+ * dim(ink, 2, 5), so they cannot drift apart again.
  */
 static uint16_t dim6(uint16_t c, int32_t num, int32_t den);
 
@@ -792,7 +808,6 @@ static void env_line(const wv_sample *s, int32_t x0, int32_t y0, int32_t w, int3
     int32_t mid = y0 + h / 2, amp = h / 2 - 1;
     int32_t i;
     float pk = 0.0f, sc;
-    int32_t prev = -1;
 
     if (!s || !s->data || !s->len || to <= from || to > s->len) {
         /* nothing to draw: a flat line at zero, which says "no material" rather than
@@ -819,30 +834,28 @@ static void env_line(const wv_sample *s, int32_t x0, int32_t y0, int32_t w, int3
     for (i = 0; i < w; i++) {
         uint32_t a = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)i / (uint32_t)w);
         uint32_t b = from + (uint32_t)((uint64_t)(to - from) * (uint32_t)(i + 1) / (uint32_t)w);
-        float m = 0.0f;
+        float lo = 0.0f, hi = 0.0f;
         uint32_t j;
-        int32_t y;
+        int32_t yh, yl;
 
         if (b <= a)
             b = a + 1;
         for (j = a; j < b && j < s->len; j++) {
             float v = (float)s->data[j] * (1.0f / 32768.0f);
-            if (v < 0.0f)
-                v = -v;
-            if (v > m)
-                m = v;
+            if (v < lo)
+                lo = v;
+            if (v > hi)
+                hi = v;
         }
-        y = mid - (int32_t)(m * sc);
-        if (y < y0)
-            y = y0;
-        /* a vertical join keeps the line continuous where the peak jumps by more than a
-         * pixel between columns: a broken line reads as gaps in the material */
-        if (prev >= 0 && y != prev)
-            cv_line(x0 + i, prev < y ? prev : y, x0 + i, prev < y ? y : prev, colour);
-        else
-            cv_rect(x0 + i, y, 1, 1, colour);
-        cv_rect(x0 + i, mid + (mid - y), 1, 1, colour);   /* mirrored: a waveform, not a level */
-        prev = y;
+        yh = mid - (int32_t)(hi * sc);
+        yl = mid - (int32_t)(lo * sc);
+        if (yh < y0)
+            yh = y0;
+        if (yl > y0 + h - 1)
+            yl = y0 + h - 1;
+        if (yl < yh)
+            yl = yh;
+        cv_rect(x0 + i, yh, 1, yl - yh + 1, colour);
     }
 }
 
@@ -1399,80 +1412,97 @@ void app_frame(void)
         char b[12];
         int32_t bl;
 
-        if (src == SRC_SYNTH) {
-            /* the table: 176 px wide and 100 tall, leaving the right column for the two
-             * values that describe it -- a shape with no label is a mystery, and these
-             * are the two knobs that have no cell any more. */
-            src_shape(&sk, 4, MAT_PAD, 176, MAT_WAVE);
+        /* The right-hand side is the panel's 2x2, in the panel's own arrangement:
+         *
+         *                      SELECT          top row, right
+         *          PRESET      ALGO            bottom row
+         *
+         * SELECT sits alone on the top row because that is where it is on the panel --
+         * above the other two. PRESET and ALGO share the bottom row, left and right,
+         * because that is how the two knobs below the screen sit. A label printed where
+         * its knob is does not need to be decoded; the previous version stacked all of
+         * them in one column beside the picture, which made a legend instead of a map.
+         *
+         * A source draws only what it HAS, and the empty space is the message: SMPL has
+         * one knob, so it draws one label and the bottom row stays blank, which says
+         * there is nothing else to turn.
+         *
+         * The picture keeps the left side at MAT_W. It is narrower than the 176 px it
+         * used to have, and that is the real cost of putting the labels where the knobs
+         * are rather than listing them beside the band. */
+        if (!smp_count && src != SRC_SYNTH) {
+            cv_text(4, 46, &FONT_XS, "NO SAMPLES", sk.ink);
+        } else if (src == SRC_SYNTH) {
+            src_shape(&sk, 4, MAT_PAD, MAT_W, MAT_WAVE);
+        } else if (src == SRC_GRAN) {
+            /* the voice the cloud is most likely to be heard from: the newest one. With
+             * several keys down the picture shows one voice's cloud, and the newest is
+             * the one the player just caused. */
+            const wv_grains *gr = 0;
+            int32_t vi;
+            uint32_t newest = 0;
+            for (vi = 0; vi < (int32_t)WV_VOICES; vi++) {
+                if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
+                    newest = dsp.v[vi].age;
+                    gr = &dsp.v[vi].gr;
+                }
+            }
+            src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, MAT_W, MAT_WAVE, gr);
+            cv_text(6, MAT_PAD + 1, &FONT_XS,
+                    smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+        } else {
+            env_line(&smp[smp_i], 4, MAT_PAD, MAT_W, MAT_WAVE, 0, smp[smp_i].len,
+                     dim(sk.ink, 2, 5));
+            cv_text(6, MAT_PAD + 1, &FONT_XS,
+                    smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
+        }
 
+        /* ── SELECT, top right ──
+         * The same knob in every source: which thing is loaded. */
+        cv_text(MAT_LAB_R - 6, MAT_ROW_TOP, &FONT_XS, "SEL", sk.ink);
+        if (src == SRC_SYNTH) {
             bl = 0;
-            b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
+            b[bl++] = 'B'; b[bl++] = 'K'; b[bl++] = ' ';
             b[bl++] = (char)('0' + (bank_i + 1) % 10);
             b[bl++] = '/';
             b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
             b[bl] = 0;
-            cv_text(186, 6, &FONT_XS, b, sk.ink);
-            cv_text(186, 24, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
-
+            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 15, &FONT_XS, b, sk.ink_hi);
+        } else if (smp_count) {
             bl = 0;
-            b[bl++] = 'M'; b[bl++] = 'O'; b[bl++] = 'R'; b[bl++] = 'P'; b[bl++] = 'H';
+            b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'T'; b[bl++] = ' ';
+            b[bl++] = (char)('0' + (smp_i + 1) % 10);
+            b[bl++] = '/';
+            b[bl++] = (char)('0' + (smp_count % 10));
             b[bl] = 0;
-            cv_text(186, 52, &FONT_XS, b, sk.ink);
-            cv_text(186, 70, &FONT_XS, pct(k_morph), sk.ink_hi);
-        } else {
-            /* The sample sources get the same 176 px the table gets, because it is the
-             * same question -- what is in here -- and because a picture squeezed to make
-             * room for a label is worse than a label printed over the picture. The name
-             * and slot go over the envelope's quiet upper-left, where a sample's own
-             * dynamics leave room; the parameter values keep the right column.
-             *
-             * GRAN adds the live grain positions on top of the envelope. See
-             * src_grain_map: the envelope is the map, the ticks are the weather. */
-            if (!smp_count) {
-                cv_text(4, 46, &FONT_XS, "NO SAMPLES", sk.ink);
-            } else if (src == SRC_GRAN) {
-                /* the voice the cloud is most likely to be heard from: the newest one.
-                 * With several keys down the picture shows one voice's cloud, and the
-                 * newest is the one the player just caused. */
-                const wv_grains *gr = 0;
-                int32_t vi;
-                uint32_t newest = 0;
-                for (vi = 0; vi < (int32_t)WV_VOICES; vi++) {
-                    if (dsp.v[vi].active && dsp.v[vi].age >= newest) {
-                        newest = dsp.v[vi].age;
-                        gr = &dsp.v[vi].gr;
-                    }
-                }
-                src_grain_map(&sk, &smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, gr);
-                cv_text(6, MAT_PAD + 1, &FONT_XS,
-                        smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
-            } else {
-                env_line(&smp[smp_i], 4, MAT_PAD, 176, MAT_WAVE, 0, smp[smp_i].len,
-                         dim(sk.ink, 2, 5));
-                cv_text(6, MAT_PAD + 1, &FONT_XS,
-                        smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
-            }
+            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 15, &FONT_XS, b, sk.ink_hi);
+        }
+        if (src == SRC_SYNTH)
+            cv_text(MAT_LAB_R - 6, MAT_ROW_TOP + 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink);
 
-            if (smp_count) {
-                bl = 0;
-                b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'O'; b[bl++] = 'T'; b[bl++] = ' ';
-                b[bl++] = (char)('0' + (smp_i + 1) % 10);
-                b[bl++] = '/';
-                b[bl++] = (char)('0' + (smp_count % 10));
-                b[bl] = 0;
-                cv_text(6, MAT_PAD + 12, &FONT_XS, b, sk.ink);
-            }
+        /* ── the bottom row: PRESET left, ALGO right, where those two knobs are ── */
+        if (src == SRC_SYNTH) {
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT, &FONT_XS, "ALGO", sk.ink);
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 15, &FONT_XS, "MORPH", sk.ink);
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 30, &FONT_XS, pct(k_morph), sk.ink_hi);
+        } else if (src == SRC_GRAN) {
+            cv_text(MAT_LAB_L, MAT_ROW_BOT, &FONT_XS, "PRESET", sk.ink);
+            cv_text(MAT_LAB_L, MAT_ROW_BOT + 15, &FONT_XS, "SPRAY", sk.ink);
+            cv_text(MAT_LAB_L, MAT_ROW_BOT + 30, &FONT_XS, pct(k_spray), sk.ink_hi);
 
-            if (src == SRC_GRAN) {
-                cv_text(186, 6, &FONT_XS, "SPRAY", sk.ink);
-                cv_text(186, 24, &FONT_XS, pct(k_spray), sk.ink_hi);
-                cv_text(186, 52, &FONT_XS, "GRAINSZ", sk.ink);
-                cv_text(186, 70, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
-            }
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT, &FONT_XS, "ALGO", sk.ink);
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 15, &FONT_XS, "SIZE", sk.ink);
+            cv_text(MAT_LAB_R - 6, MAT_ROW_BOT + 30, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
         }
         if (env_page)
             cv_text(4, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
     }
+    cv_blit(0, SCOPE_H);
+
+    cv_blit(0, SCOPE_H);
+
+    cv_blit(0, SCOPE_H);
+
     cv_blit(0, SCOPE_H);
 
     cv_begin(240, KNOB_H, sk.bg);

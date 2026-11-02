@@ -36,10 +36,13 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 HOST = os.path.join(ROOT, "app", "build", "host", "wave_host")
 
 # the material band on the 240x240 screen: y 84..175, the picture inside it starts at
-# x=4 and is 176 wide. The slot name and SLOT n/m text sit at y 90..103, so bars are
+# x=4 and is MAT_W (112) wide. The sample name sits at y 90..103, so bars are
 # detected below y=104 -- otherwise a text glyph is counted as a grain.
 BAND_Y0, BAND_Y1 = 104, 176
-BAND_X0, BAND_X1 = 4, 180
+BAND_X0, BAND_X1 = 4, 116          # matches MAT_W in app.c
+# The bar's width is the grain length in material, so it scales with the band: 45 ms of
+# a 0.84 s slot is 5.36 % of it, and 5.36 % of 112 px is 8. At the old 176 px it was 12.
+BAR_PX = 8
 
 fails = 0
 checks = 0
@@ -102,7 +105,7 @@ def main():
     out = tempfile.mkdtemp(prefix="fm1grainmap")
 
     # The knob step is x4: `turn N` moves a knob by 4N in host simulation, and SPRAY is
-    # 0..127, so `turn SELECT 16` lands on 64 and `turn SELECT 32` would saturate. Every
+    # 0..127, so `turn PRESET 16` lands on 64 and `turn PRESET 32` would saturate. Every
     # expected value below is asserted through app_expect first, so a step that changes
     # would fail here rather than silently make the picture test test nothing.
     base = """wait 600
@@ -147,7 +150,7 @@ wait 200
         + lane_frames + frames +
         "key 5 up\n"
         "wait 200\n"
-        "turn SELECT 16\n"
+        "turn PRESET 16\n"
         "wait 200\n"
         "expect spray 64\n"
         "key 5 down\n"
@@ -157,7 +160,7 @@ wait 200
         "shot sp64.png\n"
         "key 5 up\n"
         "wait 200\n"
-        "turn SELECT 16\n"
+        "turn PRESET 16\n"
         "wait 200\n"
         "expect spray 127\n"
         "key 5 down\n"
@@ -198,11 +201,13 @@ wait 200
            f"{len(b)} bars found")
 
     # ── GRAINSIZE is the bar width ─────────────────────────────────────────────
-    # 45 ms at 1x on the 0.84 s kit = 12 px, asserted through app_expect grainpx too, so
+    # 45 ms at 1x on the 0.84 s kit = MAT_W * 0.045/0.84 px, and the band is now MAT_W
+    # (112) wide rather than 176, so the bar is 8 px instead of 12. Asserted through
+    # app_expect grainpx as well, so the two cannot drift:
     # this checks the DRAWING agrees with the number rather than that a constant matches.
     for nm, b in (("spray 0", b0), ("spray 64", b64), ("spray 127", b127)):
-        ck(all(x1 - x0 + 1 == 12 for x0, x1, _ in b),
-           f"{nm}: each bar is 12 px, the grain length",
+        ck(all(x1 - x0 + 1 == BAR_PX for x0, x1, _ in b),
+           f"{nm}: each bar is {BAR_PX} px, the grain length",
            f"widths {[x1 - x0 + 1 for x0, x1, _ in b]}")
 
     # ── SPRAY is the spread ────────────────────────────────────────────────────

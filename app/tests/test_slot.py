@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
-"""EN_PRESET must change the SOUND in SMPL, not only the label.
+"""EN_SELECT must change the SOUND in SMPL, not only the label.
 
 The regression this exists for: the screen said SLOT 2/2 and the sound was SLOT 1/2.
-EN_PRESET moved `smp_i` while the chops stayed on the boot slot (slices_from was set once
+EN_SELECT moved `smp_i` while the chops stayed on the boot slot (slices_from was set once
 at boot) and the no-chop fallback was hardcoded `smp[0]`. GRAN did not have the bug because
 it reads `smp[smp_i]` directly -- one source honouring the knob and one not is what made it
 visible at all.
@@ -92,7 +92,7 @@ release SEL
 wait 300
 """
     for _ in range(slot_turns):
-        script += "turn PRESET 1\nwait 400\n"
+        script += "turn SELECT 1\nwait 400\n"
     script += f"""wav {name}.wav
 key {KEY} down
 wait 900
@@ -118,7 +118,7 @@ def main():
         sys.exit(f"{HOST} is missing: build it with `python3 platform/tools/build.py app --host`")
 
     out = tempfile.mkdtemp(prefix="fm1slot")
-    # one turn of EN_PRESET from the boot slot, and back again
+    # one turn of EN_SELECT from the boot slot, and back again
     slot0 = record(0, "slot0", out)
     slot1 = record(1, "slot1", out)
     if fails:

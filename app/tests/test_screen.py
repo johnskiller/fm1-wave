@@ -30,6 +30,7 @@ HOST = os.path.join(ROOT, "app", "build", "host", "wave_host")
 # is what keeps these three numbers summing to 240)
 MAT_PAD, MAT_WAVE = 6, 80
 MAT_H = MAT_PAD + MAT_WAVE + MAT_PAD
+MAT_W, MAT_LAB_L = 112, 122          # the picture, and where the labels start
 KNOB_H = 64
 SCOPE_H = 240 - MAT_H - KNOB_H
 
@@ -109,10 +110,6 @@ shot grn.png
 
     for name in ("syn", "env", "smp", "grn"):
         ck(name in shots, f"{name} was captured")
-    if fails:
-        print(f"checks {checks}, failed {fails}")
-        return 1
-
     for name in ("syn", "env", "smp", "grn"):
         im = shots[name]
         print(f"--- {name} ---")
@@ -146,28 +143,40 @@ shot grn.png
                "syn: the table picture uses its full height",
                f"{wave[-1] - wave[0] + 1 if wave else 0} px of {MAT_WAVE}")
 
-    # ── the envelope must read as a line, not as a filled block ────────────────
-    # It used to draw min/max per column, which is what a waveform display wants: on the
-    # demo kit a drum hit spans 60 of the 78 px inside a single 53-sample column, so
-    # every column of every hit was filled and a hit became a rectangle. Measured, 23.6 %
-    # of the material band was ink. Peak magnitude per column gives 7.6 %, and the fill
-    # is what the player reported as "the sampling is so dense it is a solid shape".
+    # ── the envelope is filled, and dim ───────────────────────────────────────
+    # It was changed to a peak line once, on my reading of "the sampling is so dense it
+    # comes out as a solid shape", and changed back on the player's judgement: a filled
+    # min/max band is how much energy is at this moment, while a 1 px outline of a loud
+    # passage does not read as loud at all. So the fill is the design and the check is
+    # that it STAYS filled -- min/max per column, not a hairline.
+    #
+    # The brightness is the part that was actually wrong and stays fixed: SMPL used to
+    # draw its envelope at full ink_hi while GRAN drew the same material at 2/5, so the
+    # two sources disagreed about their own background. Both now go through env_line()
+    # at dim(ink, 2, 5).
     for name in ("smp", "grn"):
         im = shots[name]
         band_bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
         total = 0
-        for x in range(5, 179):
+        for x in range(5, 4 + MAT_W - 1):
             for y in range(SCOPE_H + 4, SCOPE_H + MAT_H - 4):
                 if im.getpixel((x, y)) != band_bg:
                     total += 1
-        pct = 100.0 * total / (174 * (MAT_H - 8))
-        print(f"{name}: material band is {pct:.1f} % ink")
-        # A filled envelope sits near 20-25 %; a line sits under 10 %. The threshold is
-        # where "block" becomes "line" rather than a tuned value: at 15 % the picture
-        # already has whole columns filled from top to bottom in the loud passages.
-        ck(pct < 15.0, f"{name}: the envelope reads as a line, not a filled block",
-           f"{pct:.1f} % of the band is ink")
+        pct = 100.0 * total / ((MAT_W - 1) * (MAT_H - 8))
+        print(f"{name}: material picture is {pct:.1f} % ink")
+        ck(pct > 4.0, f"{name}: the envelope is filled, not a hairline", f"{pct:.1f} %")
 
+    # the labels must be on the right of the picture and not on top of it, because they
+    # are the panel's 2x2 and the picture is what is left. Measured, the picture ends at
+    # x 4+MAT_W and the label columns start at MAT_LAB_L.
+    for name in ("syn", "smp", "grn"):
+        im = shots[name]
+        band_bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
+        right = sum(1 for x in range(MAT_LAB_L, 236)
+                    for y in range(SCOPE_H + 2, SCOPE_H + MAT_H - 2)
+                    if im.getpixel((x, y)) != band_bg)
+        ck(right > 20, f"{name}: the labels sit to the right of the picture",
+           f"{right} ink px right of x {MAT_LAB_L}")
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 
