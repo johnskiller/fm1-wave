@@ -9,6 +9,8 @@
 # The three rules the table has to keep:
 #   1. K1-K4 are CUT/RES/SHAPE/AMOUNT in every source, and A/D/S/R only on the ENV
 #      page, which is a page (a lit button, a fixed set of knobs) and not a mode.
+#      The LFO page takes K3-K4 (RATE/DEPTH) and leaves CUT and RES where they are,
+#      because CUT is what the LFO sweeps -- so K1 is CUT on every page.
 #   2. EN_SELECT picks the material in every source (bank or slot), because SELECT
 #      is the knob named after that job. EN_ALGO is MORPH in SYNTH and GRAIN SIZE in
 #      GRAN -- MORPH has nothing to read in a grain voice. EN_PRESET is SPRAY in
@@ -82,6 +84,7 @@ expect morph 120
 
 tap ENV
 expect env 0
+
 
 # ── SMPL: same four knobs, MORPH keeps its encoder ───────────────────────────
 tap SEL
@@ -170,3 +173,52 @@ expect env 0
 # leaving the page restores the tone knob
 turn K1 -1
 expect cut 71
+
+# ── the LFO page takes K3-K4, and leaves CUT/RES on K1-K2 ────────────────────
+# The page is the opposite of the ENV page on purpose: an LFO on CUT is tuned by
+# watching the filter, so CUT does not move. SHAPE and AMOUNT give way.
+#
+# This block runs at the end of the file, in GRAN, after the earlier sections have
+# already moved CUT -- which is the point: K1 is CUT in every source and on every
+# page, so the same two detents have to land the same way here as they do in SYNTH.
+tap LFO
+expect lfo 1
+expect env 0
+
+turn K3 8
+turn K4 10
+expect lfo_rate 32
+expect lfo_depth 40
+
+# RATE and DEPTH come back to 0 from here, so the page's own pair is reversible
+turn K4 -10
+expect lfo_depth 0
+turn K3 -8
+expect lfo_rate 0
+
+# CUT is still on K1 with the page up: two detents down and two back must land
+# where it started (71, which the sections above left it at -- the point is that the
+# page did not take K1, not what the value is)
+expect cut 71
+turn K1 -1
+expect cut 67
+turn K1 1
+expect cut 71
+expect lfo 1
+
+# the two pages are mutually exclusive
+tap ENV
+expect lfo 0
+expect env 1
+tap LFO
+expect env 0
+expect lfo 1
+
+# a page does not take the encoders it does not own: ALGO is GRAIN SIZE in GRAN
+expect grain 104
+turn ALGO 1
+expect grain 108
+turn ALGO -1
+expect grain 104
+tap LFO
+expect lfo 0

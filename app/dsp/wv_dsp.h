@@ -93,6 +93,15 @@ typedef struct {
     /* the block's smoothed values; turning a knob must not click */
     float    cut_z;
     float    amount_z;
+    /* The LFO. One for every voice, not one per voice: an LFO is not a voice
+     * property, and eight copies of the same sine is eight times the cost for one
+     * sine. Its phase advances once per block, in wv_lfo_step, and what the voices
+     * see is CUT modulated by it (`cut_eff`), so every voice is swept together --
+     * which is also what a player expects from a filter LFO. */
+    uint8_t  lfo_rate;     /* 0..127; 0 turns the LFO off (and is the default) */
+    uint8_t  lfo_depth;    /* 0..127: 0..4 octaves either side of CUT */
+    uint8_t  lpad;
+    float    lfo_ph;       /* 0..1 */
 } wv_state;
 
 /* ─── the VCA envelope ────────────────────────────────────────────────────── */
@@ -133,6 +142,13 @@ typedef struct {
 /* Read the bank at phase `ph` (0..1) and morph position `mf` (0..WV_FRAMES-1),
  * both linearly interpolated. Returns -1..1. */
 float wv_table_read(const wv_bank *b, float ph, float mf);
+
+/* The same read, with the frame pair resolved once (wv_frames_at) and the samples
+ * taken from it (wv_table_read2). A block renderer should hoist: MORPH does not change
+ * inside a block, and resolving the pair per sample is 12-16% of the read path. `fb`
+ * null means the position sits on a frame and only one table is read. */
+void  wv_frames_at(const wv_bank *b, float mf, const int16_t **fa, const int16_t **fb, float *t);
+float wv_table_read2(const int16_t *fa, const int16_t *fb, float ph, float t);
 
 /* ─── waveshaper ──────────────────────────────────────────────────────────── */
 
@@ -187,6 +203,10 @@ void wv_note_off(wv_state *s, uint8_t note);
 
 /* How many voices are sounding (for the UI and for the tests). */
 uint32_t wv_active(const wv_state *s);
+
+/* The LFO's rate in Hz for a panel value 0..127 (0 = off). Exposed so the panel can
+ * print the rate instead of a percentage: "0.4 Hz" is a rate, "37" is not. */
+float wv_lfo_hz(uint32_t v127);
 
 /* ─── the render ──────────────────────────────────────────────────────────── */
 

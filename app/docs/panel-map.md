@@ -111,6 +111,41 @@ Defaults are `A=0, D=64, S=127, R=32`: a ~1 ms attack, full sustain (so decay ha
 nowhere to go) and a ~30 ms release. That reproduces the hardcoded VCA this replaced,
 so **a patch made before the envelope existed sounds the same after it**.
 
+### `B_LFO` — the LFO page
+
+| | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
+|---|---|---|---|---|---|---|---|
+| page up | CUT | RES | **RATE** 0.02–20 Hz | **DEPTH** 0–4 oct | unchanged | unchanged | unchanged |
+
+Any source. `B_LFO` toggles, and the two pages are mutually exclusive: opening one
+closes the other, so the lit lamp is never ambiguous and which parameter a knob edits
+never depends on the order the buttons were pressed.
+
+**The page takes K3–K4 and leaves CUT and RES alone**, which is the opposite of what
+the ENV page does. The reason is that CUT is what the LFO sweeps: with the page up you
+want to watch the filter you are modulating, and CUT sitting on K1 on every page is the
+one thing the panel must not move. SHAPE and AMOUNT are what give way — they are the
+pair a filter LFO does not change, and they are one button away.
+
+`RATE` prints **Hz**, because a rate in percent is not a rate. `DEPTH` prints
+**octaves**, because CUT is exponential over nine octaves and a depth in Hz would mean
+different things at different CUT settings.
+
+The LFO is **one oscillator for the whole instrument**, not one per voice: an LFO is
+not a voice property, and eight copies of the same sine is eight times the cost for one
+sine. Every voice is swept together, which is also what a player expects from a filter
+LFO. Its phase advances **once per block, in `smooth_step`** — `voice_block` runs twice
+a block (once per core), so advancing it there would run the LFO at double speed
+whenever the second core was up.
+
+The waveform is a sine and the target is CUT; there is no destination matrix and no
+tempo sync. This panel has seven encoders and four permanent parameters, and a matrix
+that cannot show DEST and AMOUNT for each route on a 240×240 screen would spend the
+parameters it has.
+
+Defaults are `RATE 0, DEPTH 0` — **off** — so a patch made before the LFO existed
+sounds the same after it.
+
 ---
 
 ## Buttons
@@ -121,7 +156,7 @@ so **a patch made before the envelope existed sounds the same after it**.
 | `B_ENV` | ENV | **ENV page** toggle (A/D/S/R on K1–K4) | app | app.c:47 |
 | `B_EDIT` | EDIT | **re-chop** the current slot; dead in SYNTH and GRAN | app | app.c:47 |
 | `B_FX` | FX | nothing | **free** | — |
-| `B_LFO` | LFO | nothing | **free** | — |
+| `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
 | `B_SAVE` | SAVE | nothing | **free** | — |
 | `B_ARP` | ARP | nothing (not read anywhere in the platform) | **free** | — |
@@ -579,10 +614,19 @@ follows: `(148,149,156)` / `(238,137,24)` / `(57,182,238)`.
 
 `app.c` used to call `plat_lights(0, 0, 0, 0, 0)` every 33 ms — a template
 placeholder that turned everything off, including PLAY's green LED that `plat_leds`
-would have kept on. **Correction: as of this version it still does.** No button
-lights up when pressed, and that has to change before any assignment relies on an
-LED saying "this control is active" — including `B_ENV`, whose whole justification
-as a page is that its button is lit while the page is up.
+would have kept on. **It calls `plat_leds(lit, in_keys)` now**, at 30 Hz, with `lit`
+built from state:
+
+| Lamp | Lit when |
+|---|---|
+| `B_ENV` | the ENV page is up |
+| `B_LFO` | the LFO page is up |
+| `B_SEL` | SOURCE is not SYNTH (the power-on default) |
+| `B_EDIT` | SOURCE is SMPL, where EDIT is the chop button |
+
+Keys light while held, which is `plat_leds`'s own behaviour and the reason to call it
+instead of `plat_lights`. `B_SEL` has three states and a two-state lamp, so the lamp
+only says "moved"; the screen says which.
 
 ---
 
@@ -594,7 +638,7 @@ as a page is that its button is lit while the page is up.
 | Material page | not implemented | no button of its own; spec's `BTN_BANK` names a control this panel does not have |
 | Octave shift | not implemented | `B_OCT-` / `B_OCT+`, power-on conflict only |
 | Glide / portamento | not in the DSP | `B_GLO` is free |
-| LFO | not in the DSP | `B_LFO` is free |
+| ~~LFO~~ | **done** | `B_LFO` is the LFO page |
 | Filter type switch | not in the DSP (SVF low-pass only) | — |
 | Panic on MIDI | — | — |
 
@@ -616,7 +660,7 @@ there are more free buttons than pending functions.
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
 | `B_SAVE` | save the current knob set as the boot state | `plat_store_save` exists; the settings object is already there |
 | `B_FX` | a second waveshaper stage, or a filter-type switch | no DSP behind it yet |
-| `B_LFO` | LFO rate/depth page | no LFO in the DSP |
+| ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | arpeggiator | needs a clock and a note queue; not small |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 

@@ -338,10 +338,110 @@ static void test_render(void)
     }
 }
 
+
+/* ─── the LFO ─────────────────────────────────────────────────────────────── */
+
+/* Off by default, and OFF MEANS BIT-IDENTICAL: a patch made before the LFO existed
+ * must sound the same after it. That is asserted against a state with lfo_rate 0
+ * against the same state with the field never touched, which is what wv_init gives. */
+static void test_lfo_off_is_no_change(void)
+{
+    static wv_state a, b;
+    static float oa[256], ob[256];
+    uint32_t k, i;
+    float worst = 0.0f;
+
+    printf("lfo:\n");
+    wv_bank bk = { sines };
+    wv_init(&a);
+    wv_init(&b);
+    b.lfo_rate = 0;
+    b.lfo_depth = 127;              /* depth without rate: still off */
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 40; k++) {
+        for (i = 0; i < 256; i++) { oa[i] = 0.0f; ob[i] = 0.0f; }
+        wv_render(&a, &bk, oa, 256, 4096.0f);
+        wv_render(&b, &bk, ob, 256, 4096.0f);
+        for (i = 0; i < 256; i++)
+            if (fabsf(oa[i] - ob[i]) > worst)
+                worst = fabsf(oa[i] - ob[i]);
+    }
+    ck(worst == 0.0f, "rate 0 is bit-identical, whatever the depth says");
+}
+
+/* The rate mapping: 0 is off, and the range is the 0.02..20 Hz the panel promises. */
+static void test_lfo_rate_map(void)
+{
+    ck(wv_lfo_hz(0) == 0.0f, "LFO 0 is off");
+    ck(wv_lfo_hz(1) > 0.020f && wv_lfo_hz(1) < 0.023f, "LFO 1 is 0.02 Hz");
+    ck(wv_lfo_hz(127) > 19.0f && wv_lfo_hz(127) < 21.0f, "LFO 127 is 20 Hz");
+    ck(wv_lfo_hz(64) > wv_lfo_hz(32), "the rate rises with the knob");
+}
+
+/* The LFO sweeps CUT: with the page's rate and depth set, one held note's level
+ * moves, because a filter sweeping across the fundamental changes how much of it gets
+ * through. Level rather than spectrum keeps this file's "no FFT" property, and it is
+ * what the ear hears first anyway: a filter LFO on a held note is a tremolo until the
+ * sweep opens far enough to be heard as timbre.
+ *
+ * The depth has to be asserted as a RANGE over the note, not as a difference from the
+ * unmodulated level: the LFO goes both ways, so its average is the unmodulated value. */
+static double rms_of(const float *o, uint32_t n)
+{
+    double a = 0.0;
+    uint32_t i;
+    for (i = 0; i < n; i++)
+        a += (double)o[i] * o[i];
+    return sqrt(a / n);
+}
+
+static void test_lfo_sweeps_cut(void)
+{
+    static wv_state a, b;
+    static float o[256];
+    wv_bank bk = { sines };
+    double flat = 0.0, lo = 1e9, hi = 0.0;
+    uint32_t k, i;
+
+    wv_init(&a);
+    a.cut = 40;                     /* ~200 Hz: BELOW the 262 Hz fundamental, so the
+                                     * sweep crosses it and the level really moves */
+    a.res = 90;                     /* a resonant peak makes the crossing audible */
+    wv_init(&b);
+    b.cut = 40;
+    b.res = 90;
+    b.lfo_rate = 95;                 /* ~3.4 Hz: three cycles in 400 blocks */
+    b.lfo_depth = 90;
+
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 400; k++) {
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&a, &bk, o, 256, 4096.0f);
+        if (k == 30) flat = rms_of(o, 256);
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&b, &bk, o, 256, 4096.0f);
+        if (k > 15) {
+            double r = rms_of(o, 256);
+            if (r < lo) lo = r;
+            if (r > hi) hi = r;
+        }
+    }
+    printf("    [lfo] unmodulated rms %.5f, swept %.5f .. %.5f (%.1f dB)\n",
+           flat, lo, hi, 20.0 * log10(hi / (lo > 0.0 ? lo : 1e-9)));
+    ck(flat > 0.0, "the unmodulated note has a level to compare against");
+    ck(hi / (lo > 0.0 ? lo : 1e-9) > 1.5,
+       "the LFO moves the filter by more than 3.5 dB over one note");
+}
+
 int main(void)
 {
     make_sines();
     printf("fm1-wave DSP tests\n");
+    test_lfo_off_is_no_change();
+    test_lfo_rate_map();
+    test_lfo_sweeps_cut();
     test_table();
     test_banks();
     test_shaper();

@@ -334,6 +334,44 @@ shot grn.png
     ck(im.getpixel((0, 1)) == SCOPE_GRID,
        "the debug box leaves the 0 dBFS line at row 1 intact")
 
+
+    # ── the LFO page ────────────────────────────────────────────────────────
+    # The page takes K3-K4 and leaves CUT and RES on K1-K2, because CUT is what the
+    # LFO sweeps and the panel must not move it. Asserted through the app's own state
+    # (app_expect, driven by the host's `expect <name> <value>`), not by reading the
+    # bitmap: the label text is a font table away, but "K3 turned RATE and not SHAPE"
+    # is a fact about the app, and that is the part that can drift.
+    def expect(script, name, val):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(script + "\nexpect %s %s\n" % (name, val))
+            path = f.name
+        try:
+            r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                               timeout=120, cwd=out)
+        finally:
+            os.unlink(path)
+        return any(l.strip().startswith("ok ") for l in r.stdout.splitlines())
+
+    ck(expect("press LFO\nturn K3 8\n", "lfo_rate", 32),
+       "LFO page: K3 sets RATE")
+    ck(expect("press LFO\nturn K4 10\n", "lfo_depth", 40),
+       "LFO page: K4 sets DEPTH")
+    ck(expect("press LFO\nturn K3 8\n", "shape", 0),
+       "LFO page: K3 does NOT set SHAPE (the page took it)")
+    ck(expect("press LFO\nturn K4 10\n", "amount", 0),
+       "LFO page: K4 does NOT set AMOUNT (the page took it)")
+    ck(expect("press LFO\nturn K1 -6\n", "cut", 103),
+       "LFO page: K1 still sets CUT")          # -6 steps of 4 from 127
+    ck(expect("turn K1 -6\n", "cut", 103),
+       "the LFO page is not needed for CUT")
+    ck(expect("press LFO\n", "lfo", 1), "B_LFO opens the page")
+    ck(expect("tap LFO\ntap LFO\n", "lfo", 0), "B_LFO toggles it shut")
+
+    # Two pages cannot be up at once. Without this the lit lamp would be ambiguous and
+    # which parameters the knobs edit would depend on the order the buttons were hit.
+    ck(expect("tap ENV\ntap LFO\n", "env", 0), "LFO closes the ENV page")
+    ck(expect("tap LFO\ntap ENV\n", "lfo", 0), "ENV closes the LFO page")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

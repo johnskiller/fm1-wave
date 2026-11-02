@@ -23,6 +23,40 @@ static float cut_hz(uint32_t cut)
 /* the SVF's g for a corner at fs = 44100: tan(pi*f/fs), approximated by the
  * small-angle form plus one correction (the corner never exceeds ~16 kHz, where
  * tan() is still well behaved) */
+/* The LFO's rate: 0.02..20 Hz, exponential, the same curve shape as CUT and GRAIN
+ * SIZE because a linear rate control spends most of its travel in the fast end where
+ * the difference is least musical. 0 is off, which is why the range starts at 1.
+ *
+ * 0.02 Hz is a 50 s cycle: slower than any note lasts, so at the bottom of the travel
+ * the LFO is a slow drift rather than a vibrato. That is deliberate -- a filter that
+ * walks over half a minute is a different sound from one that wobbles, and the knob
+ * reaches both.
+ */
+float wv_lfo_hz(uint32_t v127)
+{
+    if (v127 == 0)
+        return 0.0f;
+    /* 0.02 * (20/0.02)^(v/127) = 0.02 * 2^(9.966 * v/127) */
+    return 0.02f * fm_exp2f(9.9658f * u7_to_f(v127));
+}
+
+/* Depth: 0..4 octaves either side. Octaves, not Hz, because CUT is exponential over
+ * nine octaves and a sweep that is linear in Hz spends most of its travel in the top
+ * two octaves where nothing is happening. */
+static float lfo_oct(uint32_t v127)
+{
+    return 4.0f * u7_to_f(v127);
+}
+
+/* The LFO's value for this block: a sine in -1..1, and 1.0 (no modulation) when it is
+ * off. CUT is scaled by 2^(value * depth), so the depth is symmetric in octaves. */
+static float lfo_cut_scale(const wv_state *s)
+{
+    if (s->lfo_rate == 0 || s->lfo_depth == 0)
+        return 1.0f;
+    return fm_exp2f(fm_sin_pi(s->lfo_ph) * lfo_oct(s->lfo_depth));
+}
+
 static float svf_g(float hz)
 {
     float w = FM_PI * hz * (1.0f / 44100.0f);
@@ -31,38 +65,62 @@ static float svf_g(float hz)
 
 /* ─── the table ───────────────────────────────────────────────────────────── */
 
-float wv_table_read(const wv_bank *b, float ph, float mf)
+/* The frame pair for a morph position: the two frames the position sits between, and
+ * how far between them.
+ *
+ * wv_table_read recomputes this from `mf` for every sample, which is a clamp, an int
+ * conversion, a float subtract and a compare per sample -- for a value that does not
+ * change inside a block. Hoisting it out is what a caller that renders a whole block
+ * wants; the per-sample function stays because the tests and the odd one-off read
+ * want it. */
+void wv_frames_at(const wv_bank *b, float mf, const int16_t **fa, const int16_t **fb, float *t)
 {
-    float x, ff;
-    int32_t i0, i1, f0, f1;
-    float a, c, t;
+    int32_t f0, f1;
 
-    /* the two frames around the morph position */
     if (mf <= 0.0f)
         mf = 0.0f;
     else if (mf >= (float)(WV_FRAMES - 1u))
         mf = (float)(WV_FRAMES - 1u);
     f0 = (int32_t)mf;
-    t = mf - (float)f0;
+    *t = mf - (float)f0;
     f1 = f0 + 1 < (int32_t)WV_FRAMES ? f0 + 1 : f0;
+    *fa = b->frames + f0 * (int32_t)WV_POINTS;
+    *fb = (f1 != f0) ? b->frames + f1 * (int32_t)WV_POINTS : 0;
+}
 
-    /* the two points around the phase */
-    ph = ph - fm_floorf(ph);                       /* 0..1 */
+/* One sample out of the pair wv_frames_at picked, with the frames already resolved.
+ * When `fb` is null the morph position sits exactly on a frame and only one table is
+ * read -- which is the common case, since MORPH is a knob and a knob parked on a frame
+ * is not a special mode. */
+float wv_table_read2(const int16_t *fa, const int16_t *fb, float ph, float t)
+{
+    float x, ff, a;
+    int32_t i0, i1;
+
+    ph = ph - fm_floorf(ph);
     x = ph * (float)WV_POINTS;
     i0 = (int32_t)x;
     if (i0 >= (int32_t)WV_POINTS)
-        i0 = (int32_t)WV_POINTS - 1;               /* (ph == 1.0 after rounding) */
-    i1 = (i0 + 1) & ((int32_t)WV_POINTS - 1);      /* the table wraps: cheaper than an add and a compare */
+        i0 = (int32_t)WV_POINTS - 1;
+    i1 = (i0 + 1) & ((int32_t)WV_POINTS - 1);
     ff = x - (float)i0;
 
-    a = (float)b->frames[f0 * (int32_t)WV_POINTS + i0];
-    a += ((float)b->frames[f0 * (int32_t)WV_POINTS + i1] - a) * ff;
-    if (f1 != f0) {
-        c = (float)b->frames[f1 * (int32_t)WV_POINTS + i0];
-        c += ((float)b->frames[f1 * (int32_t)WV_POINTS + i1] - c) * ff;
+    a = (float)fa[i0];
+    a += ((float)fa[i1] - a) * ff;
+    if (fb) {
+        float c = (float)fb[i0];
+        c += ((float)fb[i1] - c) * ff;
         a += (c - a) * t;
     }
     return a * (1.0f / 32768.0f);
+}
+
+float wv_table_read(const wv_bank *b, float ph, float mf)
+{
+    const int16_t *fa, *fb;
+    float t;
+    wv_frames_at(b, mf, &fa, &fb, &t);
+    return wv_table_read2(fa, fb, ph, t);
 }
 
 /* ─── the shaper ──────────────────────────────────────────────────────────── */
@@ -135,6 +193,10 @@ void wv_init(wv_state *s)
     s->eg_d = 64;
     s->eg_s = 127;
     s->eg_r = 32;
+    /* LFO off, so a patch made before it existed sounds the same after it */
+    s->lfo_rate = 0;
+    s->lfo_depth = 0;
+    s->lfo_ph = 0.0f;
 }
 
 /* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
@@ -384,7 +446,20 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
 {
     uint32_t i, k;
     float mf = u7_to_f(s->morph) * (float)(WV_FRAMES - 1u);
-    float cut_t = cut_hz(s->cut);
+    /* The frame pair, resolved once per block instead of once per sample: MORPH does
+     * not move inside a block, and recomputing the pair for every sample was 12-16% of
+     * the read path (measured). wv_frames_at is the same arithmetic wv_table_read
+     * does, just hoisted. */
+    const int16_t *fa = 0, *fb = 0;
+    float ft = 0.0f;
+    wv_frames_at(b, mf, &fa, &fb, &ft);
+    /* CUT, swept by the LFO. The scale multiplies Hz, so the depth is symmetric in
+     * octaves -- see lfo_cut_scale. Read, not advanced: this function runs twice a
+     * block (once per core). */
+    float cut_t = cut_hz(s->cut) * lfo_cut_scale(s);
+    /* past Nyquist the SVF's tan() blows up: 16 kHz * 2^4 is 256 kHz */
+    if (cut_t > 18000.0f)
+        cut_t = 18000.0f;
     float amt_t = u7_to_f(s->sh_amount);
     /* the SVF's damping: RES 0 is a plain low-pass, RES 127 rings hard */
     float damp = 2.0f - 1.85f * u7_to_f(s->res);
@@ -420,7 +495,7 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
              * shared, which is the whole reason a sample voice is a voice and not a
              * second engine. */
             if (v->src == WV_SRC_TABLE) {
-                osel = wv_table_read(b, v->phase, mf);
+                osel = wv_table_read2(fa, fb, v->phase, ft);
                 v->phase += v->inc;
                 if (v->phase >= 1.0f)
                     v->phase -= 1.0f;
@@ -525,6 +600,21 @@ static void smooth_step(wv_state *s, uint32_t n)
     for (k = 0; k < n; k++) {
         s->cut_z += (cut_t - s->cut_z) * zc;
         s->amount_z += (amt_t - s->amount_z) * zc;
+    }
+    /* The LFO's phase advances ONCE per block, here, and not in voice_block.
+     *
+     * voice_block runs twice per block (once per core), so advancing the phase there
+     * would run the LFO at twice its rate whenever the second core is up -- the same
+     * shape of mistake as the smoothers in voice_block, which are deliberately local
+     * copies for exactly this reason. smooth_step is the one place that runs once per
+     * block, so this is the one place the phase may move.
+     *
+     * A block is all one LFO value: 5.8 ms per step is not a stair the ear hears, and
+     * a per-sample phase would cost a sine per voice per sample for a value every
+     * voice shares. */
+    if (s->lfo_rate != 0 && s->lfo_depth != 0) {
+        s->lfo_ph += wv_lfo_hz(s->lfo_rate) * (float)n * (1.0f / 44100.0f);
+        s->lfo_ph -= fm_floorf(s->lfo_ph);
     }
 }
 

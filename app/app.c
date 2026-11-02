@@ -85,6 +85,10 @@ static uint8_t  bank_i;
 
 /* the panel's four live knobs, as 0..127 */
 static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
+/* The LFO page's two controls. RATE 0 is off, which is the default: a patch made
+ * before the LFO existed must sound the same after it. */
+static uint8_t k_lfo_rate = 0, k_lfo_depth = 0;
+static uint8_t lfo_page;
 static uint8_t k_morph = 0;
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
  * encoder) so that every other knob stays where it is in every mode. */
@@ -246,6 +250,8 @@ static void ui_apply(void)
     dsp.res = k_res;
     dsp.shape = k_shape;
     dsp.sh_amount = k_amount;
+    dsp.lfo_rate = k_lfo_rate;
+    dsp.lfo_depth = k_lfo_depth;
     dsp.morph = k_morph;
     dsp.grain_size = k_grain;
     dsp.spray = k_spray;
@@ -512,9 +518,24 @@ static void input(void)
     /* The ENV page owns K1-K4 while it is up. The page is a toggle with a lit button,
      * not a fourth mode, so leaving it puts every knob back where it was — see the
      * note on env_page. */
-    if (btn_pressed(btn, B_ENV))
+    if (btn_pressed(btn, B_ENV)) {
         env_page ^= 1u;
+        if (env_page)
+            lfo_page = 0;               /* two pages cannot be up at once */
+    }
+    if (btn_pressed(btn, B_LFO)) {
+        lfo_page ^= 1u;
+        if (lfo_page)
+            env_page = 0;
+    }
 
+    /* The LFO page takes K3 and K4, not K1 and K2.
+     *
+     * CUT and RES stay where they are because they are the parameters the LFO acts
+     * on: with the page up you want to see the filter you are sweeping, and CUT
+     * sitting on K1 in every mode and on every page is the one thing the panel must
+     * not move. SHAPE and AMOUNT are what give way -- they are the pair a filter LFO
+     * does not change, and they are one button away. */
     if ((e = plat_enc(EN_K1)) != 0) {
         if (env_page) k_eg_a = (uint8_t)clamp((int32_t)k_eg_a + e * 4, 0, 127);
         else          k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
@@ -524,12 +545,14 @@ static void input(void)
         else          k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K3)) != 0) {
-        if (env_page) k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
-        else          k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
+        if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
+        else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
     if ((e = plat_enc(EN_K4)) != 0) {
-        if (env_page) k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
-        else          k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
+        if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
+        else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
     /* EN_ALGO is MORPH in SYNTH, and GRAIN SIZE in GRAN. This is the one place a knob
      * changes meaning with the mode, and it is deliberate: MORPH has nothing to read
@@ -675,6 +698,55 @@ static char *pct(uint8_t v)
  * The buffer is a small ring: two of these appear in one screen, and one static
  * buffer would make the second call overwrite the first argument before knob() had
  * used it. */
+/* The LFO page's two readouts. RATE in Hz, because a rate in percent is not a rate;
+ * DEPTH in octaves, because CUT is exponential and "half way" means nothing. Both use
+ * a small ring of buffers for the same reason sel_time does: knob() takes its text and
+ * a box count computed from it, and one static buffer would let the second call
+ * overwrite the first before knob() had used it. */
+static char *lfo_rate_text(uint8_t v)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    float hz = wv_lfo_hz(v);
+    int n = 0;
+
+    if (hz == 0.0f) {
+        b[0] = 'O'; b[1] = 'F'; b[2] = 'F'; b[3] = 0;
+        return b;
+    }
+    if (hz < 10.0f) {                       /* one decimal: 0.02 .. 9.9 */
+        int32_t t = (int32_t)(hz * 10.0f + 0.5f);
+        b[n++] = (char)('0' + t / 10);
+        b[n++] = '.';
+        b[n++] = (char)('0' + t % 10);
+    } else {                                /* 10 .. 20, no room for a decimal */
+        int32_t t = (int32_t)(hz + 0.5f);
+        if (t >= 10)
+            b[n++] = (char)('0' + (t / 10) % 10);
+        b[n++] = (char)('0' + t % 10);
+    }
+    b[n++] = 'H';
+    b[n++] = 'z';
+    b[n] = 0;
+    return b;
+}
+
+static char *lfo_depth_text(uint8_t v)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    /* 0..4 octaves, one decimal */
+    int32_t t = (int32_t)(4.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
+    b[0] = '+';
+    b[1] = (char)('0' + t / 10);
+    b[2] = '.';
+    b[3] = (char)('0' + t % 10);
+    b[4] = 0;
+    return b;
+}
+
 static char *sel_time(uint8_t v, int which)
 {
     static char ring[3][10];
@@ -1938,6 +2010,14 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
         knob(120, KNOB_TOP, 54, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
         knob(178, KNOB_TOP, 54, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
+    } else if (lfo_page) {
+        /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
+         * the page's knobs are read. RATE prints Hz, because a rate in percent is not
+         * a rate; DEPTH prints octaves, because CUT is exponential. */
+        knob(4,   KNOB_TOP, 54, "CUT",   pct(k_cut), k_cut, 0);
+        knob(62,  KNOB_TOP, 54, "RES",   pct(k_res), k_res, 0);
+        knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(k_lfo_rate), k_lfo_rate, 1);
+        knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
@@ -1966,6 +2046,8 @@ void app_frame(void)
         last = now;
         if (env_page)
             lit |= 1u << B_ENV;
+        if (lfo_page)
+            lit |= 1u << B_LFO;
         if (src != SRC_SYNTH)
             lit |= 1u << B_SEL;
         if (src == SRC_SMPL)
@@ -1998,6 +2080,9 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "eg_r"))       { *got = k_eg_r;   return 1; }
     if (!strcmp(what, "src"))        { *got = src;      return 1; }
     if (!strcmp(what, "env"))        { *got = env_page; return 1; }
+    if (!strcmp(what, "lfo"))        { *got = lfo_page; return 1; }
+    if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
+    if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
     if (!strcmp(what, "active"))     { *got = (int)wv_active(&dsp); return 1; }
