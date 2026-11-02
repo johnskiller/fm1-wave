@@ -27,7 +27,8 @@ static wv_bank  bank = { WV_BANKS[0] };
 /* The sample pool, as the platform handed it over. `pool` points into the resource
  * blob, not a copy: the blob is 276 KB of flash and there is no RAM for a copy. */
 static const uint8_t *pool;
-static void           pool_poll(void);      /* (defined below: app_render asks it every block) */
+static void           pool_poll(void);
+static void           midi_in(void);      /* (defined below: app_render asks it every block) */
 static uint32_t       pool_len;
 static wv_sample      smp[SMP_MAX];
 static uint8_t        smp_count;
@@ -343,6 +344,10 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     if (n > BLK_MAX)
         n = BLK_MAX;
 
+    /* MIDI first, so a note that arrived since the last block starts on this one
+     * rather than a block later (5.8 ms at the current block size) */
+    midi_in();
+
     /* the buffer arrives with whatever uac_mix left in it, so clear it rather than
      * add to it; the DSP then writes the app's own signal */
     for (i = 0; i < n; i++) {
@@ -498,6 +503,51 @@ static void play_note(uint8_t note, uint8_t vel)
  * drawn after the screen, and rebuilding the key mask there would read the matrix a
  * second time in the same frame */
 static uint32_t in_btn, in_keys;
+
+/* MIDI in: the packets the platform has collected, taken in the audio interrupt the
+ * way the template does it (plat_midi_in drains a ring the USB/BLE/TRS handlers fill;
+ * the panel's own input() runs in app_frame, which is too slow for a note that arrives
+ * between frames).
+ *
+ * An instrument, not a master keyboard: what comes in plays exactly what the keys play
+ * -- the same play_note, the same wv_note_off -- so a note from USB and the same note
+ * from the panel are not two different voices with two different rules. Sending stays
+ * as it was (the panel's keys out), because that is a convenience nobody depends on.
+ *
+ * USB, BLE and the TRS jack all arrive here: the platform merges them into one ring
+ * and says which link through the port argument, which this does not need yet -- the
+ * ARP and the velocity would be the only reasons to care. */
+static uint32_t midi_seen;          /* packets taken, for app_expect */
+static void midi_in(void)
+{
+    uint32_t pkt;
+    int port;
+
+    while (plat_midi_in(&pkt, &port)) {
+        uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = pkt >> 24;
+
+        /* clock and active sensing: a device that sends them fills the ring with
+         * messages that mean nothing here, and they arrive 24 times a beat */
+        if (st == 0xF8u || st == 0xFEu)
+            continue;
+        midi_seen++;
+
+        if ((st & 0xF0u) == 0x90u && d2)
+            play_note((uint8_t)d1, (uint8_t)d2);
+        else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u)
+            wv_note_off(&dsp, (uint8_t)d1);
+        else if (st == 0xB0u && (d1 == 123u || d1 == 120u)) {
+            /* all notes off / all sound off: CC123 releases what is sounding,
+             * CC120 stops it. The engine has one way to end a voice (release to
+             * the floor), and 8 voices is a cheap loop -- but only the notes that
+             * are actually held, not 128 calls to wv_note_off. */
+            uint32_t v;
+            for (v = 0; v < WV_VOICES; v++)
+                if (dsp.v[v].active)
+                    wv_note_off(&dsp, dsp.v[v].note);
+        }
+    }
+}
 
 static void input(void)
 {
@@ -2130,6 +2180,7 @@ int app_expect(const char *what, int *got)
      * is a state the screen shows (NO SAMPLES) and a test has to be able to assert
      * without reading pixels. */
     if (!strcmp(what, "smp_count"))   { *got = smp_count; return 1; }
+    if (!strcmp(what, "midi_seen"))   { *got = (int)midi_seen; return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
