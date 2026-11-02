@@ -12,6 +12,17 @@ firmware reads.
     22.05 kHz   6.40 s
     11.025 kHz  12.81 s
 
+Those are per-pool, not per-slot: the header costs 8 + 20 x slots. Two slots leave
+282,408 B, so a long slot and a short one trade against each other:
+
+    PAD 2.38 s @22.05k (52369 frames, 102 KB) + VOX 3.30 s @11.025k (36383, 71 KB)
+        = 177,552 B, 105 KB spare
+
+Dropping the pad to 22.05 kHz cost nothing measurable: the same note measured
+through the reader, 1-3k / 3-6k / 6-11k bands within 0.8 dB of the 44.1 kHz pool and
+the non-harmonic fraction identical to 0.1 %, because the material's 99.9 % energy
+is below 3.2 kHz.
+
 One rate per slot, chosen at pack time. The rate is not resampled at playback, so
 it decides two things independently:
 
