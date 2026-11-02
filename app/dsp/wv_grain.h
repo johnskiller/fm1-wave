@@ -81,7 +81,12 @@ typedef struct {
     wv_grain g[WV_GRAINS];
     float    play;      /* the playhead grains are spawned at, in the slot's samples */
     float    rate;      /* the source advance per output sample */
-    float    loop_start, loop_end;   /* the range the playhead wraps inside */
+    float    loop_start;
+    float    loop_end;  /* where the playhead wraps: loop_end_k less one window */
+    float    loop_end_k;/* the range as configured. Kept apart from loop_end because the
+                         * wrap point is derived from it every spawn: writing the
+                         * derived value back into the configured one would shorten
+                         * the loop by one window on every block. */
     uint32_t left;      /* output samples until the next spawn (0 = this sample) */
     uint32_t next;      /* round-robin slot */
     uint32_t seed;      /* xorshift state for SPRAY; per voice, so two voices on the

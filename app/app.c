@@ -988,12 +988,19 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
      * much brighter, which was true -- it was drawn in ink_hi at full strength. */
     env_line(s, x0, y0, w, h, 0, s->len, dim(k->ink, 2, 5));
 
-    /* ── layer 2: the loop range. The playhead wraps at loop_end, so a grain appearing on
-     * the left after being on the right is the loop and not a jump; without the marks
-     * that reads as a fault. Dotted, in the dim ink: it is a boundary, not material. */
+    /* ── layer 2: the loop range. A grain appearing on the left after being on the
+     * right is the loop and not a jump; without the marks that reads as a fault.
+     * Dotted, in the dim ink: it is a boundary, not material.
+     *
+     * loop_end_k, not loop_end: the playhead actually wraps one grain window before
+     * the configured end (see wv_grains_next), so that a grain spawned there still has
+     * material to read. The marks show the configured range, because the material
+     * between the wrap point and the end IS part of the loop -- grain tails read it --
+     * and because a boundary that slid back and forth as GRAIN SIZE turned would be
+     * showing an implementation detail, not a fact about the sample. */
     {
         float ls = gr ? gr->loop_start : 0.0f;
-        float le = gr ? gr->loop_end : 0.0f;
+        float le = gr ? gr->loop_end_k : 0.0f;
         int32_t xa, xb;
         if (!gr || !gr->started) {          /* no cloud yet: the whole slot is the loop */
             ls = 0.0f;

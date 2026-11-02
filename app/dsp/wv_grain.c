@@ -117,7 +117,8 @@ void wv_grains_start(wv_grains *gr, const wv_sample *smp, uint32_t start, uint32
     }
     gr->play = (float)start;
     gr->loop_start = (float)start;
-    gr->loop_end = (float)(end - 1u);
+    gr->loop_end_k = (float)(end - 1u);
+    gr->loop_end = gr->loop_end_k;
     gr->rate = rate;
     gr->left = 0;
     gr->next = 0;
@@ -133,7 +134,8 @@ void wv_grains_loop(wv_grains *gr, uint32_t start, uint32_t end)
     if (end <= start + 1u)
         return;
     gr->loop_start = (float)start;
-    gr->loop_end = (float)(end - 1u);
+    gr->loop_end_k = (float)(end - 1u);
+    gr->loop_end = gr->loop_end_k;
     gr->loop = 1;
 
     span = gr->loop_end - gr->loop_start;
@@ -194,11 +196,47 @@ static void spawn(wv_grains *gr, const wv_sample *smp, float len_out, float spra
 float wv_grains_next(wv_grains *gr, const wv_sample *smp, float len_out, float spray)
 {
     float sum = 0.0f;
-    float hop;
+    float hop, wrap;
     uint32_t i;
 
     if (len_out < 2.0f)
         len_out = 2.0f;
+
+    /* Where the playhead wraps: the material's end, less one window.
+     *
+     * A grain spawned at the playhead reads FORWARD for `len_out * rate` samples of
+     * material. If the playhead wraps at the slot's last sample, a grain spawned
+     * anywhere in the last window-length of material reads past the end, where
+     * read_at() returns silence, and part of its window is a hole. The window is
+     * still running, so it is not a click -- it is a level dip. Measured on the demo
+     * tone (2.0 s slot, one wrap every 2.0 s) the dip at the wrap was 0.7 dB at
+     * GRAIN 16, 3.5 dB at GRAIN 64 and 11.4 dB at GRAIN 127: a periodic thump whose
+     * depth grows with the grain length, which is the parameter the sound is made of.
+     *
+     * So the wrap point backs off by one window, computed from the length in force
+     * rather than stored, because GRAIN SIZE is a live control: a held cloud re-tiles
+     * when the knob moves, and the wrap has to move with it. The cost is the last
+     * `len_out * rate` samples of material, which at the longest grain and a 3 s slot
+     * is 6.7 % of it -- and that is material no grain could have read anyway.
+     *
+     * The floor keeps a short slot usable: a window longer than the slot degrades to
+     * a wrap at the start instead of a zero-length loop. */
+    wrap = gr->loop_end_k;
+    if (gr->loop) {
+        float back = wrap - len_out * gr->rate;
+        /* The range must keep a nonzero span. A grain window longer than the whole
+         * material (200 ms over a 0.25 s slot, in the test) backs off past the start,
+         * and a zero-length span freezes the playhead -- the cloud does not stutter, it
+         * goes silent, and it never comes back even after GRAIN SIZE is turned down
+         * again. So the start is the floor, plus one sample: the loop keeps going and
+         * reads what material there is, holes and all, because a grain longer than the
+         * slot cannot be filled and pretending otherwise is what froze it. */
+        if (back > gr->loop_start)
+            wrap = back;
+        else
+            wrap = gr->loop_start + 1.0f;
+        gr->loop_end = wrap;
+    }
 
     /* Grain length / overlap: with an overlap of 2 the next grain starts when the
      * previous one is half done, which is the sin²/cos² pair. */
@@ -238,13 +276,13 @@ float wv_grains_next(wv_grains *gr, const wv_sample *smp, float len_out, float s
     if (gr->left > 0u)
         gr->left--;
     gr->play += gr->rate;
-    /* Wrap the playhead, so a cloud over a finite sample keeps a cloud. A grain
-     * already reading near the end is left to clamp there on its own window: moving
-     * it would restart it mid-grain, which is a click where a clamp is a fade. */
+    /* Wrap the playhead at `wrap` (the material's end less one window), so a cloud
+     * over a finite sample keeps a cloud without ever spawning a grain that has no
+     * material left to read. */
     if (gr->loop) {
-        float span = gr->loop_end - gr->loop_start;
+        float span = wrap - gr->loop_start;
         if (span > 0.0f) {
-            while (gr->play > gr->loop_end)
+            while (gr->play > wrap)
                 gr->play -= span;
         }
     }

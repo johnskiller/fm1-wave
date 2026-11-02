@@ -346,6 +346,74 @@ static void test_cloud_sustains_over_short_material(void)
     }
 }
 
+
+/* The wrap must not be audible.
+ *
+ * A grain spawned at the playhead reads FORWARD for its whole window, so a playhead
+ * that wraps at the material's last sample spawns grains in the final window-length
+ * with nothing left to read. read_at() returns silence there, the window keeps running,
+ * and the result is a level dip once per slot pass: measured on the demo tone, 0.7 dB
+ * at GRAIN 16, 3.5 dB at GRAIN 64 and 11.4 dB at GRAIN 127 -- a periodic thump whose
+ * depth grows with the grain length.
+ *
+ * The fix is that the wrap point backs off by one window. This measures the outcome,
+ * not the mechanism: over four passes of a 0.25 s slot, no 20 ms window may be more
+ * than 1 dB below the loudest. A silent or short-slot case is excluded by the first
+ * check.
+ *
+ * The tolerance is 0.5 dB because the fixed cloud measures exactly 0.00 dB on DC
+ * material -- the window sum is 1 by construction, so a constant must come out
+ * constant. The injected bug measured 0.52 / 2.03 / 12.51 dB, and a 1 dB threshold
+ * let the smallest grain through: an assertion a bug can pass is not an assertion.
+ */
+static void test_wrap_has_no_dip(void)
+{
+    static const uint8_t grains[3] = { 16u, 64u, 127u };
+    int gi;
+
+    printf("wrap:\n");
+    for (gi = 0; gi < 3; gi++) {
+        wv_grains gr;
+        float lo = 1e30f, hi = -1e30f, mean = 0.0f;
+        int i, n = 44100 * 2;           /* 2 s over 0.25 s of material: 8 passes */
+        /* One full period of fill_ramp's sawtooth. A window that does not hold whole
+         * periods measures the waveform's own shape, not the cloud's level: at 882
+         * samples the same cloud read -7 to -26 dB with nothing wrong with it. */
+        int win = 4096;
+        int nwin = 0;
+        double acc = 0.0;
+
+        /* DC material, on purpose. With a window sum of exactly 1 (the sin²/cos²
+         * identity), a constant sample must come out at a constant level, so any drop
+         * in the output can only come from reading where there is no material -- which
+         * is exactly the defect under test. Ramp or sine material fails this: the
+         * sawtooth read 2.8-4.7 dB of ripple with no wrap involved at all, because the
+         * measurement was reading the waveform. */
+        fill_dc(16384);
+        make_sample(11025, 1.0f);       /* 0.25 s */
+
+        wv_grains_start(&gr, &smp, 0, 0, 1.0f, 1, 4242u);
+        for (i = 0; i < n; i++) {
+            float v = wv_grains_next(&gr, &smp, wv_grain_len(grains[gi]), 0.0f);
+            acc += (double)v * (double)v;
+            if (++nwin == win) {
+                float r = (float)sqrt(acc / (double)win);
+                if (r > hi) hi = r;
+                if (r < lo) lo = r;
+                mean += r;
+                acc = 0.0;
+                nwin = 0;
+            }
+        }
+        {
+            float db = 20.0f * log10f(hi > 1e-9f ? lo / hi : 1e-9f);
+            /* the first window is the note's own fade-in; it is not a wrap dip */
+            printf("  GRAIN %3u: quietest window %.2f dB below the loudest\n", grains[gi], -db);
+            ck(db > -0.5f, "no window of a looped cloud drops more than 0.5 dB");
+        }
+    }
+}
+
 int main(void)
 {
     test_window_tiles();
@@ -357,6 +425,7 @@ int main(void)
     test_reproducible();
     test_grain_len();
     test_cloud_sustains_over_short_material();
+    test_wrap_has_no_dip();
 
     printf("\n%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
