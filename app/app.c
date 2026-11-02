@@ -1357,55 +1357,30 @@ static uint8_t  dbg_seen_wait;      /* a handover was seen in flight at least on
 static void dbg_measure_clock(void)
 {
 #if !defined(DBG_NO_CYCLES)
-    uint32_t c0, c1, t0, t1, n;
-    float m;
-
-    /* The counter needs enabling, and fm1_perf.h never says so: it only reads. JieLi's
-     * own cpu_effic_init (SDK cpu/wl82/debug.c) does corex2(0)->DBG_CON |= 0x7 before it
-     * reads the same registers ("enable if_inv_en of_inv_en ex_inv_en"), and without that
-     * the counters stay at zero -- which is exactly what the device showed: an empty row.
-     * The platform exposes the same write as fm1_perf_stalls_enable().
+    /* This does not measure the clock any more, because there is no way to.
      *
-     * DBG_CON bit 0-2 only gate the three stall counters; JieLi's debug.c uses bits 17-18
-     * for its message ring, which this does not touch. The upstream comment warns the
-     * bits "may also arm fault exceptions", which is why the enable is paired with the
-     * run check below: if arming them stopped the core, the device would restart and
-     * this code would never run again -- and a debug readout that can hang the
-     * instrument is not worth having, so it is the first thing checked after boot. */
+     * fm1_perf.h reads C0_TL_CKCNT and says "not verified on hardware". It is not: with
+     * DBG_CON bits 0-2 set -- the write JieLi's own cpu_effic_init does, and the only
+     * write to that register anywhere in the SDK -- the register still reads the same
+     * value 100 us later, which the device reports as "ckNo". Those bits gate the three
+     * stall counters, not this one; corex2(0) is at 0x1EEE000 so the address is right;
+     * and nothing else in the SDK touches it. So it is not a free-running core clock on
+     * this part however it is named.
+     *
+     * The first version of this measured instead of reading: a loop, divided by an
+     * assumed cost per iteration. It read 129 MHz and the assumption was the error (the
+     * loop is ~22 cycles, not 8, because dependent multiplies wait on the FPU). Guessing
+     * a constant and printing the result is how that happened, and doing it again with a
+     * different constant would be the same mistake twice.
+     *
+     * What is left is the configuration, which the platform reads out of the PLL
+     * registers at the start (fm1_clock.h: PLL1 = 24/12 * 270 = 540 MHz, the system
+     * clock 2/3 of it = 360, which is what the FM-1 runs under either bootloader). That
+     * is a fact about a register the firmware set, not a measurement -- and the app
+     * cannot see it, since register access belongs to the BSP (tools/build.py
+     * mmio_check). So row 3 says why there is no reading, and stops. */
     fm1_perf_stalls_enable(1);
-
-    if (!fm1_perf_cycles_run()) {
-        dbg_state = DBG_ST_NOMOVE;  /* enabled but still not counting */
-        return;
-    }
-    c0 = fm1_perf_cycles();
-    t0 = plat_ticks24();
-    do {
-        t1 = plat_ticks24();
-    } while ((uint32_t)(t1 - t0) < DBG_SPAN_US * PLAT_TICKS_PER_US);
-    c1 = fm1_perf_cycles();
-
-    /* ticks are 1/24 us:  MHz = cycles / us */
-    if (t1 == t0) {
-        dbg_state = DBG_ST_NOTICK;
-        return;
-    }
-    m = (float)(c1 - c0) * 24.0f / (float)(t1 - t0);
-
-    for (n = 0; n < sizeof MPU_CLKS / sizeof MPU_CLKS[0]; n++) {
-        float d = m - (float)MPU_CLKS[n];
-        if (d > -20.0f && d < 20.0f) {
-            dbg_mhz = MPU_CLKS[n];
-            dbg_state = DBG_ST_OK;
-            return;
-        }
-    }
-    /* Counting, but not a clock this chip runs at: show the number marked, because on
-     * the device that means the counter's unit is not 1 per core clock and the figure is
-     * the only evidence of it. */
-    dbg_mhz = (uint32_t)(m + 0.5f);
-    dbg_mhz_ok = 0;
-    dbg_state = DBG_ST_ODD;
+    dbg_state = fm1_perf_cycles_run() ? DBG_ST_OK : DBG_ST_NOMOVE;
 #endif
 }
 
@@ -1491,11 +1466,10 @@ static void dbg_draw(const src_skin_t *k)
 
     /* row 3: the clock, or why there is none. "ck?" would be a mystery; "ckX" with the
      * tag is a diagnosis, and one flash of the firmware should be enough to settle it.
-     *   (nothing)  the measurement did not run at all
-     *   360M       the counter counts and the reading is a clock this chip runs at
-     *   360M?      it counts, but the figure is not a known clock
-     *   ckNo       the counter was enabled and still does not move
-     *   ckNt       the 24 MHz tick did not advance across the span */
+     *   (nothing)  the probe did not run at all
+     *   ckNo       C0_TL_CKCNT does not move here: the register is not a usable core
+     *              clock on this part, with or without DBG_CON's stall-enable bits.
+     *              This is the answer to the question, not a failure to get one. */
     q = r;
     if (dbg_mhz) {
         num(t, (int32_t)dbg_mhz);
