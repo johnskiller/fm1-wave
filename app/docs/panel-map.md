@@ -132,62 +132,42 @@ power-on.
 
 ## Screen layout
 
-240 x 240, drawn as four canvases (`cv_begin` / `cv_blit`, one pair per band, because
+240 x 240, drawn as three canvases (`cv_begin` / `cv_blit`, one pair per band, because
 each canvas is a fixed-size pool and the bands are different heights):
 
 ```
-  0.. 68   scope        the live waveform, auto-gained to the band
- 68..124   row A        K1..K4      four cells of 60 px
-124..200   row B        encoders    three cells of 80 px
-200..240   strip        source icon (left) + BANK/SLOT (right)
+  0.. 68   scope      the live waveform after shaper -> filter -> VCA, auto-gained
+ 68..176   material   the table's own shape (SYNTH); icon + material name otherwise
+176..240   the four   K1..K4: CUT RES SHAPE AMOUNT, or A D S R on the ENV page
 ```
 
-**Row A** is `CUT RES SHAPE AMOUNT`, or `ATTACK DECAY SUSTAIN RELEASE` on the ENV
-page. **Row B** is the three encoder positions, each cell where its knob is:
+**Why the material sits in the middle and the knobs at the bottom.** The scope shows
+the result, which is what the ear hears; the material shows the input, so a dull or
+thin sound can be attributed -- the table, or CUT/SHAPE/AMOUNT? Two pictures answer
+that, one does not. The table's own shape is also why BANK and MORPH lost their cells:
+those are exactly the two parameters it draws, and a number beside a waveform that
+shows that number's effect is a worse use of a cell than the waveform at a readable
+size. Their values are printed over the picture instead, in the right column.
 
-```
-  cell 1  EN_PRESET   BANK (SYNTH) / SLOT (SMPL, GRAN)   + index bar
-  cell 2  EN_SELECT   SPRAY in GRAN; empty otherwise
-  cell 3  EN_ALGO     MORPH (SYNTH, SMPL) / GRAIN SIZE (GRAN)
-```
+The first version of this was a 28 px strip at the bottom, measured and signed off --
+and too short to read. It is 100 px now, which also multiplied the MORPH differences
+from 0.59 px (invisible) to 2.9 / 6.7 / 12.0 / 19.4 px per step.
 
-The physical knob order is the screen's order, which is the rule this panel has kept
-since the first layout:
+The knobs being last is also where the hand is: the bottom of the screen is nearest the
+bottom row of keys, in the physical order left to right.
 
-```
-MASTER     SELECT        (upper pair, screen's left)
-PRESETS    ALGORITHM     (lower pair)
-```
+Measured, per source, dominant colour of each of the three bands: SYNTH and SYNTH+ENV
+`(0,0,0)` on all three, SMPL `(49,32,0)`, GRAN `(8,36,49)`. Material-band ink covers
+x=4..231 in SYNTH (wave 4..180, values 186..231), and x=4..143 in SMPL (icon plus name,
+no wave yet).
 
-`MASTER` is a pot, not an encoder -- `plat_master()` returns 0..4096 and it reaches the
-render as the gain, so no cell is spent on it. BANK and MORPH were the other way round
-in the first two-row layout, which put BANK on the side ALGORITHM is not; the code
-cannot tell (the platform records matrix ids, ALGORITHM 1 and PRESETS 6, not
-left/right), so the order comes from the panel in front of the player.
+**A known gap, recorded rather than hidden:** SMPL and GRAN have no picture in the
+material band -- only the source icon and the material's name. A sample needs a min/max
+envelope (8800 samples into 176 columns: transients visible, individual cycles not) and
+GRAN needs the grain window and its overlap rather than a waveform. Neither has a design
+yet, and the shape a waveform would give GRAN is already the source icon.
 
-Cell 2 used to hold a SOURCE selector. That was the strip's icon written out in three
-more words -- the icon names the source, and the ground and ink say it twice more --
-so it cost a cell that GRAN could use. SPRAY moved there from the SOURCE cell. In
-SYNTH and SMPL the cell is empty, including on the ENV page: the strip already says
-`ENV PAGE`, and saying it in both places drew the identical string twice.
-
-**The strip** (200..240) is the source icon in the left corner and, on the right, only
-what the panel cannot show any other way: `ENV PAGE` while the page is up, or
-`NO SAMPLES` if the sample sources have no material.
-
-Why two rows: seven encoders across 240 px is 34 px each, and `AMOUNT` at FONT_XS
-measures 43 px — measured on the host by scanning the label rows for ink runs, it ran
-9 px into the next cell. Shortening the names fixes that one collision and leaves
-every label at four or five characters; two rows keeps the full names.
-
-Why the scope gave up height (112 -> 68): 112 + 56 + 76 + 40 = 284, which is 44 more
-than the screen has. The scope is the one band whose height is not load-bearing —
-the auto-gain fills whatever band it is given — so it paid.
-
-Measured after the change, per source, ink in the strip's three thirds:
-`icon(0-64) / BANK(64-146) / SLOT(146-240)` = 98/293/0 (SYN), 84/293/228 (SMP),
-189/293/228 (GRN). No overlap, and SYNTH carries no SLOT — that number is a sample
-fact and the table path has no slots.
+## Source indication
 
 ## Source indication
 

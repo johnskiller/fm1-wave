@@ -540,14 +540,11 @@ static src_skin_t src_skin(void)
 /* The source's shape, in the strip. A polyline rather than rects, because the thing
  * being drawn is a curve and a curve is what the scope above shows: the same visual
  * language, one scale down. */
-static void src_icon(const src_skin_t *k)
+static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
 {
-    /* The strip's own canvas is 240x40. The icon sits in the left corner: a centred
-     * icon measured 78..161 and overlapped the text that used to be here. In SYNTH the
-     * corner is all it gets -- 32 px wide, because the table's own shape takes the rest
-     * of the strip -- and in the other sources it keeps the 56 px it had. */
-    int32_t wide = (src == SRC_SYNTH);
-    int32_t x0 = 4, y0 = 8, w = wide ? 32 : 56, h = wide ? 20 : 24;
+    /* Geometry is the caller's: the icon is drawn at 32 px in the material band and was
+     * drawn at 56 in the strip, and hardcoding either would have made the other land in
+     * the wrong place. */
     int32_t mid = y0 + h / 2, amp = h / 2 - 1;
     int32_t i, px = 0, py = 0;
 
@@ -888,131 +885,97 @@ void app_frame(void)
      *   124..200 row B
      *   200..240 mode strip
      */
-    cv_begin(240, 56, sk.bg);
-    if (env_page) {
-        /* The ENV page: the same four bars in the same four positions, so the hand
-         * does not move — only what they mean. Time in ms/s as text, because "37" on
-         * an envelope is unreadable and "37 ms" is not. */
-        knob(4,   6, 52, "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
-        knob(64,  6, 52, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
-        knob(124, 6, 52, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
-        knob(184, 6, 52, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
-    } else {
-        knob(4,   6, 52, "CUT",    pct(k_cut), k_cut, 0);
-        knob(64,  6, 52, "RES",    pct(k_res), k_res, 0);
-        knob(124, 6, 52, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
-        knob(184, 6, 52, "AMOUNT", pct(k_amount), k_amount, 0);
-    }
-    cv_blit(0, 68);
-
-    cv_begin(240, 76, sk.bg);
+    /* ─── the material, and the four knobs ───────────────────────────────────────
+     *
+     * Layout, top to bottom:
+     *
+     *   0..68    scope        the result of shaper -> filter -> VCA, what the ear hears
+     *   68..176  material     the table's own shape, 108 px tall
+     *   176..240 the four     CUT RES SHAPE AMOUNT, or A D S R on the ENV page
+     *
+     * The table's shape earned the middle of the screen and the knobs moved to the
+     * bottom, because the shape is now the more useful of the two: at 28 px in the
+     * strip it was legible as "something moves" and not as a waveform, and BANK and
+     * MORPH are the two parameters it already draws. A number beside a waveform that
+     * shows that number's effect is a worse use of a cell than the waveform at a size
+     * you can read. So BANK and MORPH lose their cells and keep their values, printed
+     * over the picture they control.
+     *
+     * The knobs being last is also where the hand is: the bottom row of the screen is
+     * nearest the bottom row of keys. K1..K4 sit in the physical order left to right,
+     * which is the rule this panel has kept since the first layout. */
+    cv_begin(240, 108, sk.bg);
     {
-        /* ROW B, in the order the knobs sit on the panel. Each cell is where its knob
-         * is, which is the rule this panel has kept since the first layout:
-         *
-         *   cell 1  EN_PRESET   BANK (SYNTH) / SLOT (SMPL, GRAN)
-         *   cell 2  EN_SELECT   SPRAY in GRAN; nothing to set otherwise
-         *   cell 3  EN_ALGO     MORPH (SYNTH, SMPL) / GRAIN SIZE (GRAN)
-         *
-         * BANK and MORPH used to be the other way round, which put BANK on the side
-         * ALGORITHM is not. The platform does not record a knob's left/right, only its
-         * matrix id (ALGORITHM 1, PRESETS 6), so this order comes from the panel in
-         * front of the player, not from the code. Swapping the two cell bodies back is
-         * the whole revert.
-         *
-         * Cell 2 held a SOURCE selector until now. That was the strip's icon said again
-         * in three more words -- the icon names the source, the ground and the ink say
-         * it twice more -- and it cost a cell that GRAN can use. SPRAY moved here from
-         * the SOURCE cell: it is the last GRAN-only control, and an empty cell between
-         * two knobs is honest about there being nothing to set, which is exactly what
-         * SYNTH and SMPL are.
-         */
+        char b[12];
+        int32_t bl;
 
-        /* cell 1: BANK (table) or SLOT (sample). A number and a name, because "3/8"
-         * says where you are and "SAW SQR" says what it is. */
-        {
-            char b[12];
-            int32_t bl = 0;
+        if (src == SRC_SYNTH) {
+            /* the table: 176 px wide and 100 tall, leaving the right column for the two
+             * values that describe it -- a shape with no label is a mystery, and these
+             * are the two knobs that have no cell any more. */
+            src_shape(&sk, 4, 4, 176, 100);
+
+            bl = 0;
             b[bl++] = 'B'; b[bl++] = 'A'; b[bl++] = 'N'; b[bl++] = 'K'; b[bl++] = ' ';
             b[bl++] = (char)('0' + (bank_i + 1) % 10);
             b[bl++] = '/';
             b[bl++] = (char)('0' + (WV_BANK_COUNT % 10));
             b[bl] = 0;
-            if (src != SRC_SYNTH) {
-                b[0] = 'S'; b[1] = 'L'; b[2] = 'O'; b[3] = 'T';
-                bl = 5;
-                b[bl++] = (char)('0' + (smp_count ? (smp_i + 1) % 10 : 0));
+            cv_text(186, 8, &FONT_XS, b, sk.ink);
+            cv_text(186, 26, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
+
+            bl = 0;
+            b[bl++] = 'M'; b[bl++] = 'O'; b[bl++] = 'R'; b[bl++] = 'P'; b[bl++] = 'H';
+            b[bl] = 0;
+            cv_text(186, 56, &FONT_XS, b, sk.ink);
+            cv_text(186, 74, &FONT_XS, pct(k_morph), sk.ink_hi);
+        } else {
+            /* The sample sources have no picture yet -- a sample needs a min/max
+             * envelope and GRAN needs the grain window, and neither has a design. They
+             * get the icon and their material's name at the size the table gets, so the
+             * band is never an empty hole when the source changes. */
+            src_icon(&sk, 4, 4, 88, 100);
+            if (!smp_count) {
+                cv_text(100, 46, &FONT_XS, "NO SAMPLES", sk.ink);
+            } else {
+                cv_text(100, 40, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL",
+                        sk.ink_hi);
+                bl = 0;
+                b[bl++] = 'S'; b[bl++] = 'L'; b[bl++] = 'O'; b[bl++] = 'T'; b[bl++] = ' ';
+                b[bl++] = (char)('0' + (smp_i + 1) % 10);
                 b[bl++] = '/';
                 b[bl++] = (char)('0' + (smp_count % 10));
                 b[bl] = 0;
+                cv_text(100, 58, &FONT_XS, b, sk.ink);
             }
-            cv_text(4, 6, &FONT_XS, b, sk.ink);
-            if (src == SRC_SYNTH)
-                cv_text(4, 30, &FONT_XS, WV_BANK_NAME[bank_i], sk.ink_hi);
-            else if (!smp_count)
-                cv_text(4, 30, &FONT_XS, "NONE", sk.track);
-            else
-                cv_text(4, 30, &FONT_XS, smp[smp_i].name[0] ? smp[smp_i].name : "SMPL", sk.ink_hi);
-            /* the bar is the bank/slot index, so the cell reads like the knobs above */
-            cv_rect(4, 40, 72, 8, sk.track);
-            {
-                int32_t n = (src == SRC_SYNTH) ? (int32_t)bank_i
-                            : (smp_count ? (int32_t)smp_i : 0);
-                int32_t mx = (src == SRC_SYNTH) ? (int32_t)WV_BANK_COUNT - 1
-                            : (smp_count ? (int32_t)smp_count - 1 : 1);
-                int32_t fw;
-                if (mx < 1)
-                    mx = 1;
-                fw = (n + 1) * 72 / (mx + 1);
-                if (fw > 72) fw = 72;
-                if (fw < 1) fw = 1;
-                cv_rect(4, 40, fw, 8, sk.ink_hi);
+            if (src == SRC_GRAN) {
+                cv_text(186, 8, &FONT_XS, "SPRAY", sk.ink);
+                cv_text(186, 26, &FONT_XS, pct(k_spray), sk.ink_hi);
+                cv_text(186, 56, &FONT_XS, "GRAINSZ", sk.ink);
+                cv_text(186, 74, &FONT_XS, sel_time(k_grain, 3), sk.ink_hi);
             }
         }
-
-        /* cell 2: SPRAY, GRAN only. Empty otherwise, page or not: the strip already
-         * says ENV PAGE, and saying it here as well was the same fact twice on one
-         * screen -- measured, both drew the identical string. An empty cell between
-         * two knobs is honest; a repeated one is noise. */
-        if (src == SRC_GRAN)
-            knob(84, 6, 72, "SPRAY", pct(k_spray), k_spray, 1);
-
-        /* cell 3: MORPH, or GRAIN SIZE when the table path is not sounding */
-        if (src == SRC_GRAN)
-            knob(164, 6, 72, "GRAIN SIZE", sel_time(k_grain, 3), k_grain, 1);
-        else
-            knob(164, 6, 72, "MORPH", pct(k_morph), k_morph, 0);
-    }
-    cv_blit(0, 124);
-
-    /* the mode strip: the source's shape in the corner, and the positions that have
-     * no encoder to be drawn next to. B_ENV's page and B_SEL's source both live here
-     * because the panel has no spare lamps for either. */
-    /* the mode strip: the source's shape, and what the panel cannot show any other way.
-     * BANK and SLOT used to live here and have moved up into row B, where the encoder
-     * that changes them is. What is left here is the source icon (the only thing that
-     * says which engine without being read) and the page marker. */
-    cv_begin(240, 40, sk.bg);
-    if (src == SRC_SYNTH) {
-        /* The strip carries the material: the source's own shape on the left, the
-         * selected table on the right. The icon still earns its corner -- it is the one
-         * thing that names the source without being read -- so it shrinks rather than
-         * leaves.
-         *
-         * Split at 40 px: the icon is 32 wide and the wave needs the rest. The wave is
-         * drawn a pixel inside the band at each end so its first and last columns do not
-         * sit on the border where they read as clipping. */
-        src_shape(&sk, 44, 6, 192, 28);
         if (env_page)
-            cv_text(2, 2, &FONT_XS, "ENV", sk.ink);
+            cv_text(4, 92, &FONT_XS, "ENV PAGE", sk.ink);
+    }
+    cv_blit(0, 68);
+
+    cv_begin(240, 64, sk.bg);
+    if (env_page) {
+        /* The ENV page: the same four bars in the same four positions, so the hand
+         * does not move — only what they mean. Time in ms/s as text, because "37" on
+         * an envelope is unreadable and "37 ms" is not. */
+        knob(4,   4, 54, "ATTACK",  sel_time(k_eg_a, 0), k_eg_a, 1);
+        knob(62,  4, 54, "DECAY",   sel_time(k_eg_d, 1), k_eg_d, 1);
+        knob(120, 4, 54, "SUSTAIN", pct(k_eg_s), k_eg_s, 1);
+        knob(178, 4, 54, "RELEASE", sel_time(k_eg_r, 2), k_eg_r, 1);
     } else {
-        src_icon(&sk);
-        if (env_page)
-            cv_text(112, 14, &FONT_XS, "ENV PAGE", sk.ink_hi);
-        else if (!smp_count)
-            cv_text(112, 14, &FONT_XS, "NO SAMPLES", sk.ink);
+        knob(4,   4, 54, "CUT",    pct(k_cut), k_cut, 0);
+        knob(62,  4, 54, "RES",    pct(k_res), k_res, 0);
+        knob(120, 4, 54, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
+        knob(178, 4, 54, "AMOUNT", pct(k_amount), k_amount, 0);
     }
-    cv_blit(0, 200);
+    cv_blit(0, 176);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the
