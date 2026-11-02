@@ -53,6 +53,34 @@ static int fake_run(void (*fn)(uint32_t), uint32_t arg)
 }
 
 static int fake_wait(void) { return 0; }
+
+/* A second core that runs the job at `wait` instead of at `run`.
+ *
+ * The plain fake runs the job inside run(), so it finishes before the caller renders its
+ * own half: the two halves never overlap, and a race between them cannot be seen. That
+ * is exactly why the device had a hiss the simulator did not: both halves were adding
+ * into the same buffer (`out[k] += amp`), which is fine one after the other and is a
+ * lost-update race when they overlap.
+ *
+ * This fake keeps the job and runs it at wait, so the caller's half is already in `out`
+ * when the job starts -- the worst case of the overlap, and enough to fail any code that
+ * lets the second half write the caller's buffer. */
+static void (*held_fn)(uint32_t);
+static int held_run(void (*fn)(uint32_t), uint32_t arg)
+{
+    (void)arg;
+    jobs_run++;
+    held_fn = fn;
+    return 1;
+}
+static int held_wait(void)
+{
+    if (held_fn) {
+        held_fn(0u);
+        held_fn = 0;
+    }
+    return 0;
+}
 static void fake_sync(void) {}
 
 /* A second core that refuses the job: the app must still render everything. */
@@ -280,6 +308,51 @@ static void test_split_follows_the_active_voices(void)
     ck(bad == 0, "a partial voice pool splits to the same audio, balanced across the cores");
 }
 
+/* The second core must not write the caller's buffer.
+ *
+ * With the job run at wait (held_run/held_wait) the two halves overlap the way they do
+ * on the device. If the job adds into `out` -- which it did, `out[k] += amp` -- then its
+ * writes land on top of samples CPU0 has already written, and updates are lost. The
+ * audio is then the same signal with broadband noise on it: hiss, worse with more
+ * voices, absent on the host's inline fake. That is the bug this test exists for.
+ *
+ * It compares against wv_render (one core, one buffer), so any lost or doubled update
+ * shows up as a difference far larger than the 1-LSB summation-order noise. */
+static void test_split_does_not_race_on_the_output(void)
+{
+    static wv_state a, b;
+    static float oa[BLK], ob[BLK];
+    float worst = 0.0f, peak = 0.0f;
+    uint32_t k, i;
+    int aliased = 0;
+
+    printf("split, the job's buffer:\n");
+    setup();
+    scene(&a);
+    scene(&b);
+
+    for (k = 0; k < 20; k++) {
+        memset(oa, 0, sizeof oa);
+        memset(ob, 0, sizeof ob);
+        wv_render(&a, &bank, oa, BLK, 4096.0f);
+        jobs_run = 0;
+        wv_render_split(&b, &bank, ob, BLK, 4096.0f, 1, held_run, held_wait, fake_sync);
+        if (wv_last_job_buffer() == (const float *)ob)
+            aliased = 1;
+        for (i = 0; i < BLK; i++) {
+            float d = fabsf(oa[i] - ob[i]);
+            if (d > worst) worst = d;
+            if (fabsf(oa[i]) > peak) peak = fabsf(oa[i]);
+        }
+    }
+    printf("  job buffer %s the caller's, worst difference %.2f LSB, peak %.3f\n",
+           aliased ? "IS" : "is not", worst * 8388608.0f, peak);
+    ck(!aliased, "the second core renders into its own buffer, not the caller's");
+
+    /* And the sum must still be one core's audio. */
+    ck(worst <= 2.0f / 8388608.0f, "the two buffers sum to one core's audio");
+}
+
 /* ─── 2. the fallbacks ────────────────────────────────────────────────────── */
 
 static void test_refused_job_still_renders(void)
@@ -484,6 +557,7 @@ int main(void)
     test_split_is_identical();
     test_split_with_moving_knobs();
     test_split_follows_the_active_voices();
+    test_split_does_not_race_on_the_output();
     test_refused_job_still_renders();
     test_dead_core_still_renders();
     test_grain_voice_is_a_voice();

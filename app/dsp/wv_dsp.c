@@ -535,10 +535,25 @@ void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
  * the render is synchronous — the job is handed over and waited for inside one
  * app_render call, so there is exactly one job in flight at any time, and the second
  * core is only ever handed the top half of the pool. */
+/* The second core's own output. It must NOT write the caller's buffer.
+ *
+ * Both halves used to add into `out` (`out[k] += amp`), and on one core that is right.
+ * Across two cores it is a race on every sample: both do a read-modify-write of the same
+ * float, and the interleaving loses updates at random -- which is white noise, louder
+ * with more voices, and it cannot happen on the host because the host's second core runs
+ * the job inline. So the device had a hiss the simulator could not reproduce, from four
+ * notes up (the cut only starts putting work on core 1 once there are enough active
+ * voices), and that threshold is what identified it.
+ *
+ * Now each core writes only its own memory and CPU0 sums the two after the wait. The
+ * sum is in a fixed order, so it is deterministic; the cost is one add per sample, done
+ * once. */
+#define WV_JOB_BLOCK_MAX 256u   /* the app's BLK_MAX; wv_render_split clamps to it */
+static float job_out[WV_JOB_BLOCK_MAX];
+
 static struct {
     wv_state *s;
     const wv_bank *b;
-    float *out;
     uint32_t n;
     float master;
     uint32_t mid;       /* the split: the second core renders [mid, WV_VOICES) */
@@ -546,14 +561,25 @@ static struct {
 
 static void job_half(void *arg)
 {
+    uint32_t k;
+
     (void)arg;
-    voice_block(job.s, job.b, job.out, job.n, job.master, job.mid, WV_VOICES);
+    /* its own buffer, cleared here so the sum below needs no clearing step */
+    for (k = 0; k < job.n; k++)
+        job_out[k] = 0.0f;
+    voice_block(job.s, job.b, job_out, job.n, job.master, job.mid, WV_VOICES);
 }
 
 /* The cut the last split used, for the tests: the balance is invisible in the audio
  * (both cuts render the same samples), so the only way to assert that four notes no
  * longer all land on core 0 is to look at where the cut was put. */
 uint32_t wv_last_split(void) { return job.mid; }
+
+/* The buffer the next job will render into, for the tests: the invariant is that it is
+ * NOT the caller's `out`. Two cores adding into one buffer lose updates at random, which
+ * is hiss; it cannot be shown by the audio on the host because the host's second core
+ * runs the job inline, so the property has to be read directly. */
+const float *wv_last_job_buffer(void) { return job_out; }
 
 /* The platform's signature: void (*)(uint32_t). */
 static void job_half_u32(uint32_t arg)
@@ -566,6 +592,9 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
                      int cpu2, int (*run)(void (*)(uint32_t), uint32_t),
                      int (*wait)(void), void (*sync)(void))
 {
+    if (n > WV_JOB_BLOCK_MAX)
+        n = WV_JOB_BLOCK_MAX;
+
     if (cpu2 && run && wait) {
         /* Where to cut the voice pool.
          *
@@ -605,7 +634,6 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
 
         job.s = s;
         job.b = b;
-        job.out = out;
         job.n = n;
         job.master = master;
         job.mid = mid;
@@ -633,8 +661,13 @@ void wv_render_split(wv_state *s, const wv_bank *b, float *out, uint32_t n, floa
              * the difference between "slower" and "wrong". */
             if (wait() != 0)
                 voice_block(s, b, out, n, master, mid, WV_VOICES);
-            else if (sync)
-                sync();                 /* drain its writes to `out` before the bus */
+            else {
+                uint32_t k;
+                if (sync)
+                    sync();             /* drain its writes to job_out before reading it */
+                for (k = 0; k < n; k++)
+                    out[k] += job_out[k];
+            }
 
             smooth_step(s, n);
             bus_limit(out, n);
