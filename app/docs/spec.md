@@ -526,9 +526,27 @@ dropped job whose half is not re-rendered means four voices vanish — "slower",
 polyphony. With it the app keeps playing on one core until power-off, and the split
 path degrades to exactly the single-core path.
 
-**What is NOT measured**: that the split halves the time. That needs the device —
-the 8 ms job timeout, the 2816 B stack, and the fact that a job runs *from flash*
-while CPU0 reads the same flash. It is on the Gate B list.
+**Measured on the device**: the split halves the time. GRAN at four notes read 51% of
+the audio budget before this and 26% after, and eight notes read 51% in both.
+
+That comparison is what proves the second core does the work, and it had to be measured
+because nothing else can answer it. `plat_cpu2_wait()` returns -1 when the core has been
+given up, and the caller then renders that half itself: a dead core yields complete,
+correct audio and an unchanged load figure. Only a *drop* in the figure distinguishes
+the two, and only once the cut moves — at a fixed cut through the pool's middle, four
+notes sat in voices 0..3 and the reading was the same as eight.
+
+The debug corner reports the job count and the per-job handover interval (`c2 94u240`),
+and the second core's stack watermark (`s412`), which only that core can write. Neither
+is a substitute for the load comparison: the handover interval covers CPU0's own half
+too, so it reads about half a block whether or not the core did anything.
+
+Still unmeasured: the 8 ms job timeout, the 2816 B stack against the real deepest call
+chain, and the cost of a job running *from flash* while CPU0 reads the same flash. Those
+remain on the Gate B list. The clock cannot be reported at all: `C0_TL_CKCNT` does not
+count on this part (see `fm1_perf.h` — "not verified on hardware" is now settled), so
+the 360 MHz is configuration read from the PLL registers by the BSP, not a measurement,
+and the app cannot see those registers.
 
 ---
 
