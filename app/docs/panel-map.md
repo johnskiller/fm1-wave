@@ -210,6 +210,38 @@ because MORPH has to stay readable across frames that differ by 3.4 dB. A sample
 dynamics ARE its shape: the drum's decaying bars are the information. One scale is chosen
 for the whole slot, so a quiet sample is drawn quiet.
 
+**The picture stays put when you stop playing.** Two complaints, one cause:
+
+- *while playing the bars and the line move too fast to see.* Measured, 210 px/s on the
+  demo kit -- a bar crosses the 176 px band in 0.84 s, faster than the eye resolves.
+- *when it stops, everything disappears.* The playhead was drawn only while a cloud was
+  running, so a still frame had nothing to look at.
+
+So the playhead now parks where the note left it and the next note resumes from there,
+per slot (`gran_resume[]`). The playhead is drawn at all times; the bars are not, because
+a bar would claim a grain is reading and "two bars, then none" is the honest statement.
+The loop marks are always drawn.
+
+```
+measured: idle x=4 (bar 0)  play x=86 (bars 2)  stopped x=88 (bars 0)
+          stopped+500ms x=88  next note x=169 (bars 2)  stopped x=172 (bars 0)
+```
+
+**A consequence worth knowing**: positions accumulate. Each note parks where it stopped,
+so a run of short notes walks forward and wraps around the slot rather than returning to
+the same place. That is the resume behaviour working, but it means SPRAY's standoff from
+the playhead varies with where the material happens to be parked -- and near the slot's
+edges the scattered bars clamp (spawn clamps rather than wraps), so "distance from the
+playhead" stops meaning "how far the grain was scattered". The test therefore asserts the
+standoff only at SPRAY 0, where it is exactly zero wherever the playhead is, and uses the
+gap between the two bars for the rest.
+
+**Resuming must not move the loop.** `wv_note_on_grain` passes its `start` as both the
+playhead and the loop start, which is right for a fresh note. Measured, resuming at 85 %
+of the slot shrank the loop to x 88..179, so the cloud read only the tail of the material
+and wrapped there. `wv_grains_loop` exists to set the range without touching the
+playhead, and GRAN calls it after starting a resumed note.
+
 **GRAN: what the player reported, and what it was.** Two defects, and the first one is
 worth keeping because the guess was reasonable and wrong:
 

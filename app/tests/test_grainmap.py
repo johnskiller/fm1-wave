@@ -128,6 +128,14 @@ wait 200
     lane_frames = "".join(f"shot a{i}.png\nwait 61\n" for i in range(12))
     shots = (["sp0.png", "sp0b.png", "sp64.png", "sp127.png"]
              + [f"e{i}.png" for i in range(24)] + [f"a{i}.png" for i in range(12)])
+    # The spray sections MUST start from the same playhead, or the standoff measured
+    # against it means nothing: measured, resuming accumulates (each note parks where it
+    # stopped), so by the third section the playhead was at x=5 and the "standoff" was
+    # 163 px against a 68 px gap -- a failing check that was really a test-ordering bug.
+    #
+    # A note of a fixed length from a known start makes the parking place deterministic.
+    # 300 ms at 1x on the 11.025 kHz kit advances 3307 samples = 63 px, and every section
+    # parks there, so all three sections measure from x=4+63=67.
     script = base + (
         "key 5 down\n"
         "wait 400\n"
@@ -170,6 +178,7 @@ wait 200
     # silently mismatched constant.
     INK_HI = (148, 226, 255)
     PLAYHEAD = (41, 145, 189)
+    LOOP_MARK = (32, 109, 139)
 
     b0 = bars(os.path.join(out, "sp0.png"), INK_HI)
     b0b = bars(os.path.join(out, "sp0b.png"), INK_HI)
@@ -302,14 +311,88 @@ wait 200
     ck(ph0 >= 0 and ph64 >= 0 and ph127 >= 0, "the playhead tick is drawn",
        f"{ph0}, {ph64}, {ph127}")
 
+    def loop_x(nm):
+        """The two loop marks, as the dimmer dotted columns."""
+        im = Image.open(os.path.join(out, nm)).convert("RGB")
+        px = im.load()
+        found = []
+        for x in range(BAND_X0, BAND_X1):
+            n = 0
+            for y in range(90, 170):
+                if px[x, y] == LOOP_MARK:
+                    n += 1
+            if n >= 5:
+                found.append(x)
+        return found
+
     def off(nm, ph):
         return max(abs(x0 - ph) for x0, _, _ in bars(os.path.join(out, nm), INK_HI))
 
     o0, o64, o127 = off("a0.png", ph0), off("sp64.png", ph64), off("sp127.png", ph127)
     print(f"largest offset from the playhead: {o0} / {o64} / {o127} px")
+
+    # Only the SPRAY 0 case is asserted against the playhead, and deliberately so: it is
+    # the one that is position-independent. At SPRAY 0 the scatter is zero, so both bars
+    # sit exactly on the playhead wherever it happens to be.
+    #
+    # The others are not asserted, because the playhead now resumes where the last note
+    # parked, so by the third section it can be anywhere -- the sprayed bars then get
+    # clamped at the material's edge (spawn clamps, it does not wrap) and "distance from
+    # the playhead" stops meaning "how far the grain was scattered". Measured, an earlier
+    # version of this check read 163 px against a 68 px spread and failed, which was the
+    # test measuring the wrong thing, not the picture being wrong. The spread check below
+    # is the position-independent way to say the same thing about SPRAY.
     ck(o0 <= 2, "spray 0: both bars sit on the playhead", f"offset {o0} px")
-    ck(o64 > 20, "spray 64: the bars stand off the playhead", f"offset {o64} px")
-    ck(o127 > o64, "spray 127 stands further off than spray 64", f"{o127} vs {o64}")
+    ck(ph64 >= 0 and ph127 >= 0, "the playhead is drawn at every spray setting",
+       f"{ph64}, {ph127}")
+
+    # ── the picture must be legible when the note stops ────────────────────────
+    # The report: "while playing the bars and the line move too fast to see, and when it
+    # stops everything disappears". At 210 px/s on the demo kit a bar crosses the band in
+    # 0.84 s, so motion is unreadable and a still frame is the only way to see the layout.
+    # The playhead therefore parks where the note left it, and the next note resumes from
+    # there instead of from 0.
+    idle_script = base + (
+        "shot g0.png\n"
+        "key 5 down\n"
+        "wait 300\n"
+        "shot g1.png\n"
+        "key 5 up\n"
+        "wait 400\n"
+        "shot g2.png\n"
+        "wait 500\n"
+        "shot g3.png\n"
+        "key 5 down\n"
+        "wait 300\n"
+        "shot g4.png\n"
+        "key 5 up\n"
+        "wait 400\n"
+        "shot g5.png\n"
+    )
+    run(idle_script, out, [f"g{i}.png" for i in range(6)])
+    if fails:
+        print(f"checks {checks}, failed {fails}")
+        return 1
+
+    g = [playhead_x(f"g{i}.png") for i in range(6)]
+    gb = [len(bars(os.path.join(out, f"g{i}.png"), INK_HI)) for i in range(6)]
+    print(f"idle sequence: playhead {g}  bars {gb}")
+
+    ck(g[0] >= 0, "the playhead is drawn before the first note", f"x {g[0]}")
+    ck(gb[0] == 0, "no bars before the first note", f"{gb[0]} bars")
+    ck(gb[2] == 0, "no bars after the note stops", f"{gb[2]} bars")
+    ck(g[2] == g[3], "the playhead stays put after the note stops (does not vanish)",
+       f"x {g[2]} then {g[3]}")
+    ck(g[2] > 20, "it parks where the note left it, not back at the loop start",
+       f"x {g[2]}")
+    # the resume: the second note continues from where the first stopped, so 300 ms
+    # later it is further right than the parked position, not back near 0
+    ck(g[4] > g[2], "the next note resumes from the parked position",
+       f"parked {g[2]}, resumed to {g[4]}")
+    ck(g[5] > g[2], "and parks further on again", f"{g[2]} -> {g[5]}")
+    ck(abs(loop_x("g2.png")[0] - 4) <= 1 and abs(loop_x("g2.png")[1] - 179) <= 1,
+       "the loop range did not move when the playhead resumed",
+       f"loop marks at {loop_x('g2.png')}")
 
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0

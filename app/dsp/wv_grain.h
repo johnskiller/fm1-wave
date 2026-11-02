@@ -113,6 +113,19 @@ void wv_grains_start(wv_grains *gr, const wv_sample *smp, uint32_t start, uint32
  * (wv_grain_len), `spray` 0..127 scatters grain starts. */
 float wv_grains_next(wv_grains *gr, const wv_sample *smp, float len_out, float spray);
 
+/* Set the loop range without touching anything else.
+ *
+ * `wv_grains_start` takes one `start` and uses it for both the playhead and the loop,
+ * which is right for a fresh note but wrong once the playhead resumes somewhere in the
+ * middle: resuming at 85 % of the slot made the loop start at 85 % too, so the cloud
+ * read 15 % of the material and wrapped -- measured, the loop marks jumped from
+ * x 4..179 to x 88..179 on the second note.
+ *
+ * The playhead is wrapped into the new range here, so a range that no longer contains it
+ * cannot leave the cloud reading outside its own loop.
+ */
+void wv_grains_loop(wv_grains *gr, uint32_t start, uint32_t end);
+
 /* How many grains are sounding (the UI and the tests). */
 uint32_t wv_grains_on(const wv_grains *gr);
 

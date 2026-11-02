@@ -126,6 +126,27 @@ void wv_grains_start(wv_grains *gr, const wv_sample *smp, uint32_t start, uint32
     gr->loop = (uint8_t)(loop ? 1 : 0);
 }
 
+void wv_grains_loop(wv_grains *gr, uint32_t start, uint32_t end)
+{
+    float span;
+
+    if (end <= start + 1u)
+        return;
+    gr->loop_start = (float)start;
+    gr->loop_end = (float)(end - 1u);
+    gr->loop = 1;
+
+    span = gr->loop_end - gr->loop_start;
+    if (span <= 0.0f)
+        return;
+    /* bring the playhead into the range without restarting the cloud: a note that
+     * resumes outside its loop is a note reading the wrong material */
+    while (gr->play < gr->loop_start)
+        gr->play += span;
+    while (gr->play > gr->loop_end)
+        gr->play -= span;
+}
+
 /* Spawn one grain at the playhead.
  *
  * `t0` is where in its own window the grain begins and `back` is how much material
