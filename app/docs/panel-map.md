@@ -298,9 +298,18 @@ whole panel is coloured by source and one icon is drawn:
 
 | source | ground | ink | icon |
 |---|---|---|---|
-| SYNTH | black | the palette's own amber (theme untouched) | a saw, two cycles |
+| SYNTH | `RGB(46,30,8)` | amber `RGB(232,136,30)` / `255,184,70` | a saw, two cycles |
 | SMPL | `RGB(13,41,22)` | green `RGB(80,220,120)` / `150,255,175` | a sine with a decay |
 | GRAN | `RGB(8,38,52)` | cyan `RGB(60,180,235)` / `150,225,255` | a sine under scattered dots |
+
+All three follow one structure: the ground is a dimmed version of the hue, `ink` is the
+hue, `ink_hi` is its highlight step, and white is the accent for "what is being touched"
+only. SYNTH used to be the exception -- black ground, neutral grey labels, amber only on
+the curve -- on the argument that overriding the palette would fight `GLOBAL`'s THEME.
+It does not: three fixed source colours and a user-selectable theme cannot both be true,
+and the three colours are what the panel is for, so THEME no longer reaches this screen.
+Half-theme/half-fixed was the worst of both: the source colour looked like an
+afterthought on the source you spend the most time in.
 
 Two earlier versions were wrong and are recorded here because the reason matters more
 than the result:

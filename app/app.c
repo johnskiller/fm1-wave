@@ -570,12 +570,29 @@ static src_skin_t src_skin(void)
         k.ink_hi = RGB(150, 225, 255);
         k.acc    = RGB(205, 245, 255);
     } else {
-        /* SYNTH keeps the platform's own palette: it is the default, and the theme is
-         * the wearer's choice -- overriding it here would fight GLOBAL's THEME. */
-        k.bg     = C_BLACK;
-        k.track  = C_LINE;
-        k.ink    = C_GRAY;
-        k.ink_hi = C_HI;
+        /* SYNTH: amber, the AMBER palette's own two steps, on a ground pulled down from
+         * them.
+         *
+         * This used to keep the platform palette (black ground, neutral grey labels,
+         * amber only on the curve), on the argument that overriding it would fight
+         * GLOBAL's THEME. That argument does not hold: the three sources are a fixed
+         * amber/green/blue-white mapping by design, so THEME stopped reaching this
+         * screen the moment the second colour was added. What it actually produced was
+         * an inconsistency -- two sources tinted throughout and the default one black
+         * with grey labels -- and a screen where the source colour looked like an
+         * afterthought on the source you spend the most time in.
+         *
+         * Same structure as the other two: ground is a dimmed version of the hue, ink
+         * is the hue, ink_hi is its highlight step. White stays the accent for "what
+         * is being touched" only, in all three.
+         *
+         * The cost, stated: APP_PALETTE / THEME now changes nothing on this screen.
+         * Three fixed source colours and a user-selectable theme cannot both be true;
+         * three colours is what the panel is for. */
+        k.bg     = RGB(46, 30, 8);
+        k.track  = RGB(30, 20, 5);
+        k.ink    = RGB(232, 136, 30);
+        k.ink_hi = RGB(255, 184, 70);
         k.acc    = C_WHITE;
     }
     return k;
