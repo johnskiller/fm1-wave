@@ -27,6 +27,7 @@ static wv_bank  bank = { WV_BANKS[0] };
 /* The sample pool, as the platform handed it over. `pool` points into the resource
  * blob, not a copy: the blob is 276 KB of flash and there is no RAM for a copy. */
 static const uint8_t *pool;
+static void           pool_poll(void);      /* (defined below: app_render asks it every block) */
 static uint32_t       pool_len;
 static wv_sample      smp[SMP_MAX];
 static uint8_t        smp_count;
@@ -355,6 +356,8 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     /* MASTER goes into the DSP now, before the bus limiter: the limiter is the only
      * non-linear stage on the bus, and it used to see the full-scale sum whatever
      * the pot said. `scope` is the same sum before master and the limiter. */
+    pool_poll();          /* before the render: a pool that arrived mid-note is playable now */
+
     wv_render_split(&dsp, &bank, mono, n, (float)master_q12, cpu2, cpu2_run_timed,
                     cpu2_wait_timed, plat_cpu2_sync, scope);
 
@@ -2123,6 +2126,10 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "env"))        { *got = env_page; return 1; }
     if (!strcmp(what, "lfo"))        { *got = lfo_page; return 1; }
     if (!strcmp(what, "tap_pk"))      { *got = scope_pk_q; return 1; }
+    /* How many slots the pool gave: 0 means the app is playing without material, which
+     * is a state the screen shows (NO SAMPLES) and a test has to be able to assert
+     * without reading pixels. */
+    if (!strcmp(what, "smp_count"))   { *got = smp_count; return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
@@ -2277,7 +2284,34 @@ void app_backup_flush(void)    { }
 void app_backup_hold(int on)   { (void)on; }
 void app_backup_restored(void) { }
 
+/* The pool is read once at boot, and until now that was the whole story: resources
+ * arrive over USB from the host, and the platform reloads the app after it writes
+ * them (rs_begin calls app_panic, then app_ui_init), but this app's own copy of
+ * `smp_count` was taken in app_init and never taken again. Install a pool into a
+ * running FM-1 and it plays NO SAMPLES until the next power cycle -- the transfer
+ * reports success, the region checks out, and the instrument denies having any
+ * material.
+ *
+ * So: while there is no material, ask again. plat_res re-reads the region's commit
+ * record every call (res.c: res_ok is refreshed by res_check after a write), so this
+ * costs a flash header read per tick and nothing at all once a pool is there. It
+ * cannot resurrect a pool that went bad -- that needs a boot -- but a pool that
+ * arrived cannot be missed. */
+static void pool_poll(void)
+{
+    if (smp_count)
+        return;
+    pool = plat_res(&pool_len);
+    smp_count = pool ? (uint8_t)wv_smp_parse(pool, pool_len, smp, SMP_MAX) : 0;
+    if (smp_count) {
+        smp_i = 0;
+        reslice();
+    }
+}
+
 void app_tick(void)
 {
     touch_update();
+    pool_poll();
 }
+
