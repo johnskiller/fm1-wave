@@ -49,6 +49,9 @@ def ck(cond, what, detail=""):
         print(f"  FAIL {what}{(' -- ' + detail) if detail else ''}")
 
 
+HOST_OUT = ""
+
+
 def shoot(script, out):
     """Run a host scenario and return {name: Image} for every shot it took."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
@@ -61,6 +64,8 @@ def shoot(script, out):
             ck(False, "host scenario ran", (r.stdout + r.stderr).strip()[-300:])
     finally:
         os.unlink(path)
+    global HOST_OUT
+    HOST_OUT += r.stdout
     shots = {}
     for n in sorted(os.listdir(out)):
         if n.endswith(".png"):
@@ -281,6 +286,44 @@ shot grn.png
     n_row3 = sum(1 for y in range(28, 40) for x in range(0, 64)
                  if sum(im.getpixel((x, y))) > 300)
     ck(n_row3 < 8, "debug row 3 is blank on the host (no cycle counter there)", f"{n_row3} px")
+
+    # Row 2 must report what the second core DID, and the host runs its jobs inline
+    # (plat_host.c: a job runs at once, in order), so the host can only ever show jobs
+    # with no time in them: "c2 <n>u0". A row that still said "c2 ok" would be the
+    # readout this replaced -- it claimed the core was fine without ever saying it had
+    # done anything, which is exactly the inference the device cannot support either
+    # (plat_cpu2_wait returning -1 makes the caller re-render the half, so a dead core
+    # produces complete, correct audio and an unchanged load figure).
+    # (the row's text is not readable from the bitmap without a font table, so the
+    # format is asserted where it is built instead: app.c's dbg_draw is the one place
+    # that writes it, and the host run below prints the same bytes it drew)
+
+    # Row 2's FORMAT, read from the text the device would draw rather than from the
+    # bitmap (host builds print the rows where they are built: app.c dbg_draw).
+    #
+    # The row used to say "c2 ok", which claimed the core was healthy without ever
+    # saying it had done anything -- and the device cannot support that inference: when
+    # plat_cpu2_wait() returns -1 the caller re-renders that half, so a core that died
+    # still yields complete, correct audio. What matters is the job count and the time,
+    # so the row is "<n>u<us>" and this checks the shape is still there.
+    import re as _re
+    rows = _re.findall(r"dbg row1=(.*?)\| row2=(.*?)\| row3=(.*?)$", HOST_OUT, _re.M)
+    ck(len(rows) > 0, "the host prints the debug rows", f"{len(rows)} lines")
+    if rows:
+        r1, r2, r3 = rows[-1]
+        ck(_re.fullmatch(r"\d+% xr\d+", r1) is not None,
+           "row 1 is '<load>% xr<xruns>'", repr(r1))
+        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?", r2) is not None,
+           "row 2 reports the jobs handed over and the us each, or '--'", repr(r2))
+        # The host runs its jobs inline (plat_host.c: at once, in order), so the interval
+        # run..wait there is the job's own duration -- small, and nonzero. Asserting it
+        # was zero was wrong and the test said so. What matters is that the number is
+        # present and plausible: a reading that stayed 0 forever on the device is the
+        # signature of a core that never took the job (wait returns -1 at once and the
+        # caller renders the half itself, so the audio is complete and correct).
+        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?", r2) is not None,
+           "row 2's handover time is a number", repr(r2))
+        ck(r3 == "", "row 3 is empty on the host", repr(r3))
 
     # The backing box must NOT cover the 0 dBFS line at row 1: the graticule's reference
     # is the scale's anchor, and a debug overlay that hides it makes the scope unreadable

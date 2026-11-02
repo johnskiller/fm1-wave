@@ -257,6 +257,75 @@ static void ui_apply(void)
 
 /* --------------------------------------------------------------- audio --- */
 
+/* ═══ is the second core doing the work, or is the platform covering for it ═══
+ *
+ * This exists because the load percentage cannot answer that question and neither can
+ * the audio. plat_cpu2_wait() returns -1 when the core has been given up ("the job
+ * dropped: do it yourself"), the caller then renders that half on CPU0, and the output
+ * is complete and correct -- the ears cannot hear which core did the arithmetic.
+ * Measured on the device, four notes read 51% and eight also read 51%, which is
+ * consistent both with "core 2 works" and with "core 2 is dead, CPU0 does everything,
+ * and the percentage is just the total". So it gets measured, not inferred.
+ *
+ * The load percentage does not help: cpu_q12 is wall time in the audio ISR, and the
+ * wait for core 2 is inside it. Offloading makes the interval shorter, and a dead
+ * core re-rendering the half makes it longer, but the same figure could be either
+ * until the split moves -- so the split needs to be seen from both sides.
+ *
+ * What is measured here, and what each number can and cannot say:
+ *
+ *   the count of handovers -- CPU0 offered the jobs. Says nothing about them being done.
+ *   the interval run..wait -- CPU0's own half plus any wait at the end. It reads about
+ *       half a block whether the core rendered its half or refused and let the caller
+ *       re-render it (that refusal returns at once, so the short wait says nothing).
+ *   the stack watermark -- the deepest the second core's OWN stack has gone, by the
+ *       mark it leaves. Only that core writes there, so a nonzero reading is proof it
+ *       executed instructions; it cannot prove it did the audio.
+ *
+ * The number that decides it is the load percentage, compared against the same notes
+ * with the split off: a core doing half the voices makes the block about half as long
+ * as one core doing all of them, and a core that died and let the platform cover for
+ * it leaves the total exactly where one core was. Before this change four GRAN notes
+ * read 51%; if the second core works they now read about 26%, and if the fallback is
+ * covering for a dead core they still read 51%. That difference is the proof. */
+#ifdef DBG_ON
+static uint32_t c2_t0_us;           /* when the outstanding handover started, us */
+static uint32_t c2_jobs;            /* jobs handed over since boot */
+static uint32_t c2_handoff_us;      /* total inside run..wait, us */
+static uint32_t c2_slowest_us;      /* the longest single wait */
+#endif
+
+static int cpu2_run_timed(void (*fn)(uint32_t), uint32_t arg)
+{
+#ifdef DBG_ON
+    int r = plat_cpu2_run(fn, arg);
+
+    if (r) {
+        c2_t0_us = plat_ticks24() / PLAT_TICKS_PER_US;
+        c2_jobs++;
+    }
+    return r;
+#else
+    return plat_cpu2_run(fn, arg);
+#endif
+}
+
+static int cpu2_wait_timed(void)
+{
+#ifdef DBG_ON
+    uint32_t t0 = c2_t0_us;
+    int r = plat_cpu2_wait();
+    uint32_t dt = plat_ticks24() / PLAT_TICKS_PER_US - t0;
+
+    if (dt > c2_slowest_us)
+        c2_slowest_us = dt;
+    c2_handoff_us += dt;
+    return r;
+#else
+    return plat_cpu2_wait();
+#endif
+}
+
 void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 {
     static float mono[BLK_MAX];
@@ -276,8 +345,9 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 
     /* Split across both cores when the second one is up. wv_render is the same call
      * with the split off, so a one-core unit is not a different code path. */
-    wv_render_split(&dsp, &bank, mono, n, 4096.0f, cpu2, plat_cpu2_run, plat_cpu2_wait,
+    wv_render_split(&dsp, &bank, mono, n, 4096.0f, cpu2, cpu2_run_timed, cpu2_wait_timed,
                     plat_cpu2_sync);
+
 
     for (i = 0; i < n; i++) {
         float v = mono[i] * m;
@@ -1344,6 +1414,9 @@ static void dbg_measure_clock(void)
 static void dbg_draw(const src_skin_t *k)
 {
     char r[20], t[8];
+#if defined(PLAT_HOST) && defined(DBG_ON)
+    char dbg_row1_p[20] = "", dbg_row2_p[20] = "", dbg_row3_p[20] = "";
+#endif
     uint32_t pct = plat_cpu_pct();
     int32_t c2 = plat_cpu2_on();
     int32_t busy = plat_cpu2_busy();
@@ -1373,18 +1446,48 @@ static void dbg_draw(const src_skin_t *k)
         *q++ = *p++;
     *q = 0;
     cv_text(1, 4, &FONT_T, r, k->ink_hi);
+#if defined(PLAT_HOST) && defined(DBG_ON)
+    { int i = 0; while (r[i] && i < 19) { dbg_row1_p[i] = r[i]; i++; } dbg_row1_p[i] = 0; }
+#endif
 
-    /* row 2: "c2 ok" / "c2 --" / "c2 wt", and a "!" once a wait has been seen */
+    /* row 2: what the second core actually did, not whether it was switched on.
+     *
+     *   "c2 --"     it was never started, or it was given up: one core
+     *   "c2 0u"     it is on but no job was ever handed over -- it is idle, and saying
+     *               "ok" there would have been a lie
+     *   "c2 12u"    twelve jobs handed over, each taking on average one microsecond:
+     *               the handover happened and cost nothing, which means the wait did
+     *               not wait
+     *   "c2 12u184" twelve jobs, 184 us each: CPU0 spent that long inside run..wait
+     *               while the core worked -- the number that distinguishes work from a
+     *               core that died and let the platform re-render its half
+     *
+     * The unit is us per job because that is the quantity with meaning: a block is
+     * 5805 us, so a handover of ~2400 us is the second core doing about half of it. */
     q = r;
     *q++ = 'c';
     *q++ = '2';
     *q++ = ' ';
-    if (c2 <= 0) { *q++ = '-'; *q++ = '-'; }
-    else if (busy) { *q++ = 'w'; *q++ = 't'; }
-    else { *q++ = 'o'; *q++ = 'k'; }
-    if (c2 > 0 && dbg_seen_wait) *q++ = '!';
+    if (c2 <= 0) {
+        *q++ = '-';
+        *q++ = '-';
+    } else {
+        num(t, (int32_t)c2_jobs);
+        for (const char *p = t; *p; )
+            *q++ = *p++;
+        *q++ = 'u';
+        if (c2_jobs) {
+            num(t, (int32_t)(c2_handoff_us / c2_jobs));
+            for (const char *p = t; *p; )
+                *q++ = *p++;
+        }
+    }
+    if (c2 > 0 && busy) *q++ = 'w';
     *q = 0;
     cv_text(1, 16, &FONT_T, r, k->ink_hi);
+#if defined(PLAT_HOST) && defined(DBG_ON)
+    { int i = 0; while (r[i] && i < 19) { dbg_row2_p[i] = r[i]; i++; } dbg_row2_p[i] = 0; }
+#endif
 
     /* row 3: the clock, or why there is none. "ck?" would be a mystery; "ckX" with the
      * tag is a diagnosis, and one flash of the firmware should be enough to settle it.
@@ -1406,10 +1509,38 @@ static void dbg_draw(const src_skin_t *k)
     } else if (dbg_state == DBG_ST_NOTICK) {
         *q++ = 'c'; *q++ = 'k'; *q++ = 'N'; *q++ = 't';
     }
+    *q = 0;     /* r is reused: an empty row must be an empty string, not the last one */
+    /* Then the second core's stack watermark, when it has one: "360M s412".
+     *
+     * This is the one reading that cannot be produced by CPU0 doing the work. The
+     * second core's stack is marked at its start and only that core writes there, so a
+     * nonzero depth means it executed its job -- measured, not inferred from a
+     * percentage that the fallback path leaves unchanged. What it does NOT prove is
+     * that the audio it made was kept; only the load comparison does that. */
+    if (q != r && plat_cpu2_stack()) {
+        *q++ = ' ';
+        *q++ = 's';
+        num(t, (int32_t)plat_cpu2_stack());
+        for (const char *p = t; *p; )
+            *q++ = *p++;
+        *q = 0;
+    }
     if (q != r) {
         *q = 0;
         cv_text(1, 28, &FONT_T, r, k->ink_hi);
     }
+#if defined(PLAT_HOST) && defined(DBG_ON)
+    { int i = 0; while (r[i] && i < 19) { dbg_row3_p[i] = r[i]; i++; } dbg_row3_p[i] = 0; }
+#endif
+#if defined(PLAT_HOST) && defined(DBG_ON)
+    /* The host cannot read its own glyphs back, so the rows are printed where they are
+     * built: the tests assert the format of what the device would show, and the bitmap
+     * checks still cover that it drew. */
+    {
+        extern int printf(const char *, ...);
+        printf("dbg row1=%s| row2=%s| row3=%s\n", dbg_row1_p, dbg_row2_p, dbg_row3_p);
+    }
+#endif
 }
 #else
 #define dbg_draw(k)         ((void)0)
