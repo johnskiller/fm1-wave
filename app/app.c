@@ -887,39 +887,85 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
         }
     }
 
-    /* ── layer 3: the grains. One horizontal bar each: x is where it reads, its width is
-     * GRAINSIZE at this voice's pitch, its lane keeps it from hiding its neighbours, and
-     * how far apart the bars are is SPRAY. */
+    /* ── layer 3: the grains, and the playhead they are scattered around.
+     *
+     * Each bar: x is where that grain is reading right now, its width is GRAINSIZE at
+     * this voice's pitch, and it slides left to right because the readhead does.
+     *
+     * Two things were wrong in the first version, and the player saw both before I did:
+     *
+     * (a) The lane was the DSP's grain SLOT index. Slots rotate (`next = (next+1) %
+     *     WV_GRAINS`), so a grain changed lane on every respawn and the bars visibly
+     *     jumped up and down -- which reasonably looked like SPRAY but was constant at
+     *     SPRAY 0. Measured over eight frames, the upper bar's y went
+     *     125, 125, 125, 121, 121, 121, 125, 125. The lane now follows DRAWING order
+     *     (lowest position gets the upper lane), so a bar changes lane only when the two
+     *     change order, i.e. when they cross.
+     *
+     * (b) SPRAY was only readable as the distance between the two bars, which at low
+     *     settings is 17 px in a 176 px band -- easy to miss, and with nothing to measure
+     *     it against it does not read as "scatter" at all, just as "two bars somewhere".
+     *
+     *     The fix is to draw what the scatter is relative to: THE PLAYHEAD. `gr->play` is
+     *     where a grain would spawn at SPRAY 0, and `spawn` offsets from it. So a dim tick
+     *     marks the playhead and the bright bars are the grains that were thrown away
+     *     from it. SPRAY is then the distance between the tick and the bars: at 0 the bars
+     *     sit exactly on it, and as SPRAY rises they stand increasingly far off. That is
+     *     a comparison against a fixed reference instead of a distance between two moving
+     *     things, which is why it reads at 17 px and not only at 68.
+     *
+     *     It also makes the loop legible for free: the tick wraps at loop_end and the bars
+     *     land back on the left with it.
+     *
+     * The width is constant -- `length * rate` -- because that is what GRAINSIZE sets. An
+     * earlier attempt drew the *remaining* read range, which shrank as the window closed;
+     * that made the width breathe with the grain phase, and the width is the one thing
+     * here that must not move.
+     */
     if (gr) {
         float per_px = (float)s->len / (float)w;
-        for (i = 0; i < (int32_t)WV_GRAINS; i++) {
-            const wv_grain *g = &gr->g[i];
-            int32_t gx, gw, gy;
-            if (!g->on)
-                continue;
+        int32_t order[WV_GRAINS];
+        int32_t n = 0;
 
-            gx = x0 + (int32_t)(g->pos / per_px);
-            /* the material a grain consumes is length * rate; 1x here would draw the knob
-             * instead of the read */
-            gw = (int32_t)((1.0f / g->dt) * g->inc / per_px);
+        /* the playhead first, underneath: it is the reference, not a grain */
+        if (gr->started) {
+            int32_t px = x0 + (int32_t)(gr->play / per_px);
+            if (px < x0)
+                px = x0;
+            if (px > x0 + w - 1)
+                px = x0 + w - 1;
+            for (i = 0; i < h; i += 2)
+                cv_rect(px, y0 + i, 1, 1, dim(k->ink, 4, 5));
+        }
+
+        /* drawing order by position: two grains are the normal case, and this keeps the
+         * near one below the far one regardless of which slot they occupy */
+        for (i = 0; i < (int32_t)WV_GRAINS; i++)
+            if (gr->g[i].on) {
+                int32_t q = n++;
+                while (q > 0 && gr->g[order[q - 1]].pos > gr->g[i].pos) {
+                    order[q] = order[q - 1];
+                    q--;
+                }
+                order[q] = i;
+            }
+
+        for (i = 0; i < n; i++) {
+            const wv_grain *g = &gr->g[order[i]];
+            int32_t gx, gw, gy;
+
+            /* the material a grain consumes over its whole life is length * rate; 1x here
+             * would draw the knob instead of the read */
+            gw = (int32_t)((1.0f / (g->dt > 0.0f ? g->dt : 1.0f)) * g->inc / per_px);
             if (gw < 2)
                 gw = 2;                     /* a 1 px bar disappears into the material */
+
+            /* past the edge: slide back at full width. A bar one px short of the edge is
+             * still true -- a grain is reading there -- while a missing bar says nothing
+             * is reading, which is false. */
             if (gw > w)
                 gw = w;
-
-            /* A grain near the end of the slot must be drawn shorter, not dropped.
-             *
-             * The bug this replaces: clamp `gx` into the band and then shrink `gw` to
-             * whatever is left, which at the very end is zero, and a zero-width bar was
-             * `continue`d. Measured, the wrap puts the playhead on `loop_end` = len-1, so
-             * a grain starting there maps to x = 179.98 -> 180 = the right edge, and the
-             * bars vanished for a frame -- two grains sounding, nothing drawn. The
-             * picture blinked once per loop pass, which is exactly the kind of fault
-             * that gets read as a broken screen.
-             *
-             * So: slide the bar back so it stays inside, and keep its width. A bar one px
-             * short of the edge is still a true statement -- a grain is reading there --
-             * while a missing bar says nothing is reading, which is false. */
+            gx = x0 + (int32_t)(g->pos / per_px);
             if (gx + gw > x0 + w)
                 gx = x0 + w - gw;
             if (gx < x0)

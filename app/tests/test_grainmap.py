@@ -118,7 +118,16 @@ release SEL
 wait 200
 """
     frames = "".join(f"shot e{i}.png\nwait 90\n" for i in range(24))
-    shots = ["sp0.png", "sp0b.png", "sp64.png", "sp127.png"] + [f"e{i}.png" for i in range(24)]
+    # a0..a11 are the lane-stability frames. The interval must NOT be a multiple of the
+    # slot rotation period, or every frame lands on the same rotation phase and the jump
+    # is invisible: measured, hop = 998 samples = 22.63 ms, and four slots rotate every
+    # 4 x hop = 90.52 ms. Sampling at 90 ms aliased against that almost exactly, so the
+    # first version of this check passed with the bug deliberately reinjected. 61 ms is
+    # not a multiple, and the reinjection then shows four distinct lane pairs:
+    #   (121,131) (121,135) (125,131) (125,135)
+    lane_frames = "".join(f"shot a{i}.png\nwait 61\n" for i in range(12))
+    shots = (["sp0.png", "sp0b.png", "sp64.png", "sp127.png"]
+             + [f"e{i}.png" for i in range(24)] + [f"a{i}.png" for i in range(12)])
     script = base + (
         "key 5 down\n"
         "wait 400\n"
@@ -127,7 +136,7 @@ wait 200
         "expect grainpx 12\n"
         "wait 90\n"
         "shot sp0b.png\n"
-        + frames +
+        + lane_frames + frames +
         "key 5 up\n"
         "wait 200\n"
         "turn SELECT 16\n"
@@ -155,8 +164,12 @@ wait 200
         print(f"checks {checks}, failed {fails}")
         return 1
 
-    # the blue-white GRAN ink_hi, from src_skin
+    # colours from src_skin: GRAN ink_hi is the bars, and the playhead is ink dimmed to
+    # 4/5 and drawn every second row. Both are measured off the screenshot rather than
+    # recomputed, so a change to src_skin shows up as a failing check instead of a
+    # silently mismatched constant.
     INK_HI = (148, 226, 255)
+    PLAYHEAD = (41, 145, 189)
 
     b0 = bars(os.path.join(out, "sp0.png"), INK_HI)
     b0b = bars(os.path.join(out, "sp0b.png"), INK_HI)
@@ -251,6 +264,52 @@ wait 200
             bad.append((i, prev, nxt))
     ck(not bad, "a single-bar frame only ever happens across a loop wrap",
        f"frames with a bar missing mid-pass: {bad}")
+
+    # ── the lane must not follow the rotating DSP slot ─────────────────────────
+    # The bug the player reported as "the bars jump up and down, is that SPRAY?": the
+    # lane was `lane[slot index]`, and slots rotate on every respawn, so the same grain
+    # changed lane on a timer. Measured then, the upper bar's y went
+    # 125,125,125,121,121,121,125,125. Lane now follows drawing order by position, so
+    # with two grains it can only change when they cross.
+    lanes = []
+    for i in range(12):
+        b = bars(os.path.join(out, f"a{i}.png"), INK_HI)
+        lanes.append(sorted(y0 for _, _, y0 in b))
+    print(f"lane heights over 12 frames: {lanes}")
+    ck(all(len(l) == 2 for l in lanes), "both bars present in all 12 frames", f"{lanes}")
+    ck(len(set(tuple(l) for l in lanes)) == 1,
+       "the lanes are stable across respawns (not tied to the rotating slot index)",
+       f"lane heights varied: {sorted(set(tuple(l) for l in lanes))}")
+
+    # ── the playhead is the SPRAY reference ───────────────────────────────────
+    # SPRAY used to be readable only as the distance between two bars, which at 17 px in
+    # a 176 px band does not read as scatter. The dim dotted line is where a grain would
+    # spawn at SPRAY 0, so the offset from it is the scatter -- a distance to a fixed
+    # reference instead of between two moving things.
+    def playhead_x(nm):
+        im = Image.open(os.path.join(out, nm)).convert("RGB")
+        px = im.load()
+        best, bx = 0, -1
+        for x in range(BAND_X0, BAND_X1):
+            n = sum(1 for y in range(90, 170) if px[x, y] == PLAYHEAD)
+            if n > best:
+                best, bx = n, x
+        return bx if best >= 5 else -1
+
+    ph0, ph64, ph127 = (playhead_x("a0.png"), playhead_x("sp64.png"),
+                        playhead_x("sp127.png"))
+    print(f"playhead x: {ph0} / {ph64} / {ph127}")
+    ck(ph0 >= 0 and ph64 >= 0 and ph127 >= 0, "the playhead tick is drawn",
+       f"{ph0}, {ph64}, {ph127}")
+
+    def off(nm, ph):
+        return max(abs(x0 - ph) for x0, _, _ in bars(os.path.join(out, nm), INK_HI))
+
+    o0, o64, o127 = off("a0.png", ph0), off("sp64.png", ph64), off("sp127.png", ph127)
+    print(f"largest offset from the playhead: {o0} / {o64} / {o127} px")
+    ck(o0 <= 2, "spray 0: both bars sit on the playhead", f"offset {o0} px")
+    ck(o64 > 20, "spray 64: the bars stand off the playhead", f"offset {o64} px")
+    ck(o127 > o64, "spray 127 stands further off than spray 64", f"{o127} vs {o64}")
 
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0

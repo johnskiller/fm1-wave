@@ -210,6 +210,32 @@ because MORPH has to stay readable across frames that differ by 3.4 dB. A sample
 dynamics ARE its shape: the drum's decaying bars are the information. One scale is chosen
 for the whole slot, so a quiet sample is drawn quiet.
 
+**GRAN: what the player reported, and what it was.** Two defects, and the first one is
+worth keeping because the guess was reasonable and wrong:
+
+- *"the bars jump up and down -- is that SPRAY?"* No. The lane was the DSP's grain SLOT
+  index, and slots rotate (`next = (next+1) % WV_GRAINS`), so the same grain changed lane
+  every respawn -- at SPRAY 0, constantly. Measured, the upper bar's y went
+  125,125,125,121,121,121,125,125 over eight frames. The lane now follows drawing order
+  by position, so with two grains it changes only when they cross.
+- *SPRAY is hard to see.* It was only the distance between the two bars, which at low
+  settings is 17 px in a 176 px band with nothing to compare it to. The picture now draws
+  the reference the scatter is relative to: `gr->play`, where a grain would spawn at
+  SPRAY 0, as a dim dotted tick. SPRAY is then the standoff from it.
+
+```
+measured, GRAINSIZE 45 ms, note 53
+  spray   0   playhead x 140   bars x 114,114   standoff  0 px
+  spray  64   playhead x 114   bars x  71,105   standoff 43 px
+  spray 127   playhead x 114   bars x  28, 95   standoff 85 px
+```
+
+A note on testing this: 61 ms between frames, not 90. The hop is 998 samples = 22.63 ms
+and four slots rotate every 4 x hop = 90.52 ms, so sampling at 90 ms aliased against the
+rotation and the first version of the lane check passed with the bug deliberately
+reinjected. At 61 ms the reinjected bug shows four distinct lane pairs --
+(121,131) (121,135) (125,131) (125,135) -- which is exactly the jumping the player saw.
+
 **GRAN: three layers, one per visible parameter.** The design went through two failures
 first, both measured rather than argued:
 
@@ -228,12 +254,13 @@ you play higher. Drawing at 1x would picture the knob instead of the read.
 
 ```
 measured on the demo kit, GRAINSIZE 45 ms, voice at note 53:
-  spray   0   2 bars  w=12,12  x 114,114   gap  0 px   (same material, separate lanes)
-  spray  64   2 bars  w=12,12  x  70,104   gap 34 px
-  spray 127   2 bars  w=12,12  x  28, 95   gap 67 px
+  spray   0   2 bars  w=12,12  x 114,114   (same material, separate lanes)
+  spray  64   2 bars  w=12,12  x  71,105
+  spray 127   2 bars  w=12,12  x  28, 95
 ```
 
-Four fixed lanes (heights -7, +7, -3, +3 about the axis) rather than all bars on the axis:
+Four fixed lanes (heights -7, +7, -3, +3 about the axis, assigned by drawing order)
+rather than all bars on the axis:
 coincident grains are normal -- SPRAY 0 puts them at the same x by definition -- and a
 merged bar would hide the count. The lanes are fixed, not randomised, so nothing moves
 for no reason.
@@ -250,10 +277,10 @@ picture blinked once per loop pass while the DSP reported two grains. The bar no
 back to stay inside at full width: one pixel short of the edge is still a true statement
 that a grain is reading there, while a missing bar says nothing is reading, which is false.
 
-`app/tests/test_grainmap.py` (40 checks) asserts the three parameters separately -- two
-bars visible, each 12 px, gaps 0 / 34 / 67 -- and scans 24 frames of a full loop pass for
-a lost bar. The only frame allowed to show one bar is the wrap itself, where both grains
-leave and re-enter the material in the same sample.
+`app/tests/test_grainmap.py` (58 checks) asserts the three parameters separately -- two
+bars visible, each 12 px, standoffs 0 / 43 / 85 px from the playhead tick -- scans 24
+frames of a full loop pass for a lost bar, and 12 frames at 61 ms for lane stability. The
+only frame allowed to show one bar is the wrap itself.
 
 ### How these heights got here
 
