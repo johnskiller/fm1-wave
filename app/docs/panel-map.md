@@ -452,12 +452,32 @@ behind the signal.
 
 ### The material band
 
-The picture runs the full band, 232 x 80. Three values are printed on top of it, one per
-knob, in the corner that knob occupies on the panel:
+SMPL and GRAN run the picture the full band, 232 x 80, and print three values on top of
+it, one per knob, in the corner that knob occupies on the panel:
 
-                             BANK 1/8     top right
+    SLOT 1/2                              top right
     SPRAY 0                               bottom left    GRAN only
-                             GRAIN 45ms   bottom right
+    GRAIN 45ms                            bottom right
+
+SYNTH does not, and the reason is measurable rather than aesthetic. SYNTH's picture is a
+wavetable frame drawn at **full ink** -- the frame *is* the picture. SMPL and GRAN draw a
+min/max envelope at 2/5 ink and put 1 px bars on top of it. Bright text on a bright trace
+is what the player objected to ("和标签冲突的厉害"); bright text on a dim one he accepted.
+So SYNTH stops at 172 px (x 4..175) and keeps a 60 px column at x 176..235 for itself:
+
+    BANK 1/8        top right, y 92
+    SAW SQR         second line, y 104 -- the bank's NAME
+    MORPH 0         bottom right, y 146
+
+The 60 px is the widest label plus slack, measured with the font's advance table:
+
+    BANK 1/8   46 px      SAW SQR    42 px  (widest bank name)
+    MORPH 0    42 px      MORPH 100  54 px  <- worst case
+
+180 + 60 is the whole screen with no margins, so the picture is 172 and the column is 60
+at x 176..235: a 4 px gap after the picture, 4 px at the screen edge, 6 px of slack after
+the widest string. The name line is what makes the column worth its width -- "BANK 3/8"
+says which one you are on and nothing about what it is.
 
 The name is drawn at 3/5 ink and the value at ink_hi, so a label reads as one phrase
 whose subject is dim and whose number is bright. Widths come from the font's own advance

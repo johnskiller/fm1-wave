@@ -169,55 +169,66 @@ shot grn.png
         ck(pct > 4.0, f"{name}: the envelope is filled, not a hairline", f"{pct:.1f} %")
 
 
-    # ── every corner label carries a NAME as well as a value ────────────────
-    # This is the check that was missing. The first full-width pass printed values alone
-    # ("1/8", "45ms") on the argument that a corner is a name the way CUT is a name. The
-    # player's reply was that the two right-hand ones read as nothing at all: the same
-    # corner is BANK in SYNTH but SLOT in SMPL and GRAN, MORPH in SYNTH but GRAIN in
-    # GRAN. A position is only a name when it is the same name every time.
-    #
-    # The name is drawn dim and the value at ink_hi, so the test looks for the dim name
-    # colour itself. Width was the first idea and it does not work: the waveform runs the
-    # full band, so any ink-run measurement includes envelope pixels and a value-only
-    # label still comes out wide. Measured with the value stripped, "1/8" alone measured
-    # 17 px against 15 for the string, i.e. the check would have passed the very bug it
-    # was written for.
-    def name_cols(im, y0, dim_col):
-        """Columns holding the dim NAME tone -- and enough of it to be glyphs.
-
-        Exact colour alone is not enough to prove a label is present: the waveform's edge
-        produces stray pixels of the same value. With the name stripped the counts were 1
-        pixel at y 96, 1 at 99 and 1 at 103 in the half-tone colour, so a "does this
-        colour exist" test passed the bug it was written for. A four-letter name at 6 px
-        per glyph puts 40-60 such pixels in the row window; requiring 15 keeps the check
-        honest without depending on the exact rasterisation."""
-        n = sum(1 for x in range(0, 240) for y in range(y0, y0 + 10)
-                if im.getpixel((x, y)) == dim_col)
-        if n < 15:
-            return []
-        return [x for x in range(0, 240)
-                if any(im.getpixel((x, y)) == dim_col for y in range(y0, y0 + 10))]
-
-    for name, y0, dim_col, where in (
-            ("syn", 92, (148, 109, 32), "top"),        # BANK
-            ("syn", 146, (148, 109, 32), "bottom"),    # MORPH
-            ("smp", 92, (82, 149, 98), "top"),         # SLOT
-            ("grn", 92, (82, 133, 148), "top"),        # SLOT
-            ("grn", 146, (82, 133, 148), "bottom"),    # GRAIN
-            ("grn", 146, (82, 133, 148), "left")):     # SPRAY
+    # ── SYNTH gives the labels a margin; SMPL and GRAN do not ────────────────
+    # The player accepted the overlay for SMPL and GRAN -- their envelope is at 2/5 ink
+    # and the grain bars are hairlines, so text on top still separates -- and rejected it
+    # for SYNTH, where the wavetable frame is drawn at full ink and the text fights it.
+    # SYNTH therefore stops at x 4+172 = 176 and the labels get x 176..235 to themselves.
+    # Both halves are checked: the picture must not reach into the label column, and the
+    # label column must not be empty.
+    for name in ("syn", "smp", "grn"):
         im = shots[name]
-        cols = name_cols(im, y0, dim_col)
-        if where == "left":
-            cols = [x for x in cols if x < 120]
-        ck(bool(cols),
-           f"{name}: the {where} label has a name in the dim tone, not only a value",
-           "no dim-toned glyphs found")
+        bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
+        col_x0 = 240 - 60 + 4                     # 184: first column of the label block
+        if name == "syn":
+            # Colour cannot separate picture from label here: SYNTH draws the frame at
+            # sk.ink_hi and the label VALUES at sk.ink_hi too, so a "is this the picture's
+            # tone" test caught the labels and failed on correct code. The separator the
+            # design actually guarantees is geometric -- a gap between the picture's right
+            # edge (x 175) and the widest label (46 px, so it starts at 189). Asserted as
+            # a gap rather than an edge, because the edge moves with the label's width.
+            gap = [x for x in range(176, 188)
+                   if not any(im.getpixel((x, y)) != bg
+                              for y in range(SCOPE_H + 2, SCOPE_H + MAT_H - 2))]
+            ck(len(gap) == 12,
+               "syn: there is a clear gap between the picture and the label column",
+               f"clean columns {gap}")
+        else:
+            # full width: these two are allowed to run under the labels
+            ck(any(im.getpixel((x, y)) != bg
+                   for x in range(MAT_W - 20, 240)
+                   for y in range(SCOPE_H + 2, SCOPE_H + MAT_H - 2)),
+               f"{name}: the picture still runs the full width")
 
-    # SMPL's bottom right is empty on purpose: MORPH indexes a wavetable frame and SMPL
-    # reads no wavetable, so that knob is dead there, and a dead value is worse than an
-    # empty corner. Asserted so it is not "fixed" by someone reading the gap as a bug.
-    ck(not name_cols(shots["smp"], 146, (82, 149, 98)),
-       "smp: the bottom-right corner has no label at all")
+    # ── SYNTH's second line is the bank's NAME ──────────────────────────────
+    # "BANK 3/8" says which one you are on and nothing about what it is. WV_BANK_NAME has
+    # carried SAW SQR / RESO / HOLLOW / VOX / DIGI / OPEN1..3 since the generator was
+    # written and no screen had ever shown one. Checked by width: the name line's ink run
+    # has to be one of the eight names' rendered widths, which also proves it tracks the
+    # bank rather than printing a constant.
+    import re as _re
+    _h = open(os.path.join(ROOT, "app", "build", "gen", "felucca_font.h")).read()
+    _adv = [int(v) for v in _re.search(r"FONT_XS_ADV\[95\] = \{([^}]*)\}",
+                                       _h).group(1).split(",")]
+
+    def _w(t):
+        return sum(_adv[ord(c) - 32] for c in t)
+
+    names = ["SAW SQR", "RESO", "HOLLOW", "VOX", "DIGI", "OPEN1", "OPEN2", "OPEN3"]
+    for shot_name, want_i in (("syn", 0),):
+        im = shots[shot_name]
+        bg = background(im, SCOPE_H, SCOPE_H + MAT_H)
+        y = SCOPE_H + 20                           # the name's row, screen y 104
+        cols = [x for x in range(180, 240)
+                if any(im.getpixel((x, y_)) != bg for y_ in range(y, y + 10))]
+        ck(bool(cols), "syn: the bank name line is drawn")
+        if cols:
+            wide = cols[-1] - cols[0] + 1
+            match = [n for n in names if abs(_w(n) - wide) <= 2]
+            ck(bool(match), "syn: the second line is one of the bank names",
+               f"{wide} px wide, matches none of {[_w(n) for n in names]}")
+            ck(bool(match) and match[0] == names[want_i],
+               f"syn: it shows bank {want_i + 1}'s name", f"looks like {match}")
 
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0

@@ -178,6 +178,27 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 #define MAT_W      232                                /* the picture, x 4..235 */
 #define MAT_LAB_L  (MAT_X0 + 2)                       /* the left corners' edge */
 #define MAT_LAB_R  (MAT_X0 + MAT_W - 2)               /* the right corners' edge */
+
+/* SYNTH is the one source that needs a clean margin, and the reason is measurable: its
+ * picture is drawn at full ink (a wavetable frame IS the picture), while SMPL and GRAN
+ * draw their envelope at 2/5 and put 1 px bars on top of it. Overlaying bright text on a
+ * bright trace is what the player objected to -- "和标签冲突的厉害". So SYNTH gives up the
+ * right-hand 60 px instead, and the labels get a background of their own.
+ *
+ * 60 px is not a round number picked for looks; it is the widest label plus slack,
+ * measured with the font's own advance table rather than estimated:
+ *
+ *     BANK 1/8    46 px        SAW SQR    42 px   (the widest bank name)
+ *     MORPH 0     42 px        MORPH 100  54 px   <- the worst case
+ *
+ * 180 + 60 is the whole screen with no margins at all, so the picture is 172 and the
+ * 60 px column sits at x 176..235 with a 4 px gap after the picture and 4 px at the
+ * screen edge. The widest string is 54 px, leaving 6 px of slack. */
+#define SYN_W      172                                /* SYNTH's picture, x 4..175 */
+#define SYN_COL_W  60                                 /* the labels' column */
+#define SYN_COL_R  (240 - 4)                          /* its right edge: x 235 */
+#define SYN_COL_X  (SYN_COL_R - SYN_COL_W)            /* 175 */
+#define SYN_ROW_2  (MAT_ROW_TOP + 12)                 /* the bank name's own line */
 #define MAT_ROW_TOP 8                                 /* screen y 92: SELECT's corner */
 #define MAT_ROW_BOT 62                                /* screen y 146: the lower corners */
 
@@ -1458,9 +1479,6 @@ void app_frame(void)
      * which is the rule this panel has kept since the first layout. */
     cv_begin(240, MAT_H, sk.bg);
     {
-        char b[12];
-        int32_t bl;
-
         /* The picture runs the full width, and the three knob values sit on top of it in
          * the corners their knobs occupy:
          *
@@ -1486,7 +1504,7 @@ void app_frame(void)
         if (!smp_count && src != SRC_SYNTH) {
             cv_text(MAT_X0 + 2, 46, &FONT_XS, "NO SAMPLES", sk.ink);
         } else if (src == SRC_SYNTH) {
-            src_shape(&sk, MAT_X0, MAT_PAD, MAT_W, MAT_WAVE);
+            src_shape(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
         } else if (src == SRC_GRAN) {
             /* the voice the cloud is most likely to be heard from: the newest one. With
              * several keys down the picture shows one voice's cloud, and the newest is
@@ -1531,15 +1549,28 @@ void app_frame(void)
         char *vv;
         int32_t w;
 
+        /* The right-hand column's edge. SYNTH keeps the labels out of its picture (§ SYN_W
+         * above); SMPL and GRAN run theirs full width and print over the envelope, which
+         * the player accepted because that envelope is at 2/5 ink and the bars are 1 px. */
+        const int32_t xr = (src == SRC_SYNTH) ? SYN_COL_R : MAT_LAB_R;
+
         /* SELECT: top right. */
         nm = (src == SRC_SYNTH) ? "BANK" : "SLOT";
         vv = num2(src == SRC_SYNTH ? bank_i + 1 : smp_i + 1,
                   src == SRC_SYNTH ? (int32_t)WV_BANK_COUNT : (int32_t)smp_count);
         if (src == SRC_SYNTH || smp_count) {
-            cv_text(MAT_LAB_R - txt_w(nm) - 4 - txt_w(vv), ytop, &FONT_XS, nm,
+            cv_text(xr - txt_w(nm) - 4 - txt_w(vv), ytop, &FONT_XS, nm,
                     dim(sk.ink_hi, 3, 5));
-            cv_text(MAT_LAB_R - txt_w(vv), ytop, &FONT_XS, vv, sk.ink_hi);
+            cv_text(xr - txt_w(vv), ytop, &FONT_XS, vv, sk.ink_hi);
         }
+
+        /* SYNTH's second line: the bank's NAME. "BANK 3/8" says which one you are on and
+         * nothing about what it is; the name is the part that tells you to keep turning or
+         * stop. WV_BANK_NAME has carried these since the generator was written -- SAW SQR,
+         * RESO, HOLLOW, VOX, DIGI, OPEN1..3 -- and the screen had never shown one. */
+        if (src == SRC_SYNTH)
+            cv_text(xr - txt_w(WV_BANK_NAME[bank_i]), SYN_ROW_2, &FONT_XS,
+                    WV_BANK_NAME[bank_i], sk.ink_hi);
 
         /* PRESET: bottom left, GRAN only -- SPRAY is the only thing on that knob. */
         if (src == SRC_GRAN) {
@@ -1555,8 +1586,8 @@ void app_frame(void)
             nm = (src == SRC_SYNTH) ? "MORPH" : "GRAIN";
             vv = (src == SRC_SYNTH) ? pct(k_morph) : sel_time(k_grain, 3);
             w = txt_w(vv);
-            cv_text(MAT_LAB_R - txt_w(nm) - 4 - w, ybot, &FONT_XS, nm, dim(sk.ink_hi, 3, 5));
-            cv_text(MAT_LAB_R - w, ybot, &FONT_XS, vv, sk.ink_hi);
+            cv_text(xr - txt_w(nm) - 4 - w, ybot, &FONT_XS, nm, dim(sk.ink_hi, 3, 5));
+            cv_text(xr - w, ybot, &FONT_XS, vv, sk.ink_hi);
         }
 
         if (env_page)
