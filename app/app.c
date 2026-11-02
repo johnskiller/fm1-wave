@@ -2022,10 +2022,16 @@ static void dbg_draw(const src_skin_t *k)
 #if defined(PLAT_HOST) && defined(DBG_ON)
     { int i = 0; while (r[i] && i < 19) { dbg_row3_p[i] = r[i]; i++; } dbg_row3_p[i] = 0; }
 #endif
-#if defined(PLAT_HOST) && defined(DBG_ON)
+#if defined(PLAT_HOST) && defined(DBG_ON) && !defined(PLAT_WEB)
     /* The host cannot read its own glyphs back, so the rows are printed where they are
      * built: the tests assert the format of what the device would show, and the bitmap
-     * checks still cover that it drew. */
+     * checks still cover that it drew.
+     *
+     * Not on the web build: emu_web.c compiles with PLAT_HOST too, and the emulator's
+     * worklet reports zero bytes written from fd_write. Emscripten's stdio retries until
+     * a write reports progress, so one printf per frame there is an endless loop: the
+     * audio thread never returns from its first block, and the screen stays black while
+     * the page's buttons keep working. */
     {
         extern int printf(const char *, ...);
         printf("dbg row1=%s| row2=%s| row3=%s\n", dbg_row1_p, dbg_row2_p, dbg_row3_p);
