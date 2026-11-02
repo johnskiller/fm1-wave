@@ -103,13 +103,13 @@ Seven encoders. Grouped by function, so the pairs sit side by side on the panel.
 
 | encoder | role | parameter | range |
 |---|---|---|---|
-| EN_SELECT | `EN_SELECT` | **SOURCE** | SYNTH / SMPL, detented — which oscillator this voice uses |
-| EN_ALGO | `EN_ALGO` | **MORPH** | 0–7 continuous: frame position (SYNTH) or grain position (SMPL) |
+| EN_SELECT | `EN_SELECT` | **—** / **SPRAY** | free · GRAN: grain scatter 0–127 |
+| EN_ALGO | `EN_ALGO` | **MORPH** | 0–7 continuous: frame position. **Same position in all three modes** |
 | EN_K1 | `EN_K1` | **CUT** | 0–127 → 30 Hz … 16 kHz, exponential |
 | EN_K2 | `EN_K2` | **RES** | 0–127 → damping 2.0 … 0.15 |
 | EN_K3 | `EN_K3` | **SHAPE** | 0–3 detented: SOFT / HARD / FOLD / SINE |
 | EN_K4 | `EN_K4` | **AMOUNT** | 0–127 → shaper drive 0 … 16× |
-| EN_PRESET | `EN_PRESET` | **BANK** / **SPRAY** | SYNTH: bank 0–7, detented · SMPL: granular scatter 0–127 |
+| EN_PRESET | `EN_PRESET` | **BANK** / **SLOT** | SYNTH: bank 0–7, detented · SMPL and GRAN: material slot |
 
 **The pairs are adjacent**: CUT/RES are the filter, SHAPE/AMOUNT are the shaper.
 That is why CUT moved off `EN_PRESET` — a filter with its resonance two knobs
@@ -117,30 +117,40 @@ away is a filter you operate by reaching across the panel.
 
 ### The one encoder that follows the mode
 
-`EN_PRESET` is **BANK in SYNTH and SPRAY in SMPL**, because the two halves of
-the instrument want different things there:
+`EN_PRESET` is **BANK in SYNTH and SLOT in the sample modes**, because the two
+halves of the instrument want different things there:
 
 - In **SYNTH** the eight banks are a timbre sweep you audition fast, exactly
-  like MORPH — it belongs on a knob under a hand.
-- In **SMPL** there is no bank to sweep; what you play is the material itself,
-  and **SPRAY is the live control** (how far the grains scatter). Choosing
-  *which* sample is a load, not a sweep — it is on the material page (below).
+  what a detented encoder is for.
+- In **SMPL / GRAN** the slots are material you *choose* rather than sweep, so
+  they are a list, not a range. Turning the knob is how you load the next one.
 
-So the encoder is never dead: eight synth banks in one mode, grain scatter in
-the other. That is better than a greyed bar in SYNTH, which is what it was
-before this change.
+### SPRAY: why it moved to `EN_SELECT`, and not onto `EN_PRESET`
 
-**This does not violate "a knob means one thing while you play"**: the knob
-changes exactly when **SOURCE** changes, and SOURCE is the one control that
-redefines what the instrument is made of. The screen's middle band already shows
-material in both modes, so what the knob is pointing at is on screen at the
-moment you touch it.
+The first version put SPRAY on `EN_PRESET` and the material slot on `EN_ALGO`.
+That read well on paper — "which material" is one job, so give it one knob in
+both sample modes — and it was wrong in the hand, for two reasons:
 
-**The cost, stated plainly**: the material picker is a live knob in SYNTH but a
-page action in SMPL. The justification is real (a sweep you play versus a load
-you choose) but it *is* asymmetric. If that asymmetry bothers you more than the
-dead knob did, the alternative is BANK on the material page in both modes and
-`EN_PRESET` = SPRAY always — then SYNTH greys that encoder again.
+1. **MORPH lost its knob in GRAN.** `EN_ALGO` is MORPH everywhere else. Moving it
+   means that switching SOURCE moves a control the player had just learned the
+   position of.
+2. **A control that moves is worse than a control that is off.** A dead knob is
+   visible and stable; a knob that does something else in the next mode gets
+   turned by accident.
+
+So SPRAY takes **`EN_SELECT`**, which is free while SOURCE lives on `B_SEL`, and
+nothing changes position between modes:
+
+| | EN_SELECT | EN_ALGO | EN_PRESET |
+|---|---|---|---|
+| SYNTH | — | MORPH | BANK |
+| SMPL | — | MORPH | SLOT |
+| GRAN | **SPRAY** | MORPH | SLOT |
+
+The cost is honest: SPRAY is a 0–127 range on a 32-detent knob, and it sits at
+the far end of the row from the material it scatters over. If a later panel
+revision gives GRAN its own page (the material page already has room), SPRAY
+belongs there with GRAIN SIZE, and `EN_SELECT` goes back to being free.
 
 ### Toggle pages: ENV, and the material page
 
@@ -351,7 +361,8 @@ value at full level. That was observed too.
 ### Grain size and spray
 
 - **GRAIN** (0–127 → **10–200 ms**, exponential; the midpoint is the geometric
-  mean √(10·200) = 44.7 ms, not 105 ms).
+  mean √(10·200) = 44.7 ms, not 105 ms). Fixed at 64 until the material page
+  exists: no encoder is spare for it.
 - **SPRAY** (0–127) scatters each grain's start over ±(spray/127) × half the slot.
   The normalisation lives inside the cloud, not at the call site: passing a raw
   0–127 scatters by 127 × len/2, so every grain clamps to the same two edges and
