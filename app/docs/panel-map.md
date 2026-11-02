@@ -269,9 +269,16 @@ label is "+0" at the right edge, in the top row: the 0 dBFS line is the referenc
 loud chord visibly crosses, and the rest is read off the spacing, because five words
 of six px in a 2 px gap would not read as a scale but as noise.
 
-The grid is a fixed neutral grey (`RGB(62,64,68)` / dim `RGB(36,38,42)`), not a skin
-colour: it must sit under all three skins, and a graticule tinted by the source would
-be content, not the glass.
+The grid is a fixed neutral grey (`RGB(96,99,104)` for the 0 dBFS line, `RGB(58,61,66)`
+for the rest), not a skin colour: it must sit under all three skins, and a graticule
+tinted by the source would be content, not the glass.
+
+Both were raised after being measured and found invisible: the dim one was
+`RGB(36,38,42)`, **7 units of luminance above the darkest ground**, so the vertical lines
+and five of the six dB markers did not read as a grid at all. Now `dLum 29-31` for the
+dim lines and `67-69` for the 0 dBFS line, against ink at `150-185` -- so the grid is
+visible without competing with the trace. A graticule that cannot be seen is not a subtle
+graticule, it is a missing one.
 
 The trace runs over it (drawn after), which is how a real scope looks: the grid is
 behind the signal.

@@ -762,8 +762,16 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * the vertical ones are quarters of the window. They are a neutral grey, not a skin
  * colour, because they must sit under all three skins -- a graticule tinted by the
  * source would be content, and a graticule is the glass. */
-#define GRID_DIM  RGB(36, 38, 42)
-#define GRID     RGB(62, 64, 68)
+/* Two levels, and both had to be raised: the dim one was RGB(36,38,42), only 7 units of
+ * luminance above the darkest ground -- measured, effectively invisible, so the vertical
+ * lines and five of the six dB markers did not read as a grid at all. A graticule that
+ * cannot be seen is not a subtle graticule, it is a missing one.
+ *
+ * The two levels stay well under the ink (luminance 150-185 depending on the skin) so a
+ * bright trace still owns the screen: the grid is glass, and glass that competes with the
+ * signal is a defect. GRID marks 0 dBFS, the one reference a full-scale chord crosses. */
+#define GRID_DIM  RGB(58, 61, 66)     /* was 36,38,42: dLum 7 -> 29 against every ground */
+#define GRID     RGB(96, 99, 104)     /* was 62,64,68: the 0 dBFS line, dLum 67 */
 
 /* amplitude as a fraction of full scale (-1..1) to a distance from the centre line */
 static float fs_px(float a)
