@@ -764,6 +764,17 @@ void wv_render_range(wv_state *s, const wv_bank *b, float *out, uint32_t n,
 #define WV_JOB_BLOCK_MAX 256u   /* the app's BLK_MAX; wv_render_split clamps to it */
 static float job_out[WV_JOB_BLOCK_MAX];
 
+/* What the second core has contributed since boot: the blocks it returned, the ones
+ * it did not, and the largest sample it ever put in job_out. If the split is working,
+ * jobs climbs with every block that has a voice on the far side and c2_pk is the same
+ * order as the level of those voices; jobs climbing while c2_pk stays at zero means
+ * the far half is being rendered as silence, which the bus then sums to nothing. */
+static uint32_t wv_c2_jobs, wv_c2_fail;
+static float    wv_c2_pk;
+uint32_t wv_c2_job_count(void) { return wv_c2_jobs; }
+uint32_t wv_c2_fail_count(void) { return wv_c2_fail; }
+float    wv_c2_peak(void) { return wv_c2_pk; }
+
 static struct {
     wv_state *s;
     const wv_bank *b;
@@ -860,7 +871,18 @@ static void render_split_tap(wv_state *s, const wv_bank *b, float *out, uint32_t
         job.s = s;
         job.b = b;
         job.n = n;
-        job.master = master;
+        /* The job renders at UNIT gain, not at `master`.
+         *
+         * voice_block multiplies by master/4096 itself, and bus_apply multiplies the
+         * summed voices by it once more, after the split. So a half rendered at
+         * `master` is attenuated twice: at MASTER a quarter up, m = 0.0625 and the
+         * far half came out 24 dB low. The first note is not split at all (act == 1
+         * takes the one-core path), so it played at the right level while every note
+         * after it was nearly inaudible -- a polyphony bug that was really a gain
+         * bug, and invisible on the host and in test_split.c because every one of
+         * those calls passes master = 4096, where m == 1 and the second factor is
+         * free. Both halves are unit-gain; master belongs to the bus, once. */
+        job.master = 4096.0f;
         job.mid = mid;
 
         /* Publish the job's argument block BEFORE handing it over. The platform's
@@ -884,14 +906,29 @@ static void render_split_tap(wv_state *s, const wv_bank *b, float *out, uint32_t
              * before it runs — so re-rendering the top half adds nothing to `out`.
              * Without this the top four voices would simply be missing, and that is
              * the difference between "slower" and "wrong". */
-            if (wait() != 0)
+            if (wait() != 0) {
+                wv_c2_fail++;
                 voice_block(s, b, out, n, 4096.0f, mid, WV_VOICES);
-            else {
+            } else {
                 uint32_t k;
+                float pk = 0.0f;
                 if (sync)
                     sync();             /* drain its writes to job_out before reading it */
-                for (k = 0; k < n; k++)
+                for (k = 0; k < n; k++) {
                     out[k] += job_out[k];
+                    if (job_out[k] > pk)
+                        pk = job_out[k];
+                    else if (-job_out[k] > pk)
+                        pk = -job_out[k];
+                }
+                /* What the second core actually contributed to this block. A split
+                 * whose jobs come back correct but empty is the difference between
+                 * "the voices are missing" and "the voices are quiet", and those two
+                 * look identical in the output -- this is the number that tells them
+                 * apart. */
+                if (pk > wv_c2_pk)
+                    wv_c2_pk = pk;
+                wv_c2_jobs++;
             }
 
             smooth_step(s, n);

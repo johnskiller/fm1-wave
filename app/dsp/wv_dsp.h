@@ -201,6 +201,13 @@ uint32_t wv_note_on_grain(wv_state *s, const wv_sample *smp, uint8_t note, uint8
 /* Release a note: the voice fades out and frees itself. */
 void wv_note_off(wv_state *s, uint8_t note);
 
+/* What the second core contributed (wv_dsp.c): the blocks it returned, the ones it
+ * did not, and the largest sample it ever rendered. For the device only -- the host's
+ * second core runs inline, so these are always "correct" there. */
+uint32_t wv_c2_job_count(void);
+uint32_t wv_c2_fail_count(void);
+float    wv_c2_peak(void);
+
 /* How many voices are sounding (for the UI and for the tests). */
 uint32_t wv_active(const wv_state *s);
 

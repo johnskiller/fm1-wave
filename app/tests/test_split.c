@@ -198,6 +198,61 @@ static void test_split_is_identical(void)
     (void)ok;
 }
 
+/* MASTER must attenuate the split exactly as it attenuates one core.
+ *
+ * Every other test in this file passes master = 4096, and that is exactly why the
+ * device had a polyphony bug the tests could not see: the second core's job was
+ * rendered at `master` and then the bus applied `master` again, so the far half of
+ * the pool was attenuated twice. At full scale the second factor is 1.0 and the two
+ * paths agree sample for sample; at any lower setting they diverge by m (m = 0.0625
+ * a quarter of the way up, 24 dB), and the first note -- which is never split,
+ * because one active voice takes the single-core path -- played at the right level
+ * while every note after it was nearly inaudible.
+ *
+ * The fix is that both halves render at unit gain and master is applied once, on the
+ * bus. This test is what makes that a standing property: it sweeps the pot. */
+static void test_split_respects_master(void)
+{
+    static wv_state a, b;
+    static float oa[BLK], ob[BLK];
+    static const float masters[] = { 200.0f, 512.0f, 1024.0f, 2048.0f, 3000.0f, 4096.0f };
+    uint32_t c, k, i;
+    int bad = 0;
+
+    printf("split, master:\n");
+    setup();
+    for (c = 0; c < sizeof masters / sizeof masters[0]; c++) {
+        float worst = 0.0f, peak = 0.0f;
+
+        scene(&a);
+        scene(&b);
+
+        for (k = 0; k < 20; k++) {
+            memset(oa, 0, sizeof oa);
+            memset(ob, 0, sizeof ob);
+            wv_render(&a, &bank, oa, BLK, masters[c]);
+            jobs_run = 0;
+            wv_render_split(&b, &bank, ob, BLK, masters[c], 1, fake_run, fake_wait, fake_sync, 0);
+            for (i = 0; i < BLK; i++) {
+                float d = fabsf(oa[i] - ob[i]);
+                if (d > worst) worst = d;
+                if (fabsf(oa[i]) > peak) peak = fabsf(oa[i]);
+            }
+        }
+        printf("  master %4.0f: worst %.2f LSB, peak %.3f\n",
+               masters[c], worst * 8388608.0f, peak);
+        /* one 24-bit LSB: the split reorders the float sums, nothing more */
+        if (worst > 2.0f / 8388608.0f)
+            bad = 1;
+        /* And the pot must actually be doing something: the peak is the ONE CORE
+         * render at this master, so it has to fall with the pot. Without this the
+         * test would pass on two identically-broken halves. */
+        if (masters[c] <= 512.0f && peak > 0.2f)
+            bad = 1;
+    }
+    ck(bad == 0, "the split attenuates with MASTER exactly as one core does");
+}
+
 /* The knobs glide: a block in which CUT moves must still match, because the
  * smoothing is advanced once per block and not once per voice range. */
 static void test_split_with_moving_knobs(void)
@@ -624,6 +679,7 @@ static void test_limiter_sees_the_master(void)
 int main(void)
 {
     test_split_is_identical();
+    test_split_respects_master();
     test_split_with_moving_knobs();
     test_split_follows_the_active_voices();
     test_split_does_not_race_on_the_output();

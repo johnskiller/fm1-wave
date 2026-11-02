@@ -1620,6 +1620,16 @@ static void dbg_draw(const src_skin_t *k)
         }
     }
     if (c2 > 0 && busy) *q++ = 'w';
+    /* What the far half actually put into the sum, as a peak in 1/4096. A core that
+     * returns every job on time with p0 has rendered silence: the voices on its side
+     * of the cut are not being heard, and no amount of timing tells you that. */
+    if (c2 > 0 && c2_jobs) {
+        *q++ = ' ';
+        *q++ = 'p';
+        num(t, (int32_t)(wv_c2_peak() * 4096.0f));
+        for (const char *p = t; *p; )
+            *q++ = *p++;
+    }
     *q = 0;
     cv_text(1, 16, &FONT_T, r, k->ink_hi);
 #if defined(PLAT_HOST) && defined(DBG_ON)
@@ -2205,6 +2215,10 @@ int app_expect(const char *what, int *got)
         *got = hi;
         return 1;
     }
+    if (!strcmp(what, "c2_jobs"))     { *got = (int)wv_c2_job_count(); return 1; }
+    if (!strcmp(what, "c2_fails"))    { *got = (int)wv_c2_fail_count(); return 1; }
+    if (!strcmp(what, "c2_peak"))     { *got = (int)(wv_c2_peak() * 4096.0f); return 1; }
+    if (!strcmp(what, "split"))       { *got = (int)wv_last_split(); return 1; }
     if (!strcmp(what, "voices")) {
         uint32_t v, n = 0;
         for (v = 0; v < WV_VOICES; v++) n += dsp.v[v].active ? 1u : 0u;

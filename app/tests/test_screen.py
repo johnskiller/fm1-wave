@@ -313,7 +313,7 @@ shot grn.png
         r1, r2, r3 = rows[-1]
         ck(_re.fullmatch(r"\d+% xr\d+", r1) is not None,
            "row 1 is '<load>% xr<xruns>'", repr(r1))
-        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?", r2) is not None,
+        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?( p\d+)?", r2) is not None,
            "row 2 reports the jobs handed over and the us each, or '--'", repr(r2))
         # The host runs its jobs inline (plat_host.c: at once, in order), so the interval
         # run..wait there is the job's own duration -- small, and nonzero. Asserting it
@@ -321,7 +321,7 @@ shot grn.png
         # present and plausible: a reading that stayed 0 forever on the device is the
         # signature of a core that never took the job (wait returns -1 at once and the
         # caller renders the half itself, so the audio is complete and correct).
-        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?", r2) is not None,
+        ck(r2 == "c2 --" or _re.fullmatch(r"c2 \d+u\d+w?( p\d+)?", r2) is not None,
            "row 2's handover time is a number", repr(r2))
         ck(r3 == "", "row 3 is empty on the host", repr(r3))
 
