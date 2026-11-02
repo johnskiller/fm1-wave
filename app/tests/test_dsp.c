@@ -463,6 +463,22 @@ static double rms_of(const float *o, uint32_t n)
     return sqrt(a / n);
 }
 
+/* A cheap brightness: the RMS of the sample-to-sample difference, over the RMS of
+ * the signal. A first difference is a +6 dB/oct high-pass, so this rises with the
+ * filter corner without an FFT and without a window to get wrong. */
+static double bright_of(const float *o, uint32_t n)
+{
+    double d = 0.0, a = 0.0;
+    uint32_t i;
+    for (i = 1; i < n; i++) {
+        double x = (double)o[i] - (double)o[i - 1];
+        d += x * x;
+    }
+    for (i = 0; i < n; i++)
+        a += (double)o[i] * o[i];
+    return a > 0.0 ? sqrt(d / (double)(n - 1)) / sqrt(a / (double)n) : 0.0;
+}
+
 static void test_lfo_sweeps_cut(void)
 {
     static wv_state a, b;
@@ -502,6 +518,71 @@ static void test_lfo_sweeps_cut(void)
        "the LFO moves the filter by more than 3.5 dB over one note");
 }
 
+/* The LFO has to sweep BOTH ways.
+ *
+ * The first version passed fm_sin_pi(phase) a 0..1 phase where the function wants
+ * radians, so sin() only ever returned a positive number: the filter opened from
+ * the knob's corner and came back, and never went below it at all. The sweep test
+ * above could not see that -- a filter that only opens still moves the level, so
+ * "the RMS changes over the note" was true of the broken LFO too.
+ *
+ * What separates them is symmetry about the unmodulated level: the sweep has to
+ * spend its time on BOTH sides of the level the note has with the LFO off. The
+ * broken one sat at or above it for the whole cycle.
+ */
+static void test_lfo_sweeps_both_ways(void)
+{
+    static wv_state a, b;
+    static float o[256];
+    wv_bank bk = { sines };
+    double flat = 0.0, lo = 1e9, hi = 0.0, above = 0.0, below = 0.0;
+    uint32_t k, i, blocks = 0;
+
+    wv_init(&a);
+    a.cut = 40;                     /* ~200 Hz: BELOW the 262 Hz fundamental, so the
+                                     * sweep crosses it and the level really moves */
+    a.res = 90;                     /* a resonant peak makes the crossing audible */
+    wv_init(&b);
+    b.cut = 40;
+    b.res = 90;
+    b.lfo_rate = 95;                /* ~3.4 Hz: three cycles in 400 blocks */
+    b.lfo_depth = 90;
+
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
+
+    for (k = 0; k < 400; k++) {
+        double r;
+
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&a, &bk, o, 256, 4096.0f);
+        if (k == 30)
+            flat = rms_of(o, 256);
+
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&b, &bk, o, 256, 4096.0f);
+        if (k > 15) {
+            r = rms_of(o, 256);
+            if (r < lo) lo = r;
+            if (r > hi) hi = r;
+            if (r > flat * 1.05)
+                above += 1.0;       /* the corner went up */
+            if (r < flat * 0.95)
+                below += 1.0;       /* and down */
+            blocks++;
+        }
+    }
+
+    printf("    [lfo] flat %.5f, sweep %.5f .. %.5f, above %.0f%% below %.0f%%\n",
+           flat, lo, hi, 100.0 * above / (double)blocks, 100.0 * below / (double)blocks);
+    ck(flat > 0.0, "the unmodulated note has a level to compare against");
+    ck(hi > flat * 1.3, "the LFO opens the filter past the knob's corner");
+    /* This is the one that fails on the 0..1-radians bug. */
+    ck(lo < flat * 0.5, "the LFO closes the filter below the knob's corner too");
+    ck(above > (double)blocks * 0.10 && below > (double)blocks * 0.10,
+       "the sweep spends real time on both sides of the unmodulated level");
+}
+
 int main(void)
 {
     make_sines();
@@ -509,6 +590,7 @@ int main(void)
     test_lfo_off_is_no_change();
     test_lfo_rate_map();
     test_lfo_sweeps_cut();
+    test_lfo_sweeps_both_ways();
     test_table();
     test_banks();
     test_shaper();

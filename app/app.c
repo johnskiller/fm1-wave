@@ -2156,7 +2156,20 @@ void app_frame(void)
         last = now;
         if (env_page)
             lit |= 1u << B_ENV;
+        /* The LFO lamp has two readings, because the page and the modulation are two
+         * different things and the panel showed only the first.
+         *
+         *   page up            solid: the knobs are RATE and DEPTH right now
+         *   page down, LFO on  blinking: the LFO is still running on a parameter you
+         *                      cannot see, which is how "LFO can be heard but the page
+         *                      is shut" stopped being a thing you have to remember
+         *
+         * A page is a view, not a switch: closing ENV does not zero the ADSR, and
+         * closing LFO must not zero RATE/DEPTH either. What it must do is stop the
+         * instrument from hiding a modulator that is audibly working. */
         if (lfo_page)
+            lit |= 1u << B_LFO;
+        else if (k_lfo_rate != 0 && k_lfo_depth != 0 && ((now >> 8) & 1u))
             lit |= 1u << B_LFO;
         if (src != SRC_SYNTH)
             lit |= 1u << B_SEL;

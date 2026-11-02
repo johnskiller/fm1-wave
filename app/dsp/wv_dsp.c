@@ -54,7 +54,11 @@ static float lfo_cut_scale(const wv_state *s)
 {
     if (s->lfo_rate == 0 || s->lfo_depth == 0)
         return 1.0f;
-    return fm_exp2f(fm_sin_pi(s->lfo_ph) * lfo_oct(s->lfo_depth));
+    /* fm_sin_pi takes RADIANS on [-pi, pi], not a 0..1 phase -- the same mistake
+     * fixed at line 139 for the shaper. Without the 2*pi the LFO never leaves the
+     * positive half: sin() only walks 0..1 rad, so the filter opened and closed on a
+     * one-radian turn and the down-swing was missing entirely. */
+    return fm_exp2f(fm_sin_pi(s->lfo_ph * FM_TWO_PI) * lfo_oct(s->lfo_depth));
 }
 
 static float svf_g(float hz)
@@ -708,7 +712,18 @@ static void bus_apply(float *out, uint32_t n, float master, float *tap)
 static void smooth_step(wv_state *s, uint32_t n)
 {
     const float zc = 0.0113f;
-    float cut_t = cut_hz(s->cut);
+    /* The target includes the LFO, exactly the value voice_block is ramping toward.
+     *
+     * It used to be the bare cut_hz(s->cut), and that made the two smoothers disagree
+     * about where the corner was going: s->cut_z was pulled back to the un-modulated
+     * value once per block while voice_block climbed away from it, so the LFO never
+     * reached its full excursion. Measured on the host at CUT 63, depth 32: the sweep
+     * ran 501..811 Hz instead of 415..709 Hz -- the right shape, shifted up by about
+     * 0.27 of an octave, which is the modulation being partly cancelled rather than
+     * applied. */
+    float cut_t = cut_hz(s->cut) * lfo_cut_scale(s);
+    if (cut_t > 18000.0f)
+        cut_t = 18000.0f;                    /* same clamp voice_block applies */
     float amt_t = u7_to_f(s->sh_amount);
     uint32_t k;
     for (k = 0; k < n; k++) {
