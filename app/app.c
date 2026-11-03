@@ -1091,6 +1091,26 @@ static void input(void)
         if (env_page)
             lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;   /* two pages cannot be up at once */
     }
+    /* B_HOME: LEAVE THE PAGE, whichever one is up.
+     *
+     * The panel needed one button that always means "out", because the page button
+     * cannot mean that any more. A page with more than one screen uses its own button to
+     * advance (see the page rule in spec.md §6b), so pressing it is "next", not "close",
+     * and a player who has walked to page 2 of the LFO would have no way back to the
+     * voice except pressing something that also switches something on.
+     *
+     * B_HOME was the only button with nothing to lose: the platform reads it only inside
+     * the RESTORE prompt (unity.c:340, "no" to a factory restore), which is a screen this
+     * app never draws. So the rule is simple and it does not have to be discovered: HOME
+     * always returns you to playing the voice.
+     *
+     * It does nothing when no page is up -- it is a way out, not a destination, and a
+     * button that did something surprising from the idle screen would be worse than one
+     * that is quiet there. */
+    if (btn_pressed(btn, B_HOME)) {
+        env_page = 0, lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;
+    }
+
     /* B_FX: the filter's own page, and the second of the two buttons the panel had
      * spare (panel-map.md listed it as free, with "filter type" already pencilled in).
      *

@@ -388,6 +388,26 @@ shot grn.png
     ck(expect("press LFO\n", "lfo", 1), "B_LFO opens the page")
     ck(expect("tap LFO\ntap LFO\n", "lfo", 0), "B_LFO toggles it shut")
 
+    # ── B_HOME is the way out ──────────────────────────────────────────────────
+    # The page button cannot mean "close" once a page has more than one screen: it
+    # advances. So the panel needs one button that always returns to the voice, and
+    # HOME is the only one with nothing to lose (the platform reads it only inside the
+    # RESTORE prompt, a screen this app never draws).
+    #
+    # Checked on all five pages, and the fourth case is the one that would bite: HOME
+    # with no page up must do nothing at all. A button that quietly changed a parameter
+    # from the idle screen would be worse than one that is dark.
+    print("B_HOME leaves any page, and does nothing when there is none")
+    for btn, probe in (("ENV", "env"), ("LFO", "lfo"), ("ARP", "arp"),
+                       ("EDIT", "edit"), ("FX", "fx_page")):
+        ck(expect("tap %s\n" % btn, probe, 1), "%s's page opens" % btn)
+        ck(expect("tap %s\ntap HOME\n" % btn, probe, 0), "HOME closes %s" % btn)
+        ck(expect("tap %s\ntap HOME\n" % btn, "cut", 127),
+           "and %s's knobs go back to the voice's" % btn)
+    ck(expect("tap HOME\n", "cut", 127), "HOME from the idle screen changes nothing")
+    ck(expect("tap HOME\nturn K1 -4\n", "cut", 111),
+       "and the voice's knobs still work afterwards")
+
     # ── every page announces itself on its own button ──────────────────────────
     # The rule the panel follows is "a page lights its button solid; a setting that
     # keeps working after the page closes blinks instead". EDIT was the exception: its
