@@ -2481,6 +2481,7 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
     uint8_t  head_live = 0;             /* 0: nothing on this slot is sounding */
     int32_t  head_x = -1;               /* the column it lands in, -1: not in the window */
     int32_t  head_y = mid;
+    float    sc_region;                 /* the region's one scale (see below) */
 
     if (!s || !s->data || !s->len) {
         cv_rect(x0, mid, w, 1, k->ink);
@@ -2532,13 +2533,44 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
         head_live = found;
     }
 
-    /* the material, per column, from the window only */
+        /* One scale for the whole region, computed once, exactly as env_line does it.
+     *
+     * This was per column -- `sc` and `pk` were both inside the loop below -- so every
+     * column was stretched to fill the band on its own. The player saw it before I did:
+     * the same sample stood 71 px tall in SMPL's resting view and 79 px tall on the EDIT
+     * page (measured, middle columns, band rows 84..175). Worse than the mismatch, the
+     * per-column scale destroys the one thing the picture is for: a quiet passage grew
+     * until it looked as loud as a loud one, and zooming in re-normalised again, so the
+     * shape of the material depended on where you looked from.
+     *
+     * The peak is taken over the REGION and not the window on purpose: env_line scales
+     * by [start, end), so taking the window's peak here would restore the same
+     * disagreement one zoom step later. A narrow window in a quiet part then reads as
+     * the quiet part -- flat, which is what it is. The 0.02 floor is env_line's too. */
+    {
+        uint32_t j;
+        float pk = 0.0f;
+        const uint32_t pf = rg->start < s->len ? rg->start : 0u;
+        const uint32_t pt = rg->end <= s->len ? rg->end : s->len;
+        for (j = pf; j < pt; j++) {
+            float v = (float)s->data[j] * (1.0f / 32768.0f);
+            if (v < 0.0f)
+                v = -v;
+            if (v > pk)
+                pk = v;
+        }
+        if (pk < 0.02f)
+            pk = 1.0f;
+        sc_region = (float)(h / 2 - 1) / pk;
+    }
+
     for (i = 0; i < (uint32_t)w; i++) {
         uint32_t a = view + (uint32_t)((uint64_t)span * i / (uint32_t)w);
         uint32_t b = view + (uint32_t)((uint64_t)span * (i + 1u) / (uint32_t)w);
-        float lo = 0.0f, hi = 0.0f, pk = 0.0f, sc;
+        float lo = 0.0f, hi = 0.0f;
         uint32_t j;
         int32_t yh, yl;
+        const float sc = sc_region;
         uint8_t inside;
 
         if (b <= a)
@@ -2547,15 +2579,7 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
             float v = (float)s->data[j] * (1.0f / 32768.0f);
             if (v < lo) lo = v;
             if (v > hi) hi = v;
-            if (v < 0.0f) v = -v;
-            if (v > pk) pk = v;
         }
-        /* One scale for the window, from its own peak: zooming in must not make the
-         * material look louder. Clamped so a nearly silent window does not fill the
-         * band with its own noise. */
-        if (pk < 0.02f)
-            pk = 1.0f;
-        sc = (float)(h / 2 - 1) / pk;
         yh = mid - (int32_t)(hi * sc);
         yl = mid - (int32_t)(lo * sc);
         if (yh < y0) yh = y0;

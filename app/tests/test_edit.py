@@ -670,11 +670,53 @@ shot inv2.png
 """, out)
     inv1 = band(os.path.join(out, "inv1.png"))
     inv2 = band(os.path.join(out, "inv2.png"))
-    # START driven to its limit still leaves at least one column of material
-    ck(count_colour(inv1, DIM25) > 0,
-       f"START at its limit leaves a region ({count_colour(inv1, DIM25)} px)")
-    ck(count_colour(inv2, DIM25) > 0,
-       f"LOOP E at its limit leaves a region ({count_colour(inv2, DIM25)} px)")
+    # START driven to its limit still leaves at least one column of material.
+    #
+    # Counted OUTSIDE the region (DIM15), not inside it. The region is empty at its
+    # limit, so "there is still material inside" is the wrong question -- and it only ever
+    # passed because the picture used to normalise each column to fill the band on its
+    # own, which painted ink where there was nothing to scale. The material that must
+    # survive the edit is the material that will not sound, drawn at 1/5 ink.
+    ck(count_colour(inv1, DIM15) > 0,
+       f"START at its limit leaves material outside the region ({count_colour(inv1, DIM15)} px)")
+    ck(count_colour(inv2, DIM15) > 0,
+       f"LOOP E at its limit leaves material outside the region ({count_colour(inv2, DIM15)} px)")
+
+    # ── the EDIT page's picture is the same picture ────────────────────────────
+    # The player reported that the same sample looked fuller on the EDIT page than in
+    # SMPL's resting view. It did: src_edit_map computed its scale per column, so every
+    # column was stretched to fill the band on its own, while env_line scaled by the whole
+    # region. Measured before the fix, middle columns of the band: 71 px in SMPL at rest,
+    # 79 px on the EDIT page. Worse than the mismatch, the per-column scale hid dynamics
+    # -- a quiet passage grew until it looked as loud as a loud one.
+    #
+    # Now both scale by the region's peak, so fully zoomed out the two pictures have to be
+    # the same height. Measured at the centre columns, away from the corner labels and the
+    # markers at the window's edges.
+    print("the EDIT page draws the sample at the same height as SMPL does")
+    def wave_height(p):
+        im = Image.open(p).convert("RGB"); px = im.load()
+        ys = [y for y in range(MAT_Y0, MAT_Y1) for x in range(105, 145)
+              if px[x, y] != BG]
+        return (min(ys), max(ys)) if ys else (0, 0)
+    run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+shot same_rest.png
+press EDIT
+wait 60
+release EDIT
+wait 200
+shot same_edit.png
+""", out)
+    r0, r1 = wave_height(os.path.join(out, "same_rest.png"))
+    e0, e1 = wave_height(os.path.join(out, "same_edit.png"))
+    ck(r1 - r0 == e1 - e0,
+       f"same height in both views ({r1 - r0 + 1} px vs {e1 - e0 + 1} px)")
+    ck(abs(r0 - e0) <= 1,
+       f"and it starts on the same row ({r0} vs {e0})")
 
     print("ZOOM steps and clamps")
     run("""wait 400
