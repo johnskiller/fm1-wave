@@ -189,7 +189,7 @@ tap EDIT
 turn K1 5
 turn K3 -3
 turn PRESET 1
-tap EDIT
+tap HOME
 tap SAVE
 reboot
 expect src 1

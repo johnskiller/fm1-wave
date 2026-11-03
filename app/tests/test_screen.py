@@ -386,7 +386,14 @@ shot grn.png
     ck(expect("turn K1 -6\n", "cut", 103),
        "the LFO page is not needed for CUT")
     ck(expect("press LFO\n", "lfo", 1), "B_LFO opens the page")
-    ck(expect("tap LFO\ntap LFO\n", "lfo", 0), "B_LFO toggles it shut")
+    ck(expect("tap LFO\n", "page_no", 1), "LFO opens on screen 1")
+    ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "pressing LFO again goes to screen 2")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 2),
+       "and stops there: a two-screen page has nowhere else to go")
+    ck(expect("tap LFO\ntap LFO\ntap HOME\n", "lfo", 0),
+       "HOME closes it from its last screen")
+    ck(expect("tap LFO\ntap LFO\ntap HOME\ntap LFO\n", "page_no", 1),
+       "and coming back always starts at screen 1")
 
     # ── B_HOME is the way out ──────────────────────────────────────────────────
     # The page button cannot mean "close" once a page has more than one screen: it
@@ -399,7 +406,7 @@ shot grn.png
     # from the idle screen would be worse than one that is dark.
     print("B_HOME leaves any page, and does nothing when there is none")
     for btn, probe in (("ENV", "env"), ("LFO", "lfo"), ("ARP", "arp"),
-                       ("EDIT", "edit"), ("FX", "fx_page")):
+                       ("EDIT", "edit")):
         ck(expect("tap %s\n" % btn, probe, 1), "%s's page opens" % btn)
         ck(expect("tap %s\ntap HOME\n" % btn, probe, 0), "HOME closes %s" % btn)
         ck(expect("tap %s\ntap HOME\n" % btn, "cut", 127),
@@ -416,7 +423,7 @@ shot grn.png
     # case where the player has no way to tell where the knobs went.
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("leds\ntap EDIT\nmaster 200\nwait 100\nleds\n"
-                "tap EDIT\nmaster 200\nwait 100\nleds\n")
+                "tap HOME\nmaster 200\nwait 100\nleds\n")
         path = f.name
     try:
         r = subprocess.run([HOST, path, out], capture_output=True, text=True,
@@ -435,7 +442,7 @@ shot grn.png
     # afterwards -- a blink would announce a switch that does not exist.
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("tap ENV\nmaster 200\nwait 100\nleds\n"
-                "tap ENV\nmaster 200\nwait 100\nleds\n"
+                "tap HOME\nmaster 200\nwait 100\nleds\n"
                 "wait 150\nleds\nwait 150\nleds\n")
         path = f.name
     try:
@@ -450,8 +457,9 @@ shot grn.png
     ck(not any("ENV" in g for g in got[2:]),
        "ENV does NOT blink afterwards: it has no off to report", str(got[2:]))
 
-    # FX is dark on every frame, page up or down. Its lamp is deliberately absent until
-    # the page moves to another button; asserted so that re-lighting it in passing gets
+    # FX is dark on every frame. It has no page at all now -- the filter's deep settings
+    # moved to the LFO's second screen and B_FX is waiting for the effects -- so there is
+    # nothing for a lamp to announce. Asserted so that re-lighting it in passing gets
     # caught rather than becoming the new normal.
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("tap FX\nmaster 200\nwait 100\nleds\nwait 150\nleds\n")
@@ -464,7 +472,7 @@ shot grn.png
     got = [l.split("leds:")[1].split("|")[0].strip()
            for l in r.stdout.splitlines() if "leds:" in l]
     ck(not any("FX" in g for g in got),
-       "FX lights nothing while its page is still on that button", str(got))
+       "FX lights nothing: it has no page to announce", str(got))
 
     # Two pages cannot be up at once. Without this the lit lamp would be ambiguous and
     # which parameters the knobs edit would depend on the order the buttons were hit.
@@ -514,8 +522,8 @@ shot grn.png
     print("every band is sent once")
     script = "master 200\nwait 120\nshow frame_blits\n"
     for page in ("ENV", "LFO", "ARP", "FX"):
-        script += f"tap {page}\nmaster 200\nwait 120\nshow frame_blits\n"
-    script += "tap FX\ntap SEL\nmaster 200\nwait 120\nshow frame_blits\nq\n"
+        script += f"tap {page}\nmaster 200\nwait 120\nshow frame_blits\ntap HOME\n"
+    script += "tap SEL\nmaster 200\nwait 120\nshow frame_blits\nq\n"
     with tempfile.TemporaryDirectory() as out:
         sp = os.path.join(out, "b.txt")
         open(sp, "w").write(script)

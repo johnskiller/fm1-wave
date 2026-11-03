@@ -93,7 +93,65 @@ typedef struct {
 } smp_region;
 
 static smp_region     region[SMP_MAX];
-static uint8_t        edit_page;
+
+/* --- pages ---------------------------------------------------------------
+ *
+ * One page is up at a time, and it has a screen number. Two variables, not five
+ * flags, because the rule the player set this session applies to all of them:
+ *
+ *   A page's own button never closes it. It ADVANCES -- press it again and you are
+ *   on the page's second screen, then its third. Leaving is somebody else's job:
+ *   any other page button, or B_HOME, which always means "back to the voice".
+ *   Coming back always starts at screen 1, so the way in is the same every time.
+ *
+ * A page with one screen therefore stops in place when pressed again. That is not a
+ * degenerate case to be special-cased away -- it is the rule, and it is what teaches
+ * the player that HOME is the exit. ENV and ARP are one screen each and they behave
+ * exactly like this.
+ *
+ * The predicates below read like the flags this replaced, so that the hundreds of
+ * places that ask "is the ENV page up" did not have to be rewritten. They are
+ * rvalues only: assignment goes through page_press() or page = PAGE_NONE. */
+enum { PAGE_NONE, PAGE_ENV, PAGE_LFO, PAGE_ARP, PAGE_FX, PAGE_EDIT };
+static uint8_t page;         /* PAGE_NONE = the voice, the normal state */
+static uint8_t page_no = 1;  /* 1-based screen within the page */
+
+#define env_page   (page == PAGE_ENV)
+#define lfo_page   (page == PAGE_LFO)
+#define arp_page   (page == PAGE_ARP)
+#define fx_page    (page == PAGE_FX)
+#define edit_page  (page == PAGE_EDIT)
+/* the LFO's screens. 1 = rate and depth, 2 = the filter's tap and tracking.
+ *
+ * Two now, and this is the page that will grow: a second LFO, the choice of LFO
+ * waveform, and the list of what the LFO modulates are all queued for it (player, this
+ * session). So the count below is data, not a constant in the switch -- adding a screen
+ * is one line here plus its branch, and the button already knows how to walk to it. */
+#define lfo_main   (page == PAGE_LFO && page_no == 1)
+#define lfo_fx     (page == PAGE_LFO && page_no == 2)
+
+/* How many screens each page has. A page not listed here has one, which is what
+ * PAGE_SCREENS falls back to -- ENV and ARP are one and will stay one. */
+static const uint8_t PAGE_SCREENS[] = {
+    [PAGE_NONE] = 1,   /* never advanced: pressing nothing does nothing */
+    [PAGE_ENV]  = 1,
+    [PAGE_LFO]  = 2,   /* rate/depth, then the filter's tap and tracking */
+    [PAGE_ARP]  = 1,
+    [PAGE_FX]   = 1,   /* reserved: the effects page (reverb/delay/chorus) */
+    [PAGE_EDIT] = 1,   /* per source; GRAN will add screens of its own */
+};
+
+static void page_press(uint8_t which)
+{
+    if (page != which) {
+        page = which;
+        page_no = 1;
+    } else if (page_no < PAGE_SCREENS[which]) {
+        page_no++;
+    }
+    /* else: the last screen stays put, on purpose -- there is nowhere to advance to, and
+     * the exit is HOME */
+}
 static uint8_t        edit_zoom;      /* 0..7: the visible fraction is 1/2^edit_zoom */
 static uint8_t        edit_live;      /* which marker the last turn moved: keeps the window there */
 /* Where each slot's cloud resumes. The picture is meant to be readable while you play,
@@ -156,7 +214,6 @@ static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
 /* The LFO page's two controls. RATE 0 is off, which is the default: a patch made
  * before the LFO existed must sound the same after it. */
 static uint8_t k_lfo_rate = 0, k_lfo_depth = 0;
-static uint8_t lfo_page;
 /* The FX page's two controls: the filter's tap and key tracking.
  *
  * TYPE starts at LP and KEY TRK at 0, which is exactly what the voice did before either
@@ -164,7 +221,6 @@ static uint8_t lfo_page;
  * sound the same after this page appeared. That is the same rule the LFO page followed. */
 static uint8_t k_ftype = WV_FTYPE_LP;
 static uint8_t k_ktrack = 0;          /* 0, 25, 50, 75, 100 */
-static uint8_t fx_page;
 /* SYNTH's EDIT page: which of the eight frames the offset knobs act on. K4 picks it.
  * The page owns this rather than K1 because K1-K3 are the value's three digits -- 0..255
  * does not fit one knob's detents usefully, and a frame picker has to be visible while
@@ -194,7 +250,6 @@ static uint8_t k_spray = 0;       /* 0..127: 0 makes a grain voice a sample play
  *
  * The defaults are the old hardcoded VCA: ~1 ms attack, full sustain, ~30 ms release.
  * A patch made before the envelope existed sounds the same after it. */
-static uint8_t env_page;
 static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
 
 /* --- the arpeggiator ------------------------------------------------------
@@ -220,7 +275,6 @@ static uint8_t k_eg_a = 0, k_eg_d = 64, k_eg_s = 127, k_eg_r = 32;
  * note can arrive from MIDI where there is no key to read -- arming the arp must
  * not care which link the note came in on.
  */
-static uint8_t arp_page;
 static uint8_t k_arp_rate = 0;            /* 0 = off; 1..127 = a clock division */
 static uint8_t k_arp_type = 0;            /* ARP_UP / DOWN / UPDN / RND */
 static uint8_t k_arp_oct  = 1;            /* 1..4 octaves */
@@ -1086,11 +1140,8 @@ static void input(void)
     /* The ENV page owns K1-K4 while it is up. The page is a toggle with a lit button,
      * not a fourth mode, so leaving it puts every knob back where it was — see the
      * note on env_page. */
-    if (btn_pressed(btn, B_ENV)) {
-        env_page ^= 1u;
-        if (env_page)
-            lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;   /* two pages cannot be up at once */
-    }
+    if (btn_pressed(btn, B_ENV))
+        page_press(PAGE_ENV);          /* one screen: pressing again stays put */
     /* B_HOME: LEAVE THE PAGE, whichever one is up.
      *
      * The panel needed one button that always means "out", because the page button
@@ -1107,9 +1158,8 @@ static void input(void)
      * It does nothing when no page is up -- it is a way out, not a destination, and a
      * button that did something surprising from the idle screen would be worse than one
      * that is quiet there. */
-    if (btn_pressed(btn, B_HOME)) {
-        env_page = 0, lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;
-    }
+    if (btn_pressed(btn, B_HOME))
+        page = PAGE_NONE;
 
     /* B_FX: the filter's own page, and the second of the two buttons the panel had
      * spare (panel-map.md listed it as free, with "filter type" already pencilled in).
@@ -1123,23 +1173,22 @@ static void input(void)
      * CUT and RES stay on K1 and K2: the page is about the filter, and a filter page
      * that moved the two knobs the filter is made of would be the one thing the panel
      * must not do (the same rule the LFO page follows). */
+    /* B_FX opens nothing, for now, on purpose.
+     *
+     * Its page was the filter's tap and key tracking, and the player's judgment was that
+     * those are deep settings of the LFO's filter, not a subject of their own -- so they
+     * moved to the LFO page's second screen. FX itself is being kept for the effect the
+     * instrument does not have yet (reverb, delay, chorus), and a button that opens an
+     * empty page would be worse than a button that waits. */
     if (btn_pressed(btn, B_FX)) {
-        fx_page ^= 1u;
-        if (fx_page)
-            env_page = 0, lfo_page = 0, arp_page = 0, edit_page = 0;
+        /* nothing yet: the effects page lands here */
     }
-    if (btn_pressed(btn, B_LFO)) {
-        lfo_page ^= 1u;
-        if (lfo_page)
-            env_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;
-    }
+    if (btn_pressed(btn, B_LFO))
+        page_press(PAGE_LFO);
     /* B_ARP: the same page mechanism. The panel has had the button since the
      * beginning (plat.h's B_ARP) and nothing used it. */
-    if (btn_pressed(btn, B_ARP)) {
-        arp_page ^= 1u;
-        if (arp_page)
-            env_page = 0, lfo_page = 0, edit_page = 0, fx_page = 0;
-    }
+    if (btn_pressed(btn, B_ARP))
+        page_press(PAGE_ARP);
     /* B_EDIT: edit THE CURRENT SOURCE's structure -- SMPL's region, SYNTH's frame rack,
      * and GRAN's grain controls when they exist. It replaced a one-press re-chop: a
      * button that re-analysed the slot and gave no way to see or change what it found
@@ -1162,11 +1211,9 @@ static void input(void)
          * screen's colour. A button that does nothing where it applies is quieter than
          * one that changes what the instrument is. */
         if (src == SRC_SMPL || src == SRC_SYNTH) {
-            edit_page ^= 1u;
-            if (edit_page) {
-                env_page = 0, lfo_page = 0, arp_page = 0, fx_page = 0;
+            page_press(PAGE_EDIT);
+            if (edit_page)
                 edit_src = src;
-            }
         }
     }
 
@@ -1232,8 +1279,8 @@ static void input(void)
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
-        else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
-        else if (fx_page) k_ftype = (uint8_t)((k_ftype + (e > 0 ? 1 : WV_FTYPE_N - 1)) % WV_FTYPE_N);
+        else if (lfo_main)  k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else if (lfo_fx) k_ftype = (uint8_t)((k_ftype + (e > 0 ? 1 : WV_FTYPE_N - 1)) % WV_FTYPE_N);
         else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
@@ -1250,11 +1297,11 @@ static void input(void)
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
-        else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        else if (lfo_main)  k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
         /* KEY TRK: five detents, wrapping, not a 0..127 sweep. The setting is a choice
          * out of five and the DSP test asserts the five values; a continuous knob here
          * would let the panel produce a 37 % that save_load then refuses to load. */
-        else if (fx_page) {
+        else if (lfo_fx) {
             uint8_t i = kt_index(k_ktrack);
             i = (uint8_t)((i + (e > 0 ? 1 : KT_STEPS - 1)) % KT_STEPS);
             k_ktrack = KT_VALUES[i];
@@ -1312,13 +1359,13 @@ static void input(void)
          * changes the instrument). This is the other half of that rule -- the page cannot
          * outlive the source that owns it. */
         if (src != SRC_SMPL && src != SRC_SYNTH)
-            edit_page = 0;
+            if (edit_page) page = PAGE_NONE;
         /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
          * rather than reinterpreting the same flag as the other source's page. The flag
          * means "this source's material editor", and the two editors edit different
          * things with different knobs. */
         if (edit_src != src)
-            edit_page = 0;
+            if (edit_page) page = PAGE_NONE;
     }
 
     /* B_SAVE: write the whole panel state to flash, now.
@@ -3845,6 +3892,12 @@ void app_frame(void)
 
             if (env_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ENV PAGE", sk.ink);
+            else if (lfo_fx)
+                /* The screen number, on the screen that needs it. A caption that says
+                 * "LFO PAGE" on both screens would leave the player guessing which one
+                 * they are looking at -- and the TYPE and KEY TRK knobs are the only
+                 * thing that would tell them. */
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE 2", sk.ink);
             else if (lfo_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE", sk.ink);
             else if (arp_page)
@@ -3938,7 +3991,7 @@ void app_frame(void)
         knob_c(62,  KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2, C_ED_LOOPS);
         knob_c(120, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3, C_ED_LOOPE);
         knob_c(178, KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1, C_ED_END);
-    } else if (lfo_page) {
+    } else if (lfo_main) {
         /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
          * the page's knobs are read. RATE prints Hz, because a rate in percent is not
          * a rate; DEPTH prints octaves, because CUT is exponential. */
@@ -3946,10 +3999,16 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "RES",   pct(k_res), k_res, 0);
         knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(k_lfo_rate), k_lfo_rate, 1);
         knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
-    } else if (fx_page) {
-        /* The FX page: the filter's own. CUT and RES stay on K1 and K2 because they ARE
-         * the filter, exactly as on the LFO page -- and because a page that moved them
-         * would make the two pages disagree about where the filter lives.
+    } else if (lfo_fx) {
+        /* The LFO's SECOND SCREEN, which is where the filter's deep settings live now.
+         *
+         * The player's call: TYPE and KEY TRK are not a subject of their own, they are
+         * how the LFO's filter behaves, so the page they belong to is the LFO's. That
+         * also frees B_FX for an effect the instrument does not have yet.
+         *
+         * CUT and RES stay on K1 and K2 because they ARE the filter, and because a
+         * screen that moved them would make screen 2 disagree with screen 1 about where
+         * the filter lives.
          *
          * TYPE's ring fills 1/3 then 2/3 then 3/3, which is the only thing a three-state
          * ring can say; the name in the hole says which. KEY TRK's ring shows the actual
@@ -4183,6 +4242,8 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "ftype"))       { *got = k_ftype;  return 1; }
     if (!strcmp(what, "ktrack"))      { *got = k_ktrack; return 1; }
     if (!strcmp(what, "fx_page"))     { *got = fx_page;  return 1; }
+    if (!strcmp(what, "page_no"))     { *got = page_no;  return 1; }
+    if (!strcmp(what, "page"))        { *got = page;     return 1; }
     /* SYNTH's EDIT page. `foff` is the offset of the frame K4 has selected -- the value
      * the three digit knobs are turning -- and `edit_frame` is which one that is. A test
      * that only checked one of them could not tell "the knob did nothing" from "the knob

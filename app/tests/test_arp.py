@@ -76,8 +76,13 @@ def main():
 
     print("arp: the page and its knobs")
 
-    ok, bad = all_ok("tap ARP\nexpect arp 1\ntap ARP\nexpect arp 0\n")
-    check("B_ARP toggles the page", ok, "" if ok else bad[0].strip())
+    # The page button advances, it does not close (player's rule, this session). ARP has
+    # one screen, so pressing it again stops in place -- and that is the rule working,
+    # not a special case: the exit is HOME for every page.
+    ok, bad = all_ok("tap ARP\nexpect arp 1\ntap ARP\nexpect arp 1\n"
+                     "tap ARP\nexpect arp 1\ntap HOME\nexpect arp 0\n")
+    check("B_ARP opens its page and stays there until HOME", ok,
+          "" if ok else bad[0].strip())
 
     ok, bad = all_ok("tap ENV\ntap ARP\nexpect arp 1\nexpect env 0\ntap LFO\nexpect lfo 1\nexpect arp 0\n")
     check("the three pages exclude each other", ok, "" if ok else bad[0].strip())
@@ -233,10 +238,11 @@ def main():
     # are carried by RATE, so any of them as the condition would blink a lamp for an
     # arp that never steps.
     print("arp: the lamp announces the page, then keeps blinking while armed")
+    # HOME, not a second ARP press, is what closes the page now.
     out, rc = run("leds\n"
                   "tap ARP\nmaster 200\nwait 100\nleds\n"
                   "turn K1 4\nmaster 200\nwait 100\nleds\n"
-                  "tap ARP\nmaster 200\nwait 100\nleds\n"
+                  "tap HOME\nmaster 200\nwait 100\nleds\n"
                   "wait 150\nleds\nwait 150\nleds\nwait 150\nleds\n")
     seen = [l.split("leds:")[1].split("|")[0].strip() for l in out if "leds:" in l]
     check("nothing is lit before the page is opened", "ARP" not in seen[0], seen[0])
@@ -248,8 +254,8 @@ def main():
 
     # RATE back to zero while the page is shut: the last sample must stay dark. The
     # order matters -- turning K1 while ARP's page is up would move RATE again.
-    out, rc = run("tap ARP\nturn K1 4\ntap ARP\nmaster 200\nwait 100\n"
-                  "tap ARP\nturn K1 -4\ntap ARP\nmaster 200\nwait 100\n"
+    out, rc = run("tap ARP\nturn K1 4\ntap HOME\nmaster 200\nwait 100\n"
+                  "tap ARP\nturn K1 -4\ntap HOME\nmaster 200\nwait 100\n"
                   "wait 150\nleds\nwait 150\nleds\nwait 150\nleds\n")
     off = [("ARP" in l.split("leds:")[1]) for l in out if "leds:" in l]
     check("an arp at RATE 0 does not blink after the page closes",
