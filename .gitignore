@@ -5,3 +5,9 @@ web/words/
 *.png
 *.wav
 midi_out.txt
+
+# ...except the bank figures the documentation is made of: tools/gen_wv_figures.py draws
+# docs/img/wv-*.png from the same BANKS table the firmware is built from. (docs/img's
+# screen-*.png are fm1-base's template shots, referenced by MANUAL.md, and are not in
+# this repository.)
+!app/docs/img/wv-*.png

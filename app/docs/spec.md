@@ -1012,10 +1012,12 @@ have shown:
 1. **FOLD inverted the signal.** The triangle was centred on 0 instead of +2, so
    the curve was -f(x): a phase inversion dressed up as a fold. Caught by "is odd"
    plus "is monotonic" — the obvious fold test (does it turn around) passed.
-2. **MORPH was a volume knob.** OPEN3 swung 12.8 dB from frame 0 to frame 7,
-   because a formant climbing the harmonic series gets spikier at equal partial
-   count. Whole-bank peak normalisation cannot see this; per-frame RMS equalisation
-   fixes it (now 0.0 dB spread). Caught by measuring the rendered demo.
+2. **MORPH was a volume knob.** OPEN3 swings 3.2 dB from frame 0 to frame 7 under
+   whole-bank peak normalisation alone, because a formant climbing the harmonic
+   series gets spikier at equal partial count. Peak normalisation cannot see this;
+   per-frame RMS equalisation fixes it (now 0.00 dB spread, all eight banks).
+   Measured by rebuilding the bank with the RMS step removed. (This entry said
+   12.8 dB for a while; that number does not reproduce and was wrong.)
 3. **A solo note was at -19 dBFS.** Two separate 6 dB headroom factors, in the
    velocity map and in the voice gain, neither aware of the other. The demo
    measured -25.5 dBFS end to end.

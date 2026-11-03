@@ -43,11 +43,12 @@ def norm_bank(frames):
     """Two steps, and the second is what actually makes MORPH a timbre knob.
 
     1. **Equalise each frame's RMS.** Without this, MORPH is a volume knob: OPEN3
-       as first written swung 12.8 dB from frame 0 to frame 7 because a formant
-       moving up the harmonic series gets spikier (crest 2.1 -> 4.1) even at
-       identical partial count. Measuring that in the rendered demo is what caught
-       it. Frames of a nearly silent spectrum are left alone rather than blown up
-       into noise.
+       swings 3.2 dB from frame 0 to frame 7 under peak normalisation alone,
+       because a formant moving up the harmonic series gets spikier (crest
+       2.14 -> 3.21) even at identical partial count. Measured by rebuilding the
+       bank with step 1 removed; the older comment here claimed 12.8 dB, which
+       does not reproduce. Frames of a nearly silent spectrum are left alone
+       rather than blown up into noise.
     2. **Then scale the bank by one factor** so its loudest point is full scale,
        so int16 never clips. Banks still differ from each other in loudness (their
        crest factors differ), which is correct: they are different instruments.
