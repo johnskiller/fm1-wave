@@ -92,23 +92,28 @@ A **page** is not a mode, and the distinction is what makes the layout legal:
   to the parameter it had
 - **no value is lost** — the page edits its own parameters, not the knobs'
 
-### The page button advances, and `B_HOME` is the only exit
+### One rule: every button enters a page, and pressing it again advances
 
-Decided on the instrument, 2026-11-03, when the LFO needed a second screen and it
-became clear the panel had no way to say "next" *and* "close" with one button:
+Decided on the instrument, 2026-11-03, when the LFO needed a second screen:
 
-- **A page's own button never closes its page. It advances.** Press it again and you
-  are on the page's second screen, then the third, then **back on the first**. It is
-  the only way to walk a page's screens, so the walk has to be a cycle — a last screen
-  that stopped dead would make the first screen reachable only by leaving the page and
-  coming back.
-- **Leaving is somebody else's job**: another page button, or **`B_HOME`**, which
-  always means "back to the voice". `B_HOME` is the exit from every page, from any
-  screen.
+- **A page's own button never closes its page. It advances, and it rounds.** Press it
+  again and you are on the page's second screen, then the third, then **back on the
+  first**. It is the only way to walk a page's screens, so the walk has to be a cycle —
+  a last screen that stopped dead would make the first screen reachable only by leaving
+  the page and coming back.
+- **There is no "close" and no "exit".** Every button that names a page presses it, and
+  the page you are on is whichever button you pressed last.
+- A one-screen page rounds onto itself, so a second press is a **no-op**. ENV and ARP
+  are one screen each; this is the same arithmetic, not a branch that special-cases them.
 - **Coming back always starts at screen 1**, so the way in is the same every time.
-- A one-screen page (ENV, ARP) therefore rounds onto itself: pressing `B_ENV` twice is
-  a **no-op**, and that is the rule rather than a special case. It is what teaches the
-  player that `B_HOME`, not the page button, is the exit.
+
+**The voice is a page too, and `B_HOME` enters it** (player: "可以把HOME理解为voice页面").
+That is what makes this one rule instead of a rule plus an escape hatch. The voice has
+one screen today — the instrument has one oscillator — so pressing `B_HOME` while on it
+is a no-op, exactly like ENV and ARP. **When the second VCO lands the voice page has two
+screens (VCO 1 / VCO 2) and `B_HOME` rounds between them**, like any other multi-screen
+page. The 2-VCO plan's "HOME selects the VCO" and this session's "HOME leaves the page"
+turned out to be the same requirement, not two competing ones.
 
 Why not keep the toggle on one-screen pages and advance on multi-screen ones: the same
 button would mean two things depending on an invisible property of the page, and the
@@ -134,8 +139,8 @@ needed a permanent knob, and `EN_ALGO` was it.
 | page up | **ATTACK** 1 ms–4 s | **DECAY** 2 ms–8 s | **SUSTAIN** 0–127 | **RELEASE** 2 ms–8 s | unchanged | unchanged | unchanged |
 
 Any source. `B_ENV` opens the page; a second press is a no-op, because the page has
-one screen and the page button advances rather than closes (see **The page button
-advances** above). Leave with `B_HOME` or another page button. `SELECT`, `ALGO` and
+one screen and the page button advances rather than closes (see **One rule** above).
+Leave with `B_HOME` (the voice page) or another page button. `SELECT`, `ALGO` and
 `PRESET` keep doing what the current source says, because a page only takes the knobs
 it needs.
 
@@ -473,7 +478,7 @@ The offset is per frame and the ramp is the page's own: K3 rewrites all eight
 | `B_SEQ` | SEQ | nothing (not read anywhere in the platform) | **free** | — |
 | `B_PLAY` | PLAY | **safe mode only**: a second failed boot, then PLAY = "try again" | platform | main_fm1.c:818 |
 | `B_REC` | REC | **power-on only**: held at boot = UPDATE MODE | platform | main_fm1.c:968 |
-| `B_HOME` | HOME | **leave any page** — the panel's only exit, at any screen. Also the platform's "no" in the RESTORE prompt | **app** (platform: unity.c:340) | app.c |
+| `B_HOME` | HOME | **the voice page** — enters it from anywhere; one screen today, so a second press is a no-op. With 2 VCOs it becomes two screens and rounds. Also the platform's "no" in the RESTORE prompt | **app** (platform: unity.c:340) | app.c |
 | `B_OCT-` | OCT- | **power-on only**: with OCT+ = hardware calibration | platform | main_fm1.c:966 |
 | `B_OCT+` | OCT+ | **power-on only**: same | platform | main_fm1.c:966 |
 
@@ -483,8 +488,8 @@ Not all "platform" is equal, and it decides whether a button is usable:
 
 - **`B_REC` and the OCT pair are read only at power-on.** Using them while the
   instrument runs breaks nothing.
-- **`B_HOME` is read only inside the RESTORE prompt**, which appears only during a
-  restore. Otherwise completely idle.
+- **`B_HOME` is the platform's RESTORE "no"**, and the app's voice-page button. The
+  platform owns it only for the RESTORE prompt, which appears only during a restore.
 - **`B_PLAY` is not just a lamp** — the earlier note in this file said it was, and
   that was wrong. `safe_main()` reads it: after two failed boots the firmware parks
   in safe mode where PLAY means "start the app again". That mode is never entered in
@@ -1091,7 +1096,7 @@ only says "moved"; the screen says which.
 
 | Function | State | Why unassigned |
 |---|---|---|
-| **PANIC** / all-notes-off | not implemented | no button left for it: `B_HOME` is reserved for the VCO selector (spec.md §5d). Panic reaches the panel anyway -- the platform silences the synth at power-cycle, and MIDI CC 123 covers the external case |
+| **PANIC** / all-notes-off | not implemented | no button left for it: `B_HOME` is the voice page (whose screen 2 becomes the VCO selector, spec.md §5d). Panic reaches the panel anyway -- the platform silences the synth at power-cycle, and MIDI CC 123 covers the external case |
 | Material page | not implemented | no button of its own; spec's `BTN_BANK` names a control this panel does not have |
 | Octave shift | not implemented | `B_OCT-` / `B_OCT+`, power-on conflict only |
 | Glide / portamento | not in the DSP | `B_GLO` is free |
@@ -1109,12 +1114,12 @@ button.
 ## Free buttons, and what each could carry
 
 The suggestions are grouped by **cost**, because there are more free buttons than
-pending functions. `B_HOME` and `B_FX` are no longer among them: HOME is the panel's
-exit (see **The page button advances** above) and FX waits for the effects.
+pending functions. `B_HOME` and `B_FX` are no longer among them: HOME is the voice page
+(see **One rule** above) and FX waits for the effects.
 
 | Button | Could carry | Cost / caveat |
 |---|---|---|
-| ~~`B_HOME`~~ | ~~VCO 1 / VCO 2~~ | **taken** — it is the panel's page exit (see **The page button advances**). The player's 2-VCO plan wanted HOME for the VCO selector; the two cannot both hold, and the exit won because it exists today and the 2-VCO patch does not. **Open**: where the VCO selector goes |
+| `B_HOME` | **VCO 1 / VCO 2** | **the plan and the page model agree**: HOME enters the voice page, whose screen 2 will be the VCO selector once a second oscillator exists. No other button needed |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
 | `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
 | `B_FX` | **reverb / delay / chorus** | the player's plan: a full page of effects, and it will not fit one screen (same page rule: screen 1 = the four most-used knobs, press again for screen 2). Opens nothing until then, on purpose |
@@ -1123,13 +1128,13 @@ exit (see **The page button advances** above) and FX waits for the effects.
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 
 **If only one is done**: `B_GLO` → glide, which is the cheapest genuinely-missing
-function. `B_HOME` carries the exit now and `B_FX` waits for the effects; `B_SEQ` is
+function. `B_HOME` is the voice page and `B_FX` waits for the effects; `B_SEQ` is
 Saadet's territory.
 
-**`B_HOME` and the two VCOs**: the player's plan for a second oscillator is `B_HOME` as
-the VCO selector (WORKLOG / spec.md §5d), and this session spent `B_HOME` on the page
-exit instead. Those two cannot both hold: unless the exit moves, the VCO selector needs
-another button. Flagged here rather than resolved, because the 2-VCO patch is not built.
+**`B_HOME` and the two VCOs**: settled, and there was never a conflict. HOME enters the
+voice page; the voice's screen 2 will be the VCO selector, so choosing an oscillator is
+one press of HOME away from playing it -- which is what the player wanted in the first
+place (spec.md §5d).
 
 ---
 

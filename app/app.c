@@ -112,10 +112,21 @@ static smp_region     region[SMP_MAX];
  *
  * The predicates below read like the flags this replaced, so that the hundreds of
  * places that ask "is the ENV page up" did not have to be rewritten. They are
- * rvalues only: assignment goes through page_press() or page = PAGE_NONE. */
-enum { PAGE_NONE, PAGE_ENV, PAGE_LFO, PAGE_ARP, PAGE_FX, PAGE_EDIT };
-static uint8_t page;         /* PAGE_NONE = the voice, the normal state */
-static uint8_t page_no = 1;  /* 1-based screen within the page */
+ * rvalues only: assignment goes through page_press(), or page = PAGE_VOICE. */
+/* The VOICE is a page. That is the player's reading, and it is the one that makes the
+ * whole panel a single rule rather than a rule plus an exit:
+ *
+ *   Every page is entered by its own button, which advances and rounds. The voice is the
+ *   page B_HOME enters. It has one screen today, because there is one oscillator, so
+ *   pressing HOME while on it is a no-op -- the same arithmetic as ENV and ARP. When the
+ *   second VCO arrives the voice page has two screens (VCO 1, VCO 2) and HOME rounds
+ *   between them, exactly like every other multi-screen page.
+ *
+ * There is therefore no "exit" and no "close": there are pages, one of them is the voice,
+ * and every button that names a page presses it. */
+enum { PAGE_VOICE, PAGE_ENV, PAGE_LFO, PAGE_ARP, PAGE_FX, PAGE_EDIT };
+static uint8_t page = PAGE_VOICE;   /* power-on: playing the voice, nothing up */
+static uint8_t page_no = 1;         /* 1-based screen within the page */
 
 #define env_page   (page == PAGE_ENV)
 #define lfo_page   (page == PAGE_LFO)
@@ -134,7 +145,7 @@ static uint8_t page_no = 1;  /* 1-based screen within the page */
 /* How many screens each page has. A page not listed here has one, which is what
  * PAGE_SCREENS falls back to -- ENV and ARP are one and will stay one. */
 static const uint8_t PAGE_SCREENS[] = {
-    [PAGE_NONE] = 1,   /* never advanced: pressing nothing does nothing */
+    [PAGE_VOICE] = 1,  /* one screen until the second VCO exists, then it rounds */
     [PAGE_ENV]  = 1,
     [PAGE_LFO]  = 2,   /* rate/depth, then the filter's tap and tracking */
     [PAGE_ARP]  = 1,
@@ -154,8 +165,8 @@ static void page_press(uint8_t which)
          * only by leaving the page and re-entering it.
          *
          * A one-screen page therefore lands back on screen 1, which is where it already
-         * was: pressing ENV twice is a no-op, and that is still the rule rather than a
-         * special case. */
+         * was: pressing ENV twice is a no-op, and so is pressing HOME while the voice page
+         * is up. That is the rule rather than a special case. */
         page_no = (uint8_t)(page_no % PAGE_SCREENS[which] + 1u);
     }
 }
@@ -1149,24 +1160,26 @@ static void input(void)
      * note on env_page. */
     if (btn_pressed(btn, B_ENV))
         page_press(PAGE_ENV);          /* one screen: pressing again stays put */
-    /* B_HOME: LEAVE THE PAGE, whichever one is up.
+    /* B_HOME opens THE VOICE PAGE.
      *
-     * The panel needed one button that always means "out", because the page button
-     * cannot mean that any more. A page with more than one screen uses its own button to
-     * advance (see the page rule in spec.md §6b), so pressing it is "next", not "close",
-     * and a player who has walked to page 2 of the LFO would have no way back to the
-     * voice except pressing something that also switches something on.
+     * Not an exit -- a page, and the same rule as every other page button: press it and
+     * you are on that page; press it again and you advance through that page's screens,
+     * rounding at the end (player, this session: "可以把HOME理解为voice页面"). The voice
+     * has one screen today, because the instrument has one oscillator, so a second press
+     * is a no-op -- which is what ENV and ARP do too, and it is the same arithmetic, not a
+     * special case. When the second VCO lands the voice page has two screens (VCO 1 /
+     * VCO 2) and HOME rounds between them, exactly like the LFO rounds between RATE/DEPTH
+     * and the filter's tap.
      *
-     * B_HOME was the only button with nothing to lose: the platform reads it only inside
-     * the RESTORE prompt (unity.c:340, "no" to a factory restore), which is a screen this
-     * app never draws. So the rule is simple and it does not have to be discovered: HOME
-     * always returns you to playing the voice.
+     * That also settles what looked like a conflict: the player's 2-VCO plan wanted HOME
+     * as the VCO selector, and this session had spent it on "leave the page". They are
+     * the same thing. Choosing a VCO is screen 2 of the voice page, so the button that
+     * takes you to the voice is the button that chooses the oscillator.
      *
-     * It does nothing when no page is up -- it is a way out, not a destination, and a
-     * button that did something surprising from the idle screen would be worse than one
-     * that is quiet there. */
+     * B_HOME had nothing to lose: the platform reads it only inside the RESTORE prompt
+     * (unity.c:340, "no" to a factory restore), a screen this app never draws. */
     if (btn_pressed(btn, B_HOME))
-        page = PAGE_NONE;
+        page_press(PAGE_VOICE);
 
     /* B_FX: the filter's own page, and the second of the two buttons the panel had
      * spare (panel-map.md listed it as free, with "filter type" already pencilled in).
@@ -1366,13 +1379,13 @@ static void input(void)
          * changes the instrument). This is the other half of that rule -- the page cannot
          * outlive the source that owns it. */
         if (src != SRC_SMPL && src != SRC_SYNTH)
-            if (edit_page) page = PAGE_NONE;
+            if (edit_page) page = PAGE_VOICE;
         /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
          * rather than reinterpreting the same flag as the other source's page. The flag
          * means "this source's material editor", and the two editors edit different
          * things with different knobs. */
         if (edit_src != src)
-            if (edit_page) page = PAGE_NONE;
+            if (edit_page) page = PAGE_VOICE;
     }
 
     /* B_SAVE: write the whole panel state to flash, now.

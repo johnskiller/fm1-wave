@@ -405,25 +405,30 @@ shot grn.png
         ck(expect("tap %s\ntap %s\n" % (btn, btn), probe, 1),
            "%s pressed twice stays on its one screen" % btn)
 
-    # ── B_HOME is the way out ──────────────────────────────────────────────────
-    # The page button cannot mean "close" once a page has more than one screen: it
-    # advances. So the panel needs one button that always returns to the voice, and
-    # HOME is the only one with nothing to lose (the platform reads it only inside the
-    # RESTORE prompt, a screen this app never draws).
+    # ── B_HOME is the voice page ───────────────────────────────────────────────
+    # Not an exit: a page, and the same rule as every other page button (player, this
+    # session: "可以把HOME理解为voice页面"). The voice has one screen today -- one
+    # oscillator -- so a second press is a no-op, which is exactly what ENV and ARP do.
+    # When the second VCO lands this page has two screens and HOME rounds between them.
     #
-    # Checked on all five pages, and the fourth case is the one that would bite: HOME
-    # with no page up must do nothing at all. A button that quietly changed a parameter
-    # from the idle screen would be worse than one that is dark.
-    print("B_HOME leaves any page, and does nothing when there is none")
+    # Checked on every other page, and the last case is the one that would bite: HOME
+    # from the voice page must do nothing at all. A button that quietly changed a
+    # parameter from the idle screen would be worse than one that is dark.
+    print("B_HOME is the voice page: it enters it from anywhere, and no-ops on it")
     for btn, probe in (("ENV", "env"), ("LFO", "lfo"), ("ARP", "arp"),
                        ("EDIT", "edit")):
         ck(expect("tap %s\n" % btn, probe, 1), "%s's page opens" % btn)
         ck(expect("tap %s\ntap HOME\n" % btn, probe, 0), "HOME closes %s" % btn)
         ck(expect("tap %s\ntap HOME\n" % btn, "cut", 127),
            "and %s's knobs go back to the voice's" % btn)
-    ck(expect("tap HOME\n", "cut", 127), "HOME from the idle screen changes nothing")
+    ck(expect("tap HOME\n", "cut", 127), "HOME from the voice page changes nothing")
     ck(expect("tap HOME\nturn K1 -4\n", "cut", 111),
        "and the voice's knobs still work afterwards")
+    # The voice IS page 0, not "no page": that is what makes one rule cover everything.
+    ck(expect("tap HOME\n", "page", 0), "the voice page is the page index the panel idles on")
+    ck(expect("tap HOME\n", "page_no", 1), "and it has one screen, so HOME lands on 1")
+    ck(expect("tap HOME\ntap HOME\ntap HOME\n", "page_no", 1),
+       "pressing HOME on the voice page is a no-op however many times")
 
     # ── every page announces itself on its own button ──────────────────────────
     # The rule the panel follows is "a page lights its button solid; a setting that

@@ -100,8 +100,8 @@ master 400
 expect page_no 2
 tap HOME
 master 400
-expect page_no 2
 expect page 0
+expect page_no 1
 tap LFO
 master 300
 expect page_no 1

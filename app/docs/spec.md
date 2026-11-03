@@ -153,21 +153,29 @@ the hand and wrong on the screen: the knob labelled SELECT did nothing in two of
 three modes, and the knob labelled PRESETS was choosing the bank. Position is the
 name, so the name has to match the position.
 
-### Pages: a button that advances, and `B_HOME` that leaves
+### Pages: a button that advances, and the voice as a page
 
 Things that do not fit on the seven encoders are a **page**: press the panel button
 and the encoders become that page. A short label in the header says which page is up
 while it is up.
 
 **The page's own button does not close it.** It advances: press again and you are on
-the page's second screen, then the third, then back on the first. Leaving is somebody
-else's job — another page button, or `B_HOME`, which always means "back to the voice",
-from any page and any screen. Coming back always starts at screen 1. A one-screen page
-(ENV, ARP) therefore rounds onto itself, so a second press is a no-op; that is how the
-panel teaches that `B_HOME` is the exit. Decided on the instrument 2026-11-03, when the
-LFO gained a second screen: one button cannot mean "next" and "close" at once, and the
-version that meant whichever the page happened to need would have surprised the player
-the first time they pressed a two-screen page expecting it to close.
+the page's second screen, then the third, then back on the first — a cycle, because it
+is the only way to walk the screens. Moving to another page is just pressing that
+page's button. Coming back always starts at screen 1. A one-screen page (ENV, ARP)
+therefore rounds onto itself, so a second press is a no-op.
+
+**The voice is a page, and `B_HOME` enters it.** So the panel has no "close" and no
+"exit": every button names a page and presses it, and the page you are on is whichever
+button you pressed last. The voice page has one screen today — one oscillator — so
+`B_HOME` on it is a no-op like ENV; **with the second VCO it becomes two screens (VCO 1
+/ VCO 2) and `B_HOME` rounds between them**. The 2-VCO plan of using `B_HOME` to choose
+the oscillator therefore needs no separate button.
+
+Decided on the instrument 2026-11-03, when the LFO gained a second screen: one button
+cannot mean "next" and "close" at once, and the version that meant whichever the page
+happened to need would have surprised the player the first time they pressed a
+two-screen page expecting it to close.
 
 Screen counts are one table (`PAGE_SCREENS[]` in `app.c`); the LFO has two and is the
 page expected to grow (a second LFO, LFO waveform choice, modulation targets). The lamp
@@ -188,9 +196,9 @@ page" until the bars change under your fingers.
   already uses elsewhere.
 
 Pages are mutually exclusive (opening one closes the rest), and **turning any encoder
-whose page is up does not leave the page** — you leave with `B_HOME` or another page
-button. Leaving by timeout was considered and rejected: an envelope tweak with a pause
-in it should not silently revert to the tone page under your fingers.
+whose page is up does not leave the page** — you move with another page button
+(`B_HOME` for the voice). Leaving by timeout was considered and rejected: an envelope
+tweak with a pause in it should not silently revert to the tone page under your fingers.
 
 At power-on the envelope is A 5 ms, D 300 ms, S 0.7, R 250 ms: a sound on the
 first key press, not a silent instrument waiting to be configured.
@@ -608,9 +616,11 @@ the reason is that the two axes were never the same axis:
     what a grain needs: reverse, density, how far the cloud is spread across the stereo
     field. Each of those is a property of the material, so each of them belongs on the
     button that is already pointed at the material.
-  - **`B_HOME` chooses between the two VCOs of one patch** (planned, not built). Two
-    oscillators are a property of the VOICE, so they get their own button rather than
-    sharing EDIT's.
+  - **`B_HOME` chooses between the two VCOs of one patch** (planned, not built), as
+    **screen 2 of the voice page**: two oscillators are a property of the VOICE, and the
+    voice is a page (§3), so the VCO selector is that page's second screen rather than a
+    separate mode. Pressing `B_HOME` walks voice screen 1 → 2 → 1, which is the same rule
+    as every other page.
 
 That split is what makes the three source editors stop competing: adding GRAN's page does
 not take anything from SMPL's or SYNTH's, and a second VCO does not take anything from any
@@ -619,10 +629,11 @@ says edit the voice, and the pages built since then have all been source structu
 button was named for the deeper idea and has been used for the narrower one; the narrower
 one is what it does.
 
-`B_HOME` is the right button for it and was idle: the platform reads it only inside the
-RESTORE prompt (`unity.c:340`, "no" to a factory restore) and PANIC was the only other
-candidate. A VCO selector is a per-patch mode, which is closer to "home" than to the
-panic the panel already reaches through all-notes-off at power-cycle.
+`B_HOME` is the right button for it: the platform reads it only inside the RESTORE
+prompt (`unity.c:340`, "no" to a factory restore) and PANIC was the only other candidate.
+A VCO selector is a per-patch mode, which is closer to "home" than to the panic the panel
+already reaches through all-notes-off at power-cycle — and with the voice modelled as a
+page it is not even a new mode, just that page's second screen.
 
 Still to settle when a second VCO is actually built: what the screen does with two
 oscillators' worth of picture (the material band draws one source today), and whether the
@@ -1152,12 +1163,15 @@ disagree. Checked as behaviour, on the host:
 - **the walk and the round** — `tap LFO` → `page_no 1`, again → `2`, again → `1`, again
   → `2`. Injected: a version that stops on the last screen fails one check.
 - **one screen is a no-op, not a special case** — ENV and ARP pressed twice stay up.
-- **`B_HOME` leaves every page from any screen**, and its knobs come back: after HOME,
-  `cut` reads 127 again on each of the four pages. Injected: a HOME that does nothing
-  fails five checks, one per page.
-- **HOME from the idle screen changes nothing**, and the voice's knobs still work
-  afterwards (`cut` 127 → 111 after one detent). A button that quietly edited a
-  parameter from the idle screen would be worse than one that is dark.
+- **`B_HOME` enters the voice page from any page and any screen**, and the page's knobs
+  come back: after HOME, `cut` reads 127 again on each of the four pages. Injected: a
+  HOME that does nothing fails 8 checks in `test_screen` and 2 in `test_fx`.
+- **HOME on the voice page changes nothing**, and the voice's knobs still work afterwards
+  (`cut` 127 → 111 after one detent). A button that quietly edited a parameter from the
+  voice page would be worse than one that is dark. Injected: giving the voice page two
+  screens fails 2 checks.
+- **the voice is page 0 with one screen** — `page` and `page_no` after HOME, and three
+  presses in a row leave `page_no` at 1.
 - **screen 2 is still the LFO's page** — `K3` there moves `ftype` and does *not* move
   `lfo_rate`, and the LFO lamp stays lit. Injected: letting screen 1's knob handler
   answer on screen 2 fails two checks.
@@ -1298,7 +1312,8 @@ Named so they are decisions and not omissions:
 ## 11. Open questions
 
 1. **Pages**: the page model is settled (§3) — a page button advances through its
-   screens and rounds, `B_HOME` is the only exit, coming back starts at screen 1. Open:
+   screens and rounds, the voice is a page entered by `B_HOME`, coming back starts at
+   screen 1. Open:
    does the header need the page's name, or is the changed bar set enough of a signal?
 2. **Granular budget**: 4 grains × 4 voices as the starting point — does that
    match the texture you want, or is a dense 8-grain single voice more the
