@@ -13,7 +13,6 @@
 #include "touch.h"
 #include "wv_dsp.h"
 #include "wv_sample.h"
-#include "wv_slice.h"
 #include "wv_banks.h"
 #include "build_id.h"          /* the commit this image is: tools/gen_build_id.py */
 
@@ -33,9 +32,37 @@ static void           midi_in(void);      /* (defined below: app_render asks it 
 static uint32_t       pool_len;
 static wv_sample      smp[SMP_MAX];
 static uint8_t        smp_count;
-static wv_slice        slices[WV_SLICE_MAX];
-static uint8_t        slice_count;
-static uint8_t        smp_i;      /* which slot EN_PRESET picked, in SMPL */
+static uint8_t        smp_i;      /* which slot EN_SELECT picked, in SMPL and GRAN */
+
+/* ── the region of a slot that sounds, one per slot ──────────────────────────
+ *
+ * Until this existed a sample played [0, len) once: the reader could already take a
+ * range and loop inside it, but there was no way to set one, so SMPL and GRAN both
+ * used the whole slot and a held key on a long sample went silent when the material
+ * ran out. These four numbers per slot are what the EDIT page moves.
+ *
+ * start/end is the region the voice plays; loop_s/loop_e is the part it repeats. The
+ * reader owns both pairs separately (wv_reader_range + wv_reader_loop), so the voice
+ * plays start..end and, on reaching end, wraps to loop_s -- which is the normal
+ * sampler layout: an attack before the loop, and the loop for as long as the key is
+ * down. loop_s == start and loop_e == end is the plain "loop the whole region".
+ *
+ * Per slot, for the same reason the pool's playhead is per slot: a boundary belongs
+ * to the material it was found in. Switching slots and back returns to the region
+ * that slot was given, and switching slots never needs a re-analysis of the new one.
+ *
+ * Kept in RAM only. Nothing in this app is stored yet (B_SAVE is unused), so a power
+ * cycle loses the edits and reloads this default.
+ */
+typedef struct {
+    uint32_t start, end, loop_s, loop_e;
+    uint8_t  on;                  /* loop on/off, the PRESET knob in EDIT */
+} smp_region;
+
+static smp_region     region[SMP_MAX];
+static uint8_t        edit_page;
+static uint8_t        edit_zoom;      /* 0..7: the visible fraction is 1/2^edit_zoom */
+static uint8_t        edit_live;      /* which marker the last turn moved: keeps the window there */
 /* Where each slot's cloud resumes. The picture is meant to be readable while you play,
  * and at 210 px/s on the demo kit a bar crosses the band in 0.84 s -- faster than the
  * eye resolves, so what you see is a blur and then nothing when the note stops.
@@ -48,8 +75,6 @@ static uint8_t        smp_i;      /* which slot EN_PRESET picked, in SMPL */
  *
  * Per slot, because the position belongs to the material: switching slots and back
  * returns to where that sample was left. */
-
-static uint8_t        slices_from; /* the slot the current chops came out of */
 
 /* SOURCE: which thing a key plays. SYNTH reads the wavetable, SMPL reads the pool as
  * a sampler, GRAN reads the same pool as a grain cloud. Three sources, one switch:
@@ -281,28 +306,97 @@ static uint8_t arp_gated;                 /* the note of this step has already e
 static volatile int16_t wf_buf[WF_SPAN];
 static volatile uint16_t wf_idx;
 
-/* Chop the selected slot, and record that the chops came from it.
+/* The region a slot starts with: all of it, looping all of it, loop off.
  *
- * The two have to move together. EN_PRESET changed `smp_i` and left the chops where they
- * were, so SMPL kept playing the boot slot's slices: the screen said SLOT 2/2 and the
- * sound was SLOT 1/2, which is exactly the defect this function exists to make
- * impossible. GRAN differed because it reads `smp[smp_i]` directly, and that difference
- * -- one source honouring the knob and one not -- is what made it visible at all.
- *
- * A slot that is a single hit finds one slice, which is the whole hit, and that is right:
- * one chop is still a chop.
- *
- * Called at boot and on every slot change. Re-chopping on a slot change discards a manual
- * EDIT, which is correct: a chop belongs to the material it was cut from, so carrying the
- * old boundaries into new material would play the wrong region of the wrong sample. */
-static void reslice(void)
+ * Loop off by default because that is what SMPL did before the page existed: a key
+ * plays the material once. Turning LOOP on is the change a player makes on purpose.
+ * The loop range defaults to the whole region so that turning LOOP on with the range
+ * untouched loops what is already sounding, instead of looping somewhere else. */
+static void region_reset(uint8_t i)
 {
-    if (smp_count)
-        slice_count = (uint8_t)wv_slices_split(&smp[smp_i], 0.02f, 200, slices, WV_SLICE_MAX);
-    else
-        slice_count = 0;
-    slices_from = smp_i;
+    if (i >= SMP_MAX)
+        return;
+    region[i].start  = 0;
+    region[i].end    = smp[i].len;
+    region[i].loop_s = 0;
+    region[i].loop_e = smp[i].len;
+    region[i].on     = 0;
 }
+
+static void region_reset_all(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < SMP_MAX; i++) {
+        region_reset(i);
+        if (i >= smp_count)
+            break;                          /* the rest are zero-length anyway */
+    }
+}
+
+/* Keep one slot's region inside its own material, after a turn or a slot change.
+ *
+ * The four numbers are edited independently, so they can be told to cross: START can
+ * be turned past END, LOOP END past END. Instead of refusing the turn (the knob then
+ * feels stuck, and which of the four is at fault is invisible on a 240 px screen), the
+ * numbers are pushed apart by the minimum that makes them valid. A one-sample region
+ * cannot interpolate, which is the reason for the 2 rather than the 1. */
+static void region_fix(uint8_t i)
+{
+    const uint32_t len = smp[i].len;
+
+    if (!len) {
+        region[i].start = region[i].end = region[i].loop_s = region[i].loop_e = 0;
+        return;
+    }
+    if (region[i].end > len)
+        region[i].end = len;
+    if (region[i].end < 2)
+        region[i].end = 2;
+    if (region[i].start > region[i].end - 2)
+        region[i].start = region[i].end - 2;
+
+    if (region[i].loop_e > region[i].end)
+        region[i].loop_e = region[i].end;
+    if (region[i].loop_e < region[i].start + 2)
+        region[i].loop_e = region[i].start + 2;
+    if (region[i].loop_s < region[i].start)
+        region[i].loop_s = region[i].start;
+    if (region[i].loop_s > region[i].loop_e - 2)
+        region[i].loop_s = region[i].loop_e - 2;
+}
+
+/* Turn `*v` by `d` steps of `step` samples, and report how far it actually moved, so
+ * a caller can stop nudging when the region refuses to give any more. */
+static int32_t region_step(uint32_t *v, int32_t d, uint32_t step, uint32_t lo, uint32_t hi)
+{
+    int64_t n = (int64_t)*v + (int64_t)d * (int64_t)step;
+    int64_t was = (int64_t)*v;
+
+    if (n < (int64_t)lo)
+        n = (int64_t)lo;
+    if (n > (int64_t)hi)
+        n = (int64_t)hi;
+    *v = (uint32_t)n;
+    return (int32_t)(n - was);
+}
+
+/* The step a turn moves a marker by, in samples: a thousandth of the slot at zoom 0,
+ * so the whole slot is 1000 detents, and proportionally finer as the window closes in.
+ * A fixed number of samples would be unusable at both ends -- 1 sample of a 3 s slot
+ * is 2500 turns, 1 sample at 8x zoom is invisible. */
+static uint32_t region_step_samples(const wv_sample *s)
+{
+    uint32_t step = s->len / 1000u >> edit_zoom;
+
+    /* Never zero. `(len / 1000) >> zoom` reaches 0 at 64x on a 3 s slot, and a zero
+     * step makes all four boundary knobs dead -- the page looks alive, the markers do
+     * not move. Measured: at 128x `turn K1 900` left region_start at 0. Below that
+     * point a turn is one sample, which is finer than the eye and exactly what a
+     * close zoom is for. */
+    return step ? step : 1u;
+}
+
 
 static void ui_apply(void)
 {
@@ -478,13 +572,6 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 
 /* ---------------------------------------------------------------- input --- */
 
-/* Slice map: the keys are 53..76 (NKEYS), the slices are numbered from SLICE_BASE
- * upward, because a chop is played near the bottom of the keyboard where a drummer
- * puts it and the top keys stay melodic. A slot with fewer slices than keys leaves
- * the rest playing the whole sample at the right pitch, which is what a player
- * expects when only four chops were made. */
-#define SLICE_BASE  53
-
 /* The platform reports buttons held, not pressed: plat_buttons() is a level. Every
  * "toggle on the press" has to make its own edge, and forgetting to is how a button
  * becomes a coin flip that lands while you hold it. */
@@ -499,7 +586,6 @@ static int btn_pressed(uint32_t now, int b)
  * same for both sources, which is why SOURCE is a switch and not a second engine. */
 static void play_note(uint8_t note, uint8_t vel)
 {
-    int k;
 
     if (src == SRC_SYNTH || !smp_count) {
         float hz = 440.0f * fm_exp2f((float)((int)note - 69) / 12.0f);
@@ -535,25 +621,18 @@ static void play_note(uint8_t note, uint8_t vel)
         return;
     }
 
-    /* the slice under this key, 1x from its own start: a chop is played, not
-     * detuned, so `note` only decides which chop */
-    /* The chops are only usable if they were cut from the slot that is selected now.
-     * reslice() keeps the two in step, and this check is the belt to that braces: if a
-     * future path changes `smp_i` without re-chopping, the keys fall back to the whole
-     * slot rather than playing one sample's boundaries inside another sample. Silence in
-     * the wrong place would be a bug; the wrong region of the wrong sample is worse
-     * because it still sounds like something. */
-    k = (int)note - SLICE_BASE;
-    if (k >= 0 && k < (int)slice_count && slices_from == smp_i) {
-        wv_note_on_slice(&dsp, &smp[smp_i], note, vel,
-                         slices[k].start, slices[k].end, 0);
-        return;
-    }
-
-    /* no chop under this key: the whole selected slot, pitched from its own root, so a
-     * sample can still be played as an instrument. This was `smp[0]` -- the boot slot --
-     * which made EN_PRESET a display-only control for every key above the chops. */
-    wv_note_on_sample(&dsp, &smp[smp_i], note, vel, 0, 0, 0);
+    /* The slot's own region, pitched from its root, so a sample is played as an
+     * instrument. This was `smp[0]` -- the boot slot -- which made EN_PRESET a
+     * display-only control, then a chop lookup, now the region the EDIT page sets:
+     * a sample is one thing with boundaries, not a kit of chops (the chop pass was
+     * removed when the region arrived; a kit is a different instrument).
+     *
+     * `region[i].on` is the LOOP switch. With it off the voice plays start..end once
+     * and goes quiet, which is what every SMPL key did before this existed. With it on
+     * it wraps inside loop_s..loop_e for as long as the key is held, so a held key on a
+     * long sample keeps sounding instead of running out of material. */
+    wv_note_on_sample(&dsp, &smp[smp_i], note, vel,
+                      region[smp_i].start, region[smp_i].end, region[smp_i].on);
 }
 
 /* --- the arpeggiator's clock and its walk ------------------------------------
@@ -873,19 +952,33 @@ static void input(void)
     if (btn_pressed(btn, B_ENV)) {
         env_page ^= 1u;
         if (env_page)
-            lfo_page = 0, arp_page = 0;   /* two pages cannot be up at once */
+            lfo_page = 0, arp_page = 0, edit_page = 0;   /* two pages cannot be up at once */
     }
     if (btn_pressed(btn, B_LFO)) {
         lfo_page ^= 1u;
         if (lfo_page)
-            env_page = 0, arp_page = 0;
+            env_page = 0, arp_page = 0, edit_page = 0;
     }
     /* B_ARP: the same page mechanism. The panel has had the button since the
      * beginning (plat.h's B_ARP) and nothing used it. */
     if (btn_pressed(btn, B_ARP)) {
         arp_page ^= 1u;
         if (arp_page)
-            env_page = 0, lfo_page = 0;
+            env_page = 0, lfo_page = 0, edit_page = 0;
+    }
+    /* B_EDIT: the sample editor, and the fourth page. It replaced a one-press
+     * re-chop: a button that re-analysed the slot and gave no way to see or change
+     * what it found was a button that either worked or did not, and the panel has
+     * four knobs going spare in SMPL. EDIT is only meaningful in SMPL, so the button
+     * switches source there rather than doing nothing; in the other two sources it
+     * leaves the source alone. */
+    if (btn_pressed(btn, B_EDIT)) {
+        if (src != SRC_SMPL)
+            src = SRC_SMPL;
+        else
+            edit_page ^= 1u;
+        if (edit_page)
+            env_page = 0, lfo_page = 0, arp_page = 0;
     }
 
     /* The LFO page takes K3 and K4, not K1 and K2.
@@ -900,23 +993,51 @@ static void input(void)
      * that stays useful while the arp is off -- a page where every knob does nothing
      * until one of them has been turned is a page you cannot see the state of. */
     if ((e = plat_enc(EN_K1)) != 0) {
-        if (env_page)      k_eg_a = (uint8_t)clamp((int32_t)k_eg_a + e * 4, 0, 127);
+        if (edit_page) {
+            int32_t d;
+            edit_live = 0;
+            d = region_step(&region[smp_i].start, e, region_step_samples(&smp[smp_i]),
+                            0, region[smp_i].end - 2u);
+            if (d) region_fix(smp_i);
+        }
+        else if (env_page)      k_eg_a = (uint8_t)clamp((int32_t)k_eg_a + e * 4, 0, 127);
         else if (arp_page) k_arp_rate = (uint8_t)clamp((int32_t)k_arp_rate + e * 4, 0, 127);
         else               k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K2)) != 0) {
-        if (env_page)      k_eg_d = (uint8_t)clamp((int32_t)k_eg_d + e * 4, 0, 127);
+        if (edit_page) {
+            int32_t d;
+            edit_live = 1;
+            d = region_step(&region[smp_i].end, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].start + 2u, smp[smp_i].len);
+            if (d) region_fix(smp_i);
+        }
+        else if (env_page)      k_eg_d = (uint8_t)clamp((int32_t)k_eg_d + e * 4, 0, 127);
         else if (arp_page) k_arp_type = (uint8_t)((k_arp_type + (e > 0 ? 1 : ARP_TYPE_N - 1)) % ARP_TYPE_N);
         else               k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K3)) != 0) {
-        if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
+        if (edit_page) {
+            int32_t d;
+            edit_live = 2;
+            d = region_step(&region[smp_i].loop_s, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].start, region[smp_i].loop_e - 2u);
+            if (d) region_fix(smp_i);
+        }
+        else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
         else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
         else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
     if ((e = plat_enc(EN_K4)) != 0) {
-        if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
+        if (edit_page) {
+            int32_t d;
+            edit_live = 3;
+            d = region_step(&region[smp_i].loop_e, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].loop_s + 2u, region[smp_i].end);
+            if (d) region_fix(smp_i);
+        }
+        else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
         else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
         else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
@@ -928,7 +1049,16 @@ static void input(void)
      * knob. GRAN needs seven controls for seven encoders, and this is the seventh.
      * In SMPL it stays MORPH and is dead, as it always was. */
     if ((e = plat_enc(EN_ALGO)) != 0) {
-        if (src == SRC_GRAN) k_grain = (uint8_t)clamp((int32_t)k_grain + e * 4, 0, 127);
+        if (edit_page) {
+            /* ZOOM: left is out, right is in, one step per detent, clamped at both
+             * ends. The window is a power of two of the slot, 1/2^zoom, so eight
+             * steps reach one sample in 256 -- enough to see the waveform's shape
+             * without a scroll control, because the window follows the last marker
+             * turned (see the picture painter). */
+            int32_t z = (int32_t)edit_zoom + (e > 0 ? 1 : -1);
+            edit_zoom = (uint8_t)(z < 0 ? 0 : (z > 7 ? 7 : z));
+        }
+        else if (src == SRC_GRAN) k_grain = (uint8_t)clamp((int32_t)k_grain + e * 4, 0, 127);
         else                 k_morph = (uint8_t)clamp((int32_t)k_morph + e * 8, 0, 127);
     }
 
@@ -970,7 +1100,7 @@ static void input(void)
             bank.frames = WV_BANKS[bank_i];
         } else if (smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
-            reslice();
+            region_fix(smp_i);   /* the region lives per slot, so nothing to redo */
         }
     }
     if (src == SRC_GRAN) {
@@ -980,13 +1110,12 @@ static void input(void)
          * SELECT and this knob is free. */
         if ((e = plat_enc(EN_PRESET)) != 0)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
-    } else if (src == SRC_SMPL) {
-        if (btn_pressed(btn, B_EDIT) && smp_count) {
-            /* EDIT in SMPL re-chops the current slot from its own material: the
-             * keys then play the chops. There is no chop editor on this panel, so
-             * detection is the editor. */
-            reslice();
-        }
+    } else if (edit_page) {
+        /* LOOP on EN_PRESET: two states, right is on and left is off, so the knob can
+         * be turned without looking at the screen -- the same two-state rule the GLOBAL
+         * page's rows use. */
+        if ((e = plat_enc(EN_PRESET)) != 0)
+            region[smp_i].on = (e > 0);
     }
     btn_prev = btn;
 
@@ -1051,6 +1180,64 @@ static char *pct(uint8_t v)
     static uint8_t turn;
     char *b = ring[turn++ % 4];
     num(b, (int32_t)v * 100 / 127);
+    return b;
+}
+
+/* A position in the material as text: milliseconds of the slot. A boundary is a place
+ * in the material, and ms is where a sampler puts it; a sample index would be a number
+ * nothing else on the panel speaks in. Two of these appear on one screen, hence the
+ * ring. */
+static char *pos_text(uint8_t slot, uint32_t at)
+{
+    static char ring[4][10];
+    static uint8_t turn;
+    char *b = ring[turn++ % 4];
+    uint32_t rate = smp[slot].rate ? smp[slot].rate : 44100u;
+    uint32_t ms = (uint32_t)((uint64_t)at * 1000u / rate);
+    int n = 0, i = 0;
+    char t[10];
+
+    do { t[i++] = (char)('0' + ms % 10); ms /= 10; } while (ms);
+    while (i) b[n++] = t[--i];
+    b[n++] = 'm';
+    b[n++] = 's';
+    b[n] = 0;
+    return b;
+}
+
+/* The same position as the 0..127 a knob's bar takes. A bar is not a value here, it is
+ * the marker's place in the slot, which is the one thing the four knobs have in common:
+ * at a glance the four bars show the four boundaries' order without reading a number. */
+static int32_t region_mark(uint8_t slot, uint8_t which)
+{
+    uint32_t len = smp[slot].len;
+    uint32_t at;
+
+    if (!len)
+        return 0;
+    at = (which == 0) ? region[slot].start : (which == 1) ? region[slot].end
+       : (which == 2) ? region[slot].loop_s : region[slot].loop_e;
+    if (at > len)
+        at = len;
+    return (int32_t)((uint64_t)at * 127u / len);
+}
+
+/* ZOOM as the multiplier it is: "1x", "2x" ... "128x". A percentage would say
+ * nothing -- zoom is a power of two and 43 % of the way in is not a span anyone can
+ * picture. The window is the slot divided by this number. */
+static char *zoom_text(uint8_t z)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    int32_t n = 0, m = (int32_t)1 << (z > 7 ? 7 : z);
+    int i = 0;
+    char t[8];
+
+    do { t[i++] = (char)('0' + m % 10); m /= 10; } while (m);
+    while (i) b[n++] = t[--i];
+    b[n++] = 'x';
+    b[n] = 0;
     return b;
 }
 
@@ -1648,6 +1835,151 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
             if (gy + 5 > y0 + h)
                 gy = y0 + h - 5;
             cv_rect(gx, gy, gw, 5, k->ink_hi);
+        }
+    }
+}
+
+/* ── SMPL's EDIT picture: the region, the loop, and where the window is ───────
+ *
+ * The band has one job here that it does not have in the other two sources: it has
+ * to show FOUR positions (start, end, loop start, loop end) and say which of them is
+ * the one being turned. So it is drawn as a map with a visible window:
+ *
+ *   window      the part of the slot on screen, from `view` for `span` samples
+ *   material    min/max per column, inside the window only
+ *   outside     everything outside [start, end) is drawn at 1/5 ink: material that
+ *               will not sound is not deleted, it is dimmed, because it is where the
+ *               boundaries can be moved back to
+ *   markers     four vertical lines: start/end solid, loop pair dotted
+ *   live marker the one the last turn moved is full ink_hi; the others are 3/5
+ *
+ * The window follows the live marker, which is the answer to "zoom in and then I
+ * cannot see where else to go": at 8x the visible span is 1/256 of the slot, and any
+ * marker that is not the one you are turning would be off screen. Following the turn
+ * means the marker you are moving is always on screen, and the others come back into
+ * view the moment you turn zoom out or turn one of them.
+ *
+ * Why a window and not a scroll knob: the panel has seven encoders and the EDIT page
+ * already spends six. Following the last turn costs nothing and needs no seventh.
+ */
+#define ED_INK_OUT  1                       /* the dim/5 of material that will not sound */
+#define ED_INK_MARK 3
+
+static void src_edit_map(const src_skin_t *k, const wv_sample *s,
+                         int32_t x0, int32_t y0, int32_t w, int32_t h,
+                         const smp_region *rg, uint8_t zoom, uint8_t live)
+{
+    int32_t mid = y0 + h / 2;
+    uint32_t span, view, i;
+    uint16_t c_live = k->ink_hi;
+    uint16_t c_mark = dim(k->ink_hi, ED_INK_MARK, 5);
+
+    if (!s || !s->data || !s->len) {
+        cv_rect(x0, mid, w, 1, k->ink);
+        return;
+    }
+
+    span = s->len >> zoom;
+    if (span < 8u)
+        span = 8u;                          /* fewer than 8 samples cannot be a picture */
+    if (span > s->len)
+        span = s->len;
+
+    /* the window's left edge: centred on the live marker, clamped inside the slot */
+    {
+        const uint32_t centre = (live == 0) ? rg->start : (live == 1) ? rg->end
+                              : (live == 2) ? rg->loop_s : (live == 3) ? rg->loop_e
+                              : 0u;         /* 4 = no marker yet: the slot's start */
+        view = centre > span / 2u ? centre - span / 2u : 0u;
+        if (view + span > s->len)
+            view = s->len > span ? s->len - span : 0u;
+    }
+
+    /* the material, per column, from the window only */
+    for (i = 0; i < (uint32_t)w; i++) {
+        uint32_t a = view + (uint32_t)((uint64_t)span * i / (uint32_t)w);
+        uint32_t b = view + (uint32_t)((uint64_t)span * (i + 1u) / (uint32_t)w);
+        float lo = 0.0f, hi = 0.0f, pk = 0.0f;
+        uint32_t j;
+        int32_t yh, yl;
+        uint8_t inside;
+
+        if (b <= a)
+            b = a + 1u;
+        for (j = a; j < b && j < s->len; j++) {
+            float v = (float)s->data[j] * (1.0f / 32768.0f);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+            if (v < 0.0f) v = -v;
+            if (v > pk) pk = v;
+        }
+        /* One scale for the window, from its own peak: zooming in must not make the
+         * material look louder. Clamped so a nearly silent window does not fill the
+         * band with its own noise. */
+        if (pk < 0.02f)
+            pk = 1.0f;
+        {   float sc = (float)(h / 2 - 1) / pk;
+            yh = mid - (int32_t)(hi * sc);
+            yl = mid - (int32_t)(lo * sc);
+        }
+        if (yh < y0) yh = y0;
+        if (yl > y0 + h - 1) yl = y0 + h - 1;
+        if (yl < yh) yl = yh;
+
+        /* Inside the region: 2/5 ink, the same weight SMPL and GRAN use for material.
+         * Outside it: 1/5. The two weights are not decoration -- with the region at its
+         * default (the whole slot) the first version drew everything at 2/5 and the two
+         * states were indistinguishable, which was measured as 14,117 px at 2/5 against
+         * 169 px at 1/5 in the whole band. Turning START now has to be visible as the
+         * material losing weight, so the difference has to be there to see. A column is
+         * "inside" as soon as any of it is. */
+        inside = !(b <= rg->start || a >= rg->end);
+        cv_rect(x0 + (int32_t)i, yh, 1, yl - yh + 1,
+                inside ? dim(k->ink, 2, 5) : dim(k->ink, ED_INK_OUT, 5));
+    }
+
+    /* the four markers, in the window's coordinates. A marker outside the window is
+     * clamped to the edge it left by, at 1/5 ink, so an edit never becomes invisible
+     * evidence that it happened. */
+    {
+        struct { uint32_t at; uint8_t dotted; uint8_t live_id; } m[4];
+        int32_t n;
+        m[0].at = rg->start;  m[0].dotted = 0; m[0].live_id = 0;
+        m[1].at = rg->end;    m[1].dotted = 0; m[1].live_id = 1;
+        m[2].at = rg->loop_s; m[2].dotted = 1; m[2].live_id = 2;
+        m[3].at = rg->loop_e; m[3].dotted = 1; m[3].live_id = 3;
+        /* the loop pair is only a fact when the loop is on: drawn at 1/5 otherwise,
+         * because an off loop does not describe the sound */
+        for (n = 0; n < 4; n++) {
+            uint16_t c;
+            int32_t x;
+            int32_t i2;
+
+            if (m[n].at <= view)
+                x = x0;
+            else if (m[n].at >= view + span)
+                x = x0 + w - 1;
+            else
+                x = x0 + (int32_t)((uint64_t)(m[n].at - view) * (uint64_t)w / (uint64_t)span);
+
+            if (m[n].live_id == live)
+                c = c_live;
+            else if (m[n].dotted && !rg->on)
+                c = dim(k->ink, ED_INK_OUT, 5);
+            else
+                c = c_mark;
+
+            /* Two pixels wide and, for the loop pair, a dot every two rows. A 1 px
+             * dashed line over an 80 px band was measured at nine visible pixels for
+             * the whole loop range: at 240 px on a 1x window the markers were there
+             * and could not be seen, which is the same as not having them. Two pixels
+             * is still a boundary rather than a feature, and a dot every second row
+             * reads as a dashed line at arm's length. */
+            for (i2 = 0; i2 < h; i2 += (m[n].dotted ? 2 : 1)) {
+                cv_rect(x, y0 + i2, 2, 1, c);
+                if (x + 2 < x0 + w)
+                    cv_rect(x + 1, y0 + i2, 1, 1, c);
+            }
         }
     }
 }
@@ -2399,8 +2731,12 @@ void app_frame(void)
             }
             src_grain_map(&sk, &smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE, gr);
         } else {
-            env_line(&smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE, 0, smp[smp_i].len,
-                     dim(sk.ink, 2, 5));
+            if (edit_page)
+                src_edit_map(&sk, &smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE,
+                             &region[smp_i], edit_zoom, edit_live);
+            else
+                env_line(&smp[smp_i], MAT_X0, MAT_PAD, MAT_W, MAT_WAVE,
+                         region[smp_i].start, region[smp_i].end, dim(sk.ink, 2, 5));
         }
         if (src != SRC_SYNTH && smp_count)
             cv_text(MAT_X0 + 2, MAT_PAD + 1, &FONT_XS,
@@ -2451,19 +2787,36 @@ void app_frame(void)
             cv_text(xr - txt_w(WV_BANK_NAME[bank_i]), SYN_ROW_2, &FONT_XS,
                     WV_BANK_NAME[bank_i], sk.ink_hi);
 
-        /* PRESET: bottom left, GRAN only -- SPRAY is the only thing on that knob. */
+        /* PRESET: bottom left. SPRAY in GRAN, LOOP in the EDIT page, nothing
+         * otherwise -- one knob, and each source has one thing for it. */
         if (src == SRC_GRAN) {
             cv_text(MAT_LAB_L, ybot, &FONT_XS, "SPRAY", dim(sk.ink_hi, 3, 5));
             cv_text(MAT_LAB_L + txt_w("SPRAY") + 4, ybot, &FONT_XS, pct(k_spray),
                     sk.ink_hi);
+        } else if (edit_page) {
+            nm = "LOOP";
+            vv = region[smp_i].on ? "ON" : "OFF";
+            w = txt_w(vv);
+            cv_text(MAT_LAB_L, ybot, &FONT_XS, nm, dim(sk.ink_hi, 3, 5));
+            cv_text(MAT_LAB_L + txt_w(nm) + 4, ybot, &FONT_XS, vv,
+                    region[smp_i].on ? sk.ink_hi : dim(sk.ink_hi, 3, 5));
         }
 
-        /* ALGO: bottom right. MORPH in SYNTH, GRAIN in GRAN. Not drawn in SMPL: morph
-         * indexes a wavetable frame and SMPL reads no wavetable, so the knob is dead
-         * there, and a dead value is worse than an empty corner. */
-        if (src == SRC_SYNTH || src == SRC_GRAN) {
-            nm = (src == SRC_SYNTH) ? "MORPH" : "GRAIN";
-            vv = (src == SRC_SYNTH) ? pct(k_morph) : sel_time(k_grain, 3);
+        /* ALGO: bottom right. MORPH in SYNTH, GRAIN in GRAN, ZOOM in the EDIT page.
+         * Not drawn in SMPL outside EDIT: morph indexes a wavetable frame and SMPL
+         * reads no wavetable, so the knob is dead there, and a dead value is worse
+         * than an empty corner. */
+        if (src == SRC_SYNTH || src == SRC_GRAN || edit_page) {
+            if (edit_page) {
+                nm = "ZOOM";
+                vv = zoom_text(edit_zoom);
+            } else if (src == SRC_SYNTH) {
+                nm = "MORPH";
+                vv = pct(k_morph);
+            } else {
+                nm = "GRAIN";
+                vv = sel_time(k_grain, 3);
+            }
             w = txt_w(vv);
             cv_text(xr - txt_w(nm) - 4 - w, ybot, &FONT_XS, nm, dim(sk.ink_hi, 3, 5));
             cv_text(xr - w, ybot, &FONT_XS, vv, sk.ink_hi);
@@ -2475,6 +2828,8 @@ void app_frame(void)
             cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "LFO PAGE", sk.ink);
         else if (arp_page)
             cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ARP PAGE", sk.ink);
+        else if (edit_page)
+            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "EDIT PAGE", sk.ink);
     }
     cv_blit(0, SCOPE_H);
 
@@ -2503,6 +2858,20 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "TYPE",  ARP_NAME[k_arp_type], k_arp_type * 42, 1);
         knob(120, KNOB_TOP, 54, "OCT",   arp_oct_text(k_arp_oct), k_arp_oct, 1);
         knob(178, KNOB_TOP, 54, "GATE",  pct(k_arp_gate), k_arp_gate, 1);
+    } else if (edit_page) {
+        /* The EDIT page: the four boundaries, in the order they appear on the picture,
+         * so K1 is the leftmost marker and K4 the rightmost. START and END are the
+         * region; LOOP S and LOOP E are the repeated part inside it. The unit is a
+         * position in the material -- ms of the slot, which is what a sampler shows and
+         * what a boundary means.
+         *
+         * The live marker's knob is lit and the other three are not, because at 8x zoom
+         * only one of the four is inside the window and the lit one is the knob the
+         * picture is following. */
+        knob(4,   KNOB_TOP, 54, "START",  pos_text(smp_i, region[smp_i].start),  region_mark(smp_i, 0), edit_live == 0);
+        knob(62,  KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1);
+        knob(120, KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2);
+        knob(178, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3);
     } else if (lfo_page) {
         /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
          * the page's knobs are read. RATE prints Hz, because a rate in percent is not
@@ -2636,6 +3005,18 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
+    /* The EDIT page's own numbers. A picture can be right about a region the engine
+     * never sees (test_edit.py's pixel checks prove what is drawn); these prove what the
+     * voice is told, which is the half that decides whether the sound changes. Four
+     * names rather than one index, because app_expect takes (what, got) only. */
+    if (!strcmp(what, "region_start"))  { *got = (int)region[smp_i].start;  return 1; }
+    if (!strcmp(what, "region_end"))    { *got = (int)region[smp_i].end;    return 1; }
+    if (!strcmp(what, "region_loops"))  { *got = (int)region[smp_i].loop_s; return 1; }
+    if (!strcmp(what, "region_loope"))  { *got = (int)region[smp_i].loop_e; return 1; }
+    if (!strcmp(what, "region_on"))     { *got = region[smp_i].on; return 1; }
+    if (!strcmp(what, "region_len"))    { *got = (int)smp[smp_i].len; return 1; }
+    if (!strcmp(what, "zoom"))          { *got = edit_zoom; return 1; }
+    if (!strcmp(what, "edit_page"))     { *got = edit_page; return 1; }
     if (!strcmp(what, "active"))     { *got = (int)wv_active(&dsp); return 1; }
     /* How many grains the newest voice has sounding, and its grain length in px of the
      * material band. The screen draws one bar per live grain, so "the picture is
@@ -2762,11 +3143,12 @@ void app_init(void)
     pool = plat_res(&pool_len);
     smp_count = pool ? (uint8_t)wv_smp_parse(pool, pool_len, smp, SMP_MAX) : 0;
     smp_i = 0;
-    slice_count = 0;
-    /* Chop the first slot at boot so SMPL is playable the moment SOURCE is flipped.
-     * A slot that is a single hit finds one slice, which is the whole hit, which is
-     * right: one chop is still a chop. */
-    reslice();
+    /* Every slot starts as its whole self, loop off: SMPL is playable the moment
+     * SOURCE is flipped, and a key plays the material once exactly as it did before
+     * the EDIT page existed. */
+    region_reset_all();
+    edit_zoom = 0;
+    edit_live = 4;                      /* 4 = no marker yet: the window is the slot */
 }
 
 /* app.h asks this at boot (APP_BLE_AT_BOOT). This build has no BLE switch of its
@@ -2832,7 +3214,7 @@ static void pool_poll(void)
     smp_count = pool ? (uint8_t)wv_smp_parse(pool, pool_len, smp, SMP_MAX) : 0;
     if (smp_count) {
         smp_i = 0;
-        reslice();
+        region_reset_all();
     }
 }
 

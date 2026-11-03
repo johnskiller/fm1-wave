@@ -75,7 +75,10 @@ does not have to be swept back.
   SMPL and GRAN (a detent loads the next slot rather than sweeping a range).
 - **ALGORITHM** moves 8 per detent for MORPH (16 detents across 8 frames) and 4 per
   detent for GRAIN SIZE. Dead in SMPL.
-- **PRESETS** is SPRAY in GRAN and does nothing in SYNTH and SMPL.
+- **PRESETS** is SPRAY in GRAN, LOOP ON/OFF in the SMPL EDIT page, and does nothing in
+  SYNTH and in SMPL outside that page.
+- **ALGORITHM** is ZOOM in the SMPL EDIT page: left zooms out, right zooms in, 16 steps
+  from the whole slot to 128x.
 - **CUT / RES / SHAPE / AMOUNT** are live in every source.
 
 ---
@@ -201,13 +204,68 @@ made `touch_poll` dead code.
 
 ---
 
+### `B_EDIT` — the SMPL edit page
+
+| | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
+|---|---|---|---|---|---|---|---|
+| page up | **START** | **END** | **LOOP S** | **LOOP E** | SLOT | **ZOOM** | **LOOP** on/off |
+
+SMPL only — `B_EDIT` does nothing in SYNTH or GRAN, where there is no material region to
+edit. It is the fourth of the mutually exclusive pages.
+
+**Path A, one region and one loop.** The slot is not chopped into pieces. There is one
+`start`–`end` span that sounds, and inside it one `loop_s`–`loop_e` span that repeats
+when LOOP is on. Chopping was the earlier plan and was dropped: the automatic chop was
+already good enough to *play*, and what a sample instrument actually lacked was a loop
+and a way to trim it.
+
+**Why a loop at all.** Before this page all three `wv_note_on_sample` call sites passed
+`loop = 0`, so a held key played the material once and stopped. That is a drum hit, not
+an instrument: the README's first sentence is "sample-as-wavetable" and nothing could
+hold a note. Turning LOOP on is what makes a held key sustain.
+
+**The four values are ordered and clamped as a chain**, `0 <= start < loop_s < loop_e <=
+end <= len`, recalculated on every turn: a boundary cannot be dragged past its neighbour,
+and the region can never invert. The loop pair is clamped inside the region, not the
+slot, because a loop outside the region would never be reached.
+
+**LOOP on PRESETS is a two-state knob, not a button.** Turning it right turns the loop
+on, left turns it off; there is no press. It is the only free encoder in SMPL (see the
+encoder table), and a knob that reports its state back is what the corner label is for.
+
+**ZOOM has no pan, and does not need one.** ALGORITHM is the zoom level, 16 steps, 0 =
+the whole slot and 15 = 128x. The window follows **whichever boundary was turned last**,
+centred on it — so a zoomed window is never lost off to the side; turning START brings
+START to the middle. K1–K4 are the navigation. Measured at 128x: turning START leaves the
+live marker at column 115–116 of 232, the centre.
+
+**The step follows the zoom.** A turn moves a boundary by `len / 1000 >> zoom` samples: a
+thousandth of the slot at 1x, so the whole slot is 1000 detents, and finer as the window
+closes. It is floored at 1 sample — `(len/1000) >> 7` is zero on a 3 s slot, and a zero
+step made all four knobs dead at 128x while the page still looked alive. That is a
+measured defect, not a hypothesis: `turn K1 900` left `region_start` at 0.
+
+**The picture shows four positions, so it needed a different drawing.** In SYNTH and GRAN
+the band shows material. Here it shows a *state*: material inside the region at 2/5 ink,
+material outside at 1/5, the live marker in `ink_hi` at 2 px, the other three in 3/5 ink,
+and the loop pair dotted. Two defects were measured and fixed on the way in:
+
+- at the default (region = whole slot) everything was 2/5 and the two states were
+  indistinguishable — 14,117 px at 2/5 against 169 px at 1/5 in the whole band;
+- 1 px dotted markers over an 80 px band came to nine visible pixels for the whole loop
+  range, so the markers existed and could not be seen. They are 2 px and dot every 2 rows.
+
+**The edits live in RAM only.** Nothing persists them: `B_SAVE` does nothing, and the
+region resets to the whole slot on boot. That is the current state of the panel's save
+story, not a property of this page.
+
 ## Buttons
 
 | Button | Printed | Current function | Owner | Where |
 |---|---|---|---|---|
 | `B_SEL` | SEL | **SOURCE** cycles SYNTH → SMPL → GRAN | app | app.c:47 |
 | `B_ENV` | ENV | **ENV page** toggle (A/D/S/R on K1–K4) | app | app.c:47 |
-| `B_EDIT` | EDIT | **re-chop** the current slot; dead in SYNTH and GRAN | app | app.c:47 |
+| `B_EDIT` | EDIT | **SMPL EDIT page** toggle (START/END/LOOP S/LOOP E on K1–K4, LOOP on PRESETS, ZOOM on ALGORITHM); dead in SYNTH and GRAN | app | app.c |
 | `B_FX` | FX | nothing | **free** | — |
 | `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
