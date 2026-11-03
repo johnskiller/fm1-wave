@@ -142,8 +142,32 @@ frame 7, despite the same harmonic list — this is the one place where phase ma
 ### 3 · VOX — two formants moving in opposite directions
 
 `walk(lambda f: saw(16) + [(4+f, 1.1, 0), (14-f, 0.9, 0)])` — a 16-partial saw with two
-bumps: one climbs 4 → 11, one descends 14 → 7. The two cross near the middle of the
-sweep.
+bumps: one climbs 4 → 11, one descends 14 → 7. They cross at frame 5, both landing on
+h9, then swap sides.
+
+**Both bumps move (+1, −1) on every frame — that is the point of this version.** The WT
+original reached for the same sound with `4 + (f % 6)` / `11 − (f % 5)`, and the modulo
+wraps. Read off the parameters frame by frame:
+
+| frame | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| WT, climbing bump | 4 | 5 | 6 | 7 | 8 | 9 | **4** | 5 |
+| step | | +1 | +1 | +1 | +1 | +1 | **−5** | +1 |
+| WT, descending bump | 11 | 10 | 9 | 8 | 7 | **11** | 10 | 9 |
+| step | | −1 | −1 | −1 | −1 | **+4** | −1 | −1 |
+
+The two bumps pass through each other at frame 4 — and then **wrap, at different
+frames**: the descending bump jumps back to h11 at frame 5 (`f % 5` reset), the climbing
+bump jumps back to h4 at frame 6 (`f % 6` reset). Frames 5–7 therefore replay positions
+the sweep already visited (h11, then h4, then h5) instead of continuing past the
+crossing. This version drops both modulos and widens the span to `4 + f` / `14 − f`, so
+the step is (+1, −1) on all eight frames and frame 5 is a crossing rather than a reset.
+
+**A note on how not to test this:** adjacent-frame spectral correlation does *not* show
+the break. Measured, WT's VOX correlates 0.54–0.90 between neighbours and this version
+0.28–0.39 — the fixed version scores *lower*, because a wider formant sweep moves the
+spectrum further per frame. The parameter table above is the evidence; the correlation
+number would have argued for the wrong version.
 
 ![VOX, all eight frames](img/wv-vox.png)
 
@@ -158,6 +182,15 @@ sweep.
 `morph(saw(24), [(k, (1/k)·(0.5+0.5·cos(πk/24)), 0)])` — 24 partials at `1/k`, ending as
 the same ramp windowed by a raised cosine that reaches zero at harmonic 24.
 
+**The endpoint is the whole point of this bank, and the earlier version got it wrong.**
+WT's DIGI morphed to an odd-only `1/k²` series, which its own comment called "a rounded
+pulse". Measured, that endpoint is h1 = 1.000, h3 = 0.111, h5 = 0.040 — **4** partials
+above 2 % of the fundamental, crest **1.28**, i.e. *flatter than a sine* (1.414). It was
+not a soft pulse, it was nearly a sine, and the last two frames of that bank all but
+disappeared. The raised cosine here leaves **15** partials and crest **1.70**: still a
+pulse, still an edge, just a duller one — which is what "a bright edge that softens"
+has to mean.
+
 ![DIGI, all eight frames](img/wv-digi.png)
 
 - **crest 1.67 → 2.00**
@@ -165,8 +198,9 @@ the same ramp windowed by a raised cosine that reaches zero at harmonic 24.
   cosine removes the top of the series
 - **centroid 6.4 → 3.9** — the brightest frame 0 of any bank (6.4) and the largest
   downward move (2.5 harmonics), so this is the bank that sweeps *dark*
-- 24 partials is the most any bank starts with, which makes it the most aliasing-prone
-  at the top of the keyboard
+- 24 partials is the most any bank starts with, so of the eight this is the one that
+  would reach Nyquist first if the keybed were extended — at G5 its 24th partial sits at
+  10,560 Hz, and 22,050 Hz is where it would fold
 
 ### 5 · OPEN1 — saw to a `1/k²` series (a placeholder that is a real bank)
 
@@ -230,39 +264,38 @@ Ends of each morph only — frame 0 on the left, frame 7 on the right.
 
 ---
 
-## What is not true about these banks
+## What was not true about these banks
 
-Written down because the generator's own comment said otherwise, and I checked.
+`gen_wv_banks.py` used to say the first five "are reproduced here so the two instruments
+can be compared". The word was wrong, but the direction of the mistake matters: these
+are not copies, they are **fm1-wave's revision of WT's five**, by the same author.
+Compared against WT's `gen_wt_tables.py` (Melodee PR #48, MPL-2.0), partial by partial
+and frame by frame:
 
-**`gen_wv_banks.py` says the first five "are reproduced here so the two instruments can
-be compared".** They are not reproductions. Compared against the WT engine's
-`gen_wt_tables.py` (Melodee PR #48, MPL-2.0), partial by partial and frame by frame:
-
-| bank | spectra identical? | what differs |
+| bank | spectra identical? | what differs, and which version is the fix |
 |---|---|---|
-| SAW SQR | **yes** (`|ΔA|/A = 0.000`, per-frame normalised) | only the levelling: WT peak-normalises the bank, this one equalises frame RMS first, then peak-normalises |
+| SAW SQR | **yes** (`|ΔA|/A = 0.000`, per-frame normalised) | only the levelling: WT peak-normalises the bank, this one equalises frame RMS first, then peak-normalises. The revision is the RMS step — peak normalisation alone makes MORPH a volume knob (3.2 dB across OPEN3, see above) |
 | RESO | **yes** (`0.000`) | same |
 | HOLLOW | **yes** (`0.000`) | same |
-| VOX | **no** — up to **1.100** | the second bump: WT moves it `11 − (f % 5)` with phase π, this moves it `14 − f` with phase 0 — different partial, different phase, different sweep direction |
-| DIGI | **no** — up to **0.494** at harmonic 2, frame 7 | WT's target is a `1/k²` odd-only series; this one is `1/k` windowed by a raised cosine. Different spectrum from frame 1 onward |
+| VOX | **no** — up to **1.100** | WT moves the second bump `11 − (f % 5)` and the first `4 + (f % 6)`; the modulo **wraps**. Measured, bump positions frame 5→6: `(9,11) → (4,10)`, a step of **(−5,−1)** where every other frame moves (+1,−1). The sweep breaks there. This version's `4 + f` / `14 − f` steps (+1,−1) for all eight frames. **WT's VOX is the bug; this is the fix** |
+| DIGI | **no** — up to **0.494** at harmonic 2, frame 7 | WT's endpoint is a `1/k²` odd-only series, which its own comment calls a "rounded pulse". It is not one: measured, h1 = 1.000, h3 = 0.111, h5 = 0.040, **4** partials above 2 % of the fundamental, crest **1.28** — flatter than a sine (1.414). It ends as a near-sine. This version's `1/k` × raised cosine ends at crest **1.70** with **15** partials, which is the "bright edge softening" the bank is named for |
 
-**One caveat on reading this table**, and it matters: PR #48 was itself written by an
-agent, so "WT's version" is not automatically the correct one. The table says the two
-disagree; it does not say which is right. Three banks are the same sound at different
-levels, and two are different sounds under the same name.
+So three banks are the same sound at different levels, and two are corrections of the
+earlier version under the same names. **A bank-for-bank comparison of the two
+instruments would find the same names, three identical timbres, and two where fm1-wave
+is right and WT is wrong** — anyone porting VOX or DIGI back from WT would be porting the
+bug and the mislabel.
 
-**Decision pending** — either the comment in `gen_wv_banks.py` changes to say these are
-fm1-wave's own banks that took WT's names, or VOX and DIGI are brought into line. Not
-resolved here: it changes what two banks sound like, and that is the player's call. The
-player is asking the Melodee thread what those two banks were meant to be.
+`gen_wv_banks.py`'s comment has been corrected to say this.
 
 ---
 
 ## Where the other five came from, and what is still open
 
-- Banks 0–4 were written by copying the *idea* of WT's five (same names, same sweep
-  intent), then edited. Whatever the comparison above says, they are now fm1-wave's
-  own numbers.
+- Banks 0–4 are **fm1-wave's revision of WT's five**, by the same author: same names and
+  same sweep intent, with VOX's wraparound fixed, DIGI redefined to actually be a
+  softening pulse, and the levelling changed to per-frame RMS equalisation. Three of the
+  five are otherwise the same sound.
 - Banks 5–7 are OPEN1..3: placeholders with their parameters fixed but their names and
   final character undecided (`spec.md` §5a says 6–8 are open).
 

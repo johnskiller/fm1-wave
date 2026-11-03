@@ -18,8 +18,10 @@ Two rules, both of which matter more than they look:
    across the bank, so MORPH is a timbre knob.
 
 The five that came from the WT engine (SAW SQR, RESO, HOLLOW, VOX, DIGI) are
-reproduced here so the two instruments can be compared; 6-8 are open (see
-docs/spec.md).
+fm1-wave's *revision* of them, not copies: VOX's formant wrap is fixed, DIGI is
+redefined so its endpoint is an actual softening pulse rather than a near-sine, and the
+levelling below replaces peak normalisation. docs/wavetables.md has the measurements.
+6-8 are open (see docs/spec.md).
 """
 import math
 import sys
