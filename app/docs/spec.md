@@ -493,10 +493,10 @@ Ordered by what is already true, not by what sounds best:
 5. **GRAN's density** — overlap other than 2 needs real gain compensation; it is the only
    one whose cost is a rewrite of the window argument, not a parameter.
 
-**Persistence is upstream of all of them.** `B_SAVE` is unread and nothing in this app is
-stored. A deep edit that is lost at power-off is a page nobody uses. It is also why the
-first two items cost no storage: they are worth doing whether or not persistence lands,
-whereas frame operations are not.
+**Persistence is upstream of all of them, and it is now built** (§8): `B_SAVE` writes the
+whole panel state to `OBJ_SETTINGS`. A deep edit that is lost at power-off is a page nobody
+uses, so this had to land first. The next two items still cost no storage, which is why
+they come before the frame operations.
 
 **And the page model is upstream of persistence.** If a second oscillator arrives, EDIT
 stops meaning "this source's structure" and starts meaning "this voice's structure", and
@@ -674,19 +674,44 @@ and the app cannot see those registers.
 
 ## 8. Storage
 
-**What is built today: nothing.** `B_SAVE` is unread and no app state is written.
-`app.c` says so at the top and it is still true — a power cycle restores every knob to its
-default and every slot's region to the whole sample. This section is therefore half fact
-and half plan, and the halves are labelled.
+**What is built today: the whole panel state survives a power cycle, and only when `B_SAVE`
+is pressed.** `app/save.c` holds one record in `OBJ_SETTINGS`; `app_init()` loads it and
+`B_SAVE` writes it. Turn a knob, pull the power, come back: the knob is where you left it.
 
 **Sample data** — built. Not in the store: the resource region (`resources = FILE`) holds
 it with its own CRC-32 commit, and the platform's installer path writes it over USB. Read
 in place, 276 KiB of the data area.
 
-**Parameters** — planned. One object, `OBJ_SETTINGS` at 0xFC000 (Felucca's own pair,
+**Parameters** — built. One object, `OBJ_SETTINGS` at 0xFC000 (Felucca's own pair,
 outside the data area, already declared), written by `plat_store_save()` which is atomic
 across its A/B sectors: an interrupted save cannot leave a half-written state.
-`PLAT_STORE_MAX` is 3840 B per object.
+`PLAT_STORE_MAX` is 3840 B per object; the record is **190 B** of it.
+
+**The record is the parameters, not the performance.** In: the twelve knobs, the shape
+amount, MORPH, the grain/SPRAY pair, the four envelopes, the LFO pair, the four arp
+settings, the bank, the slot, the played source, and all eight slots' region + loop
+(20 B each). Out: the grain playhead, the arp's held set, which page is open, and
+`edit_zoom`/`edit_live` — how you were *looking* at the material, not what it is. A power
+cycle returns the instrument to a sound, not to a moment.
+
+**Why only `B_SAVE`, and not a save on change.** A save erases a 4 KiB sector, programs it
+256 B at a time and then reads the whole thing back to verify it (`storage.c`'s `st_save`);
+on the device that is tens of milliseconds of flash work. This app executes from the same
+flash (XIP). Putting that behind a knob being turned is a stall you would hear as a click.
+So the write happens when the player says so, including while notes are held — a save that
+waits for silence is a save that does not happen when the chord is the thing worth keeping.
+
+The price is that an edit lives in RAM until saved, and a parameter that turns and never
+persists is exactly the kind of bug you cannot hear. So the panel says it: `save_dirty()`
+is true whenever the live record differs from the one in flash, and the screen draws a dim
+`NOT SAVED` mark in the top-left of the material band until it doesn't. It is compared by
+the whole record once a frame rather than set by hand at each of the ~40 writers — one
+forgotten `dirty = 1` would be that same silent bug, and comparing 190 B at 60 Hz is
+cheaper than the risk.
+
+**The version gate is real.** A record whose `version` is not `SAVE_VERSION` is rejected
+and the defaults boot, so a firmware update that changes the layout cannot read an old
+record's bytes as new fields.
 
 **There is no free store slot in the data area.** `OBJ_PANEL` is at 0xDC000 and `OBJ_BLE`
 at 0xDE000, and `PLAT_DATA_HI` is 0xE0000: the two pairs exactly fill the space above the
@@ -879,6 +904,37 @@ What is checked, and the measurement behind each:
 - **the region cannot invert** — START and END driven past each other, both directions.
 - **EDIT does nothing outside SMPL** — from SYNTH and from GRAN, `src` and `edit` both
   unchanged afterwards. Injected: the old "switch the source there" behaviour fails both.
+
+### 9h. Built: persistence (`app/tests/test_save.py`)
+
+45 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
+it, so "turn a knob, reboot, read it back" is a real test and not a mock.
+
+- **a knob survives a reboot** — CUT turned to 40, `reboot`, `cut` reads 40. Injected:
+  skipping the `save_load()` call in `app_init()` puts it back at 127.
+- **the region and its loop survive** — all four boundaries plus `region_on`, in a slot
+  that is not slot 0, so a save that only wrote the current slot reads the defaults back.
+- **the source and slot survive** — `src` and `smp_i` come back as set.
+- **only `B_SAVE` writes** — turning a knob does not change `save_count`; pressing SAVE
+  changes it by exactly 1. Injected: a save in the input handler's common path makes the
+  first check fail.
+- **a failed write is not a save** — with `flash_fail 1`, `save_last` is −1, `save_count`
+  stays 0, and `save_dirty` stays 1, so the mark correctly says the edit is still only in
+  RAM. Then the same edit with flash working reports 0.
+- **the dirty baseline moves with the write** — `save_dirty` is 0 right after a successful
+  save and 1 again after a further knob move. This is the one that pinned a real bug: when
+  `save_now()` wrote the record but left `rec_written` stale, every later frame marked the
+  panel dirty again, so the mark never cleared.
+- **the version gate both ways** — a planted record of another version is rejected and the
+  defaults boot; the same record at this version is accepted and its values boot. Both
+  halves, because a gate that refuses everything passes the first half alone.
+- **the mark is drawn, and out of the way** — the `NOT SAVED` ink is counted in the
+  material band while dirty and gone once saved, and its extent stays left of x 176, the
+  picture's edge. That second one came from a measured regression: anchored to the band's
+  right edge the 42 px string reached back into SYNTH's label column and closed the 12 px
+  gap `test_screen.py` asserts, so the mark moved to the top left. A clean-columns test
+  could not catch it (the labels ink those columns anyway); the check is about the mark's
+  own extent, measured by differencing the two screenshots.
 
 ### 9g. The panel, as built
 

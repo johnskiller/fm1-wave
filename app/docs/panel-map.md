@@ -348,9 +348,10 @@ and the loop pair dotted. Two defects were measured and fixed on the way in:
 - 1 px dotted markers over an 80 px band came to nine visible pixels for the whole loop
   range, so the markers existed and could not be seen. They are 2 px and dot every 2 rows.
 
-**The edits live in RAM only.** Nothing persists them: `B_SAVE` does nothing, and the
-region resets to the whole slot on boot. That is the current state of the panel's save
-story, not a property of this page.
+**The edits persist on `B_SAVE`, and only then.** A region moves in RAM as the knob turns;
+`B_SAVE` writes all eight slots' regions (and every knob) to `OBJ_SETTINGS`, and until it
+is pressed the panel shows a dim `NOT SAVED` mark at the top left of the material band. An
+unsaved region resets to the whole slot at power-off.
 
 ## Buttons
 
@@ -362,7 +363,7 @@ story, not a property of this page.
 | `B_FX` | FX | nothing | **free** | — |
 | `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
-| `B_SAVE` | SAVE | nothing | **free** | — |
+| `B_SAVE` | SAVE | **write the panel state to `OBJ_SETTINGS`** | app | `app/save.c` |
 | `B_ARP` | ARP | **ARP page** toggle (RATE/TYPE/OCT/GATE on K1–K4) | app | app.c |
 | `B_SEQ` | SEQ | nothing (not read anywhere in the platform) | **free** | — |
 | `B_PLAY` | PLAY | **safe mode only**: a second failed boot, then PLAY = "try again" | platform | main_fm1.c:818 |
@@ -874,7 +875,7 @@ there are more free buttons than pending functions.
 |---|---|---|
 | `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
-| `B_SAVE` | save the current knob set as the boot state | `plat_store_save` exists, 3840 B per object; **a prerequisite for deep edit**, not an extra — an edit that is gone at power-off is a page nobody uses |
+| `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 45 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob |
 | `B_FX` | **filter type** (LP / BP / HP) | the SVF already computes all three every sample and only `lp` is used, so the switch is free of arithmetic — see `spec.md` §5d |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |

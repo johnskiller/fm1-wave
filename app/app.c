@@ -15,6 +15,12 @@
 #include "wv_sample.h"
 #include "wv_banks.h"
 #include "build_id.h"          /* the commit this image is: tools/gen_build_id.py */
+/* save.c is INCLUDED, not linked separately: the platform's unity build compiles app.c
+ * and nothing else from the app (device/unity.c: #include "app.c"), and platform/ is a
+ * submodule this firmware does not modify. So an app's own translation units are all
+ * one unit by construction, which is also why there is no prototype/static mismatch to
+ * worry about between them. */
+#include "save.c"             /* the record that survives a power cycle */
 
 #define WAVE_HZ   44100.0f
 #define BLK_MAX   256u
@@ -51,8 +57,8 @@ static uint8_t        smp_i;      /* which slot EN_SELECT picked, in SMPL and GR
  * to the material it was found in. Switching slots and back returns to the region
  * that slot was given, and switching slots never needs a re-analysis of the new one.
  *
- * Kept in RAM only. Nothing in this app is stored yet (B_SAVE is unused), so a power
- * cycle loses the edits and reloads this default.
+ * Saved with everything else: B_SAVE writes all eight slots' regions in one record
+ * (save.c), and a power cycle without a save reloads this default.
  */
 typedef struct {
     uint32_t start, end, loop_s, loop_e;
@@ -82,6 +88,12 @@ static uint8_t        edit_live;      /* which marker the last turn moved: keeps
  * the knob set and the key map. */
 enum { SRC_SYNTH, SRC_SMPL, SRC_GRAN };
 static uint8_t src = SRC_SYNTH;
+
+/* The record's two directions (defined under app_init, used by input and app_frame):
+ * app.c's statics out, and back in. Declared here because input() and app_frame() use
+ * them and both come before app_init in this file. */
+static void save_apply(const save_rec *r);
+static void save_snapshot(save_rec *r);
 
 /* Held notes as the UI sees them, and the velocity each arrived with. The DSP gets
  * note on/off from here; nothing in the audio path reads plat_keys, because the
@@ -1094,6 +1106,25 @@ static void input(void)
      * source is live; a lamp can only say on or off, and there are three. */
     if (btn_pressed(btn, B_SEL))
         src = (uint8_t)((src + 1u) % 3u);
+
+    /* B_SAVE: write the whole panel state to flash, now.
+     *
+     * It writes while notes are held, on purpose. The alternative -- wait for silence --
+     * is a save that does not happen when the chord is the thing you want to keep, and
+     * the player pressing SAVE with a chord down is not an edge case, it is the normal
+     * way to keep a sound you have just found. The cost is a 4 KiB erase (storage.c) with
+     * voices running; that is the player's own decision to make, not the firmware's.
+     *
+     * The answer is said either way. A save that fails silently is worse than no save:
+     * the player believes the sound is kept and finds out at power-off. */
+    if (btn_pressed(btn, B_SAVE)) {
+        save_rec r;
+        save_snapshot(&r);
+        if (save_now(&r) == 0)
+            app_say("SAVED", "settings");
+        else
+            app_say("SAVE FAILED", "flash");
+    }
 
     /* EN_PRESET is a different control depending on SOURCE (see docs/spec.md):
      * SYNTH picks the bank, SMPL picks the sample. One knob, two jobs, because the
@@ -2529,6 +2560,14 @@ void app_frame(void)
     touch_poll();
     input();
 
+    /* Keep save_dirty() honest: the whole record is compared against what flash holds,
+     * once a frame. This is what the "not saved" mark on the screen reads. */
+    {
+        save_rec r;
+        save_snapshot(&r);
+        save_scan(&r);
+    }
+
     sk = src_skin();
 
     /* the scope redraws every frame: it is the one thing on screen that must not
@@ -2963,14 +3002,52 @@ void app_frame(void)
             cv_text(xr - w, ybot, &FONT_XS, vv, sk.ink_hi);
         }
 
-        if (env_page)
-            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ENV PAGE", sk.ink);
-        else if (lfo_page)
-            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "LFO PAGE", sk.ink);
-        else if (arp_page)
-            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "ARP PAGE", sk.ink);
-        else if (edit_page)
-            cv_text(MAT_X0 + 2, MAT_PAD + MAT_WAVE - 10, &FONT_XS, "EDIT PAGE", sk.ink);
+        {
+            const int32_t ypage = MAT_PAD + MAT_WAVE - 10;
+
+            if (env_page)
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ENV PAGE", sk.ink);
+            else if (lfo_page)
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE", sk.ink);
+            else if (arp_page)
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ARP PAGE", sk.ink);
+            else if (edit_page)
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "EDIT PAGE", sk.ink);
+
+            /* ── "not saved" ────────────────────────────────────────────────────
+             *
+             * B_SAVE is the only writer, so an edit lives in RAM until it is pressed.
+             * That is the arrangement the player chose over an automatic write (a save
+             * is a 4 KiB sector erase plus a read-back, and it has no business
+             * happening behind a knob), and its one real cost is exactly this: you
+             * cannot hear whether the sound you are listening to is the one that will
+             * come back after power-off.
+             *
+             * So the mark is not decoration, it is the whole reason the manual model is
+             * safe to use. Right-hand edge, the mirror of the page name on the left: a
+             * filled dot and two words. It sits at 3/5 ink rather than ink_hi so it reads
+             * as a note beside the picture and not as a value; a warning that competes
+             * with the parameters is a warning that gets ignored.
+             *
+             * Nothing is drawn once it is saved: a permanent "saved" light would be one
+             * more thing on the screen that means nothing. */
+            if (save_dirty()) {
+                /* Left edge, under the page name, NOT the right edge. The right-hand side
+                 * of this band is SYNTH's label column (BANK, MORPH -- § SYN_W), and a
+                 * 42 px mark anchored there reached back to x 192 and closed the 12 px gap
+                 * the geometry promises between the picture (ends at 175) and the labels
+                 * (start at 189). Measured by test_screen.py, which asserts that gap as a
+                 * clean strip: the mark is what broke it, so the mark moves.
+                 *
+                 * One line below the page name, because both can be up at once (a page is
+                 * open and there are unsaved edits) and two strings on one row would
+                 * collide on the left. 10 px apart is one FONT_XS row plus its leading. */
+                const char *ns = "NOT SAVED";
+                const int32_t yns = MAT_PAD + 11;    /* under the slot name, at the top */
+                cv_rect(MAT_X0 + 2, yns + 3, 3, 3, dim(sk.ink_hi, 3, 5));
+                cv_text(MAT_X0 + 9, yns, &FONT_XS, ns, dim(sk.ink_hi, 3, 5));
+            }
+        }
     }
     cv_blit(0, SCOPE_H);
 
@@ -3113,6 +3190,13 @@ int app_expect(const char *what, int *got)
      * fact from the source and a test has to be able to read it alone */
     if (!strcmp(what, "edit"))       { *got = edit_page; return 1; }
     if (!strcmp(what, "arp_on"))     { *got = arp_on(); return 1; }
+    /* The save story, as three facts a test can tell apart: flash had a record at boot,
+     * RAM has a change flash does not, and how many writes have happened. The count is
+     * what proves B_SAVE wrote ONCE and not once per frame. */
+    if (!strcmp(what, "saved"))       { *got = save_loaded(); return 1; }
+    if (!strcmp(what, "save_dirty"))  { *got = save_dirty(); return 1; }
+    if (!strcmp(what, "save_count"))  { *got = (int)save_count(); return 1; }
+    if (!strcmp(what, "save_last"))   { *got = save_last_result(); return 1; }
     if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }
     if (!strcmp(what, "arp_type"))   { *got = k_arp_type; return 1; }
     if (!strcmp(what, "arp_oct"))    { *got = k_arp_oct; return 1; }
@@ -3243,6 +3327,32 @@ int app_expect(const char *what, int *got)
 int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d)
 {
     (void)b; (void)c; (void)d;
+    /* `plant VER` -- write a record with this many bytes and a chosen version straight
+     * into the store, bypassing the app. It exists for exactly one question, the one the
+     * platform's CRC cannot answer: what does this build do with an INTACT record written
+     * by a different one? A restore from an older firmware is the case, and it cannot be
+     * produced by the app's own SAVE. Host builds only (APP_HOST_CMD). */
+    if (!strcmp(cmd, "plant") && a[0]) {
+        save_rec r;
+        int ver = atoi(a);
+        int n = b[0] ? atoi(b) : (int)sizeof r;
+
+        memset(&r, 0, sizeof r);
+        r.magic = SAVE_MAGIC;
+        r.version = (uint16_t)(ver < 0 ? 0 : ver);
+        r.bytes = (uint16_t)n;
+        r.cut = 3;                       /* a value no default has, so a load is visible */
+        r.res = 5;
+        r.arp_oct = 2;
+        if (plat_store_save(OBJ_SETTINGS, &r, (uint32_t)(sizeof r < (size_t)n ? sizeof r : (size_t)n)) < 0) {
+            printf("plant failed\n");
+            fflush(stdout);
+            return 1;
+        }
+        printf("planted version %d\n", ver);
+        fflush(stdout);
+        return 1;
+    }
     if (strcmp(cmd, "show") || !a[0])
         return 0;
     {
@@ -3302,6 +3412,105 @@ void app_init(void)
     region_reset_all();
     edit_zoom = 0;
     edit_live = 4;                      /* 4 = no marker yet: the window is the slot */
+
+    /* The saved state, last, because it overwrites what everything above just set. The
+     * three things that must happen in this order and are easy to get wrong:
+     *
+     *   1. the pool is parsed first (above), so a saved region can be clamped against the
+     *      slot's real length -- a record from a build whose pool had a longer slot must
+     *      not leave a boundary past the end of the material;
+     *   2. ui_apply() runs after the knobs are restored, or the DSP keeps the defaults
+     *      while the screen shows the saved values;
+     *   3. bank.frames follows bank_i, which bank_i's own restore does not do. */
+    if (save_load()) {
+        save_apply(save_loaded_rec());
+        ui_apply();
+        if (bank_i >= WV_BANK_COUNT)
+            bank_i = 0;
+        bank.frames = WV_BANKS[bank_i];
+        if (smp_count && smp_i >= smp_count)
+            smp_i = 0;
+        /* A boundary past the material is the one way a record can be wrong without
+         * being corrupt: the pool is a resource the installer writes, so it can change
+         * under a saved record. region_fix pushes the four numbers back inside. */
+        {
+            uint8_t i;
+            for (i = 0; i < SMP_MAX; i++)
+                region_fix(i);
+        }
+    }
+}
+
+/* app.c's statics -> the record. The one place that knows the mapping: writing it out
+ * twice (once for the save, once for the dirty scan) is how the two drift apart. */
+static void save_snapshot(save_rec *r)
+{
+    uint8_t i;
+
+    memset(r, 0, sizeof *r);
+    r->cut = k_cut;
+    r->res = k_res;
+    r->shape = k_shape;
+    r->sh_amount = k_amount;
+    r->morph = k_morph;
+    r->grain = k_grain;
+    r->spray = k_spray;
+    r->eg_a = k_eg_a;
+    r->eg_d = k_eg_d;
+    r->eg_s = k_eg_s;
+    r->eg_r = k_eg_r;
+    r->lfo_rate = k_lfo_rate;
+    r->lfo_depth = k_lfo_depth;
+    r->arp_rate = k_arp_rate;
+    r->arp_type = k_arp_type;
+    r->arp_oct = k_arp_oct;
+    r->arp_gate = k_arp_gate;
+    r->bank_i = bank_i;
+    r->smp_i = smp_i;
+    r->src = src;
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        r->region[i].start = region[i].start;
+        r->region[i].end = region[i].end;
+        r->region[i].loop_s = region[i].loop_s;
+        r->region[i].loop_e = region[i].loop_e;
+        r->region[i].on = region[i].on;
+    }
+}
+
+/* the record -> app.c's statics. The inverse of save_snapshot, and it has to stay one:
+ * a field added to one and not the other is a parameter that saves and does not come
+ * back. */
+static void save_apply(const save_rec *r)
+{
+    uint8_t i;
+
+    k_cut = r->cut;
+    k_res = r->res;
+    k_shape = r->shape;
+    k_amount = r->sh_amount;
+    k_morph = r->morph;
+    k_grain = r->grain;
+    k_spray = r->spray;
+    k_eg_a = r->eg_a;
+    k_eg_d = r->eg_d;
+    k_eg_s = r->eg_s;
+    k_eg_r = r->eg_r;
+    k_lfo_rate = r->lfo_rate;
+    k_lfo_depth = r->lfo_depth;
+    k_arp_rate = r->arp_rate;
+    k_arp_type = r->arp_type;
+    k_arp_oct = r->arp_oct;
+    k_arp_gate = r->arp_gate;
+    bank_i = r->bank_i;
+    smp_i = r->smp_i;
+    src = r->src;
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        region[i].start = r->region[i].start;
+        region[i].end = r->region[i].end;
+        region[i].loop_s = r->region[i].loop_s;
+        region[i].loop_e = r->region[i].loop_e;
+        region[i].on = r->region[i].on;
+    }
 }
 
 /* app.h asks this at boot (APP_BLE_AT_BOOT). This build has no BLE switch of its
