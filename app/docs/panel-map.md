@@ -92,6 +92,36 @@ A **page** is not a mode, and the distinction is what makes the layout legal:
   to the parameter it had
 - **no value is lost** — the page edits its own parameters, not the knobs'
 
+### The page button advances, and `B_HOME` is the only exit
+
+Decided on the instrument, 2026-11-03, when the LFO needed a second screen and it
+became clear the panel had no way to say "next" *and* "close" with one button:
+
+- **A page's own button never closes its page. It advances.** Press it again and you
+  are on the page's second screen, then the third, then **back on the first**. It is
+  the only way to walk a page's screens, so the walk has to be a cycle — a last screen
+  that stopped dead would make the first screen reachable only by leaving the page and
+  coming back.
+- **Leaving is somebody else's job**: another page button, or **`B_HOME`**, which
+  always means "back to the voice". `B_HOME` is the exit from every page, from any
+  screen.
+- **Coming back always starts at screen 1**, so the way in is the same every time.
+- A one-screen page (ENV, ARP) therefore rounds onto itself: pressing `B_ENV` twice is
+  a **no-op**, and that is the rule rather than a special case. It is what teaches the
+  player that `B_HOME`, not the page button, is the exit.
+
+Why not keep the toggle on one-screen pages and advance on multi-screen ones: the same
+button would mean two things depending on an invisible property of the page, and the
+first time the player pressed a two-screen page expecting it to close they would land
+on a screen they did not ask for. One rule everywhere is cheaper to learn.
+
+The screen number lives in the page caption (`LFO PAGE 2`), and the lamp belongs to the
+**page, not the screen** — screen 2 is still the LFO, so the button stays lit there.
+
+Screen counts are one table in `app.c` (`PAGE_SCREENS[]`). The LFO has two and is the
+page expected to grow (a second LFO, LFO waveform choice, and the list of what the LFO
+modulates are all queued); ENV, ARP and EDIT have one each.
+
 That is why the envelope is allowed to take K1–K4 while GRAIN SIZE is not: there is
 a button that says "you are editing the envelope", and there is no button that says
 "you are editing the grain". GRAIN SIZE is a permanent property of one source, so it
@@ -103,8 +133,11 @@ needed a permanent knob, and `EN_ALGO` was it.
 |---|---|---|---|---|---|---|---|
 | page up | **ATTACK** 1 ms–4 s | **DECAY** 2 ms–8 s | **SUSTAIN** 0–127 | **RELEASE** 2 ms–8 s | unchanged | unchanged | unchanged |
 
-Any source. `B_ENV` toggles. `SELECT`, `ALGO` and `PRESET` keep doing what the
-current source says, because a page only takes the knobs it needs.
+Any source. `B_ENV` opens the page; a second press is a no-op, because the page has
+one screen and the page button advances rather than closes (see **The page button
+advances** above). Leave with `B_HOME` or another page button. `SELECT`, `ALGO` and
+`PRESET` keep doing what the current source says, because a page only takes the knobs
+it needs.
 
 Times are exponential (like CUT and GRAIN SIZE) and are shown as **ms below a
 second, seconds above it** — a percentage is meaningless for a time, since "37" on
@@ -118,11 +151,24 @@ so **a patch made before the envelope existed sounds the same after it**.
 
 | | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
 |---|---|---|---|---|---|---|---|
-| page up | CUT | RES | **RATE** 0.02–20 Hz | **DEPTH** 0–4 oct | unchanged | unchanged | unchanged |
+| **screen 1** | CUT | RES | **RATE** 0.02–20 Hz | **DEPTH** 0–4 oct | unchanged | unchanged | unchanged |
+| **screen 2** | CUT | RES | **TYPE** LP·HP·BP | **KEY TRK** off·25·50·75·100 % | unchanged | unchanged | unchanged |
 
-Any source. `B_LFO` toggles, and the two pages are mutually exclusive: opening one
-closes the other, so the lit lamp is never ambiguous and which parameter a knob edits
-never depends on the order the buttons were pressed.
+Any source. `B_LFO` opens the page; pressing it again goes to screen 2 and a third
+press **returns to screen 1** (the page button walks a cycle — see **The page button
+advances** above). One page is up at a time, so the lit lamp is never ambiguous and
+which parameter a knob edits never depends on the order the buttons were pressed.
+
+**Screen 2 is the filter's own settings, and it is the LFO's page because that is what
+they are**: which tap the VCA reads, and how far the corner follows the note. They are
+not a subject of their own — they are how the LFO's filter behaves — so the page they
+belong to is this one. They used to have a `B_FX` page of their own; that button is now
+free for an effect the instrument does not have yet (reverb, delay, chorus), and it
+opens nothing in the meantime rather than opening an empty page.
+
+Screen 2 keeps the scope and the material band, unlike a page that hides them: the
+player's expectation is that this screen fills up (modulation targets land here) and
+that amber air is cheaper than a gesture to bring the wave back.
 
 **The page takes K3–K4 and leaves CUT and RES alone**, which is the opposite of what
 the ENV page does. The reason is that CUT is what the LFO sweeps: with the page up you
@@ -155,8 +201,8 @@ sounds the same after it.
 |---|---|---|---|---|---|---|---|
 | page up | **RATE** off / 1/4 … 1/64 | **TYPE** UP·DOWN·UP-DN·RND | **OCT** 1–4 | **GATE** 1–100% | unchanged | unchanged | unchanged |
 
-Any source. `B_ARP` toggles, and it is the third of the mutually exclusive pages: ENV,
-LFO and ARP each close the other two.
+Any source. `B_ARP` opens the page; a second press is a no-op (one screen). ENV, LFO,
+ARP and EDIT are mutually exclusive: opening one closes the rest.
 
 **`RATE` doubles as the switch.** Zero is off, which is also the default, so an
 arpeggiator that has never been turned on cannot change how an existing patch plays.
@@ -265,8 +311,11 @@ of the sample while the third and fourth were inside it, so nudging the loop was
 across the whole row while END, the boundary a player sets once, sat in the middle of the
 work.
 
-SMPL only — `B_EDIT` does nothing in SYNTH or GRAN, where there is no material region to
-edit. It is the fourth of the mutually exclusive pages.
+In **SMPL** this is the region editor; in **SYNTH** the same button opens the frame rack
+(see **SYNTH's EDIT page** below). It does nothing in **GRAN**, which has no EDIT screen
+yet. It is the fourth of the mutually exclusive pages, and a page never outlives the
+source that owns it: switching SOURCE closes it rather than reinterpreting the same state
+as the other source's editor.
 
 **Path A, one region and one loop.** The slot is not chopped into pieces. There is one
 `start`–`end` span that sounds, and inside it one `loop_s`–`loop_e` span that repeats
@@ -377,22 +426,54 @@ minutes in four steps, never `ink_hi`), and it is absent entirely when the recor
 flash. Being the source's own `ink`, it is amber in SYNTH, green in SMPL and cyan in GRAN. It replaced the words `NOT SAVED`, which were measured erasing 443 px
 of SYNTH's waveform in the brightest part of the picture.
 
+#### SYNTH's EDIT page — the frame rack
+
+| | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
+|---|---|---|---|---|---|---|---|
+| page up | **FRAME** 0–7 | **OFFSET** 0–255 pt | **SPREAD** 0–127 | **SHAPE** LIN·ALT·RAND | BANK | **MORPH** | clears the frame |
+
+Same button, different subject: in SYNTH the material is eight wavetable frames, and the
+thing worth editing is the phase offset that makes MORPH sound like movement instead of a
+crossfade. **`ALGO` stays MORPH here** — the ZOOM takeover belongs to SMPL and is
+conditioned on `src != SRC_SYNTH`, because on this page the knob a player needs is the
+one that walks the frames.
+
+The band draws **all eight frames at once, stacked** (`src_rack()`): 3 px apart, amp
+±25 px, frame 0 dimmest and frame 7 brightest, so depth reads as depth. Two marks are
+told apart by **colour rather than brightness** — brightness already carries depth and
+"which frame is loudest":
+
+- **K1's frame is `acc`** (white, 246,232,214 — three channels high, so still white, but
+  leaning amber so it does not look like a sticker on an amber ground), lifted 6 px and
+  drawn last so a neighbour cannot cover it;
+- **MORPH's two frames are `ink_hi`** (the louder one) and 8/12 `ink_hi`, which answers
+  the other question: which pair is being mixed right now.
+
+Deliberately absent from the rack: **no frame numbers** (they sat in the densest part of
+the curve and K1's frame number is already printed on the knob) and **no per-frame zero
+line** (eight of them read as one black line straight through the picture). Both were
+drawn, seen on the glass, and removed.
+
+The offset is per frame and the ramp is the page's own: K3 rewrites all eight
+(`foff_ramp()`), K2 pulls one off it, so the four knobs are not four independent values.
+**Turning SPREAD discards the per-frame offsets** — that is the knob's meaning, not a bug.
+
 ## Buttons
 
 | Button | Printed | Current function | Owner | Where |
 |---|---|---|---|---|
 | `B_SEL` | SEL | **SOURCE** cycles SYNTH → SMPL → GRAN | app | app.c:47 |
-| `B_ENV` | ENV | **ENV page** toggle (A/D/S/R on K1–K4) | app | app.c:47 |
-| `B_EDIT` | EDIT | **SMPL EDIT page** toggle (START/END/LOOP S/LOOP E on K1–K4, LOOP on PRESETS, ZOOM on ALGORITHM); dead in SYNTH and GRAN | app | app.c |
-| `B_FX` | FX | **FX page** toggle: the filter's tap and key tracking (CUT/RES stay on K1–K2, TYPE on K3, KEY TRK on K4) | app | app.c |
-| `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
+| `B_ENV` | ENV | **ENV page** (A/D/S/R on K1–K4); one screen, so a second press is a no-op | app | app.c |
+| `B_EDIT` | EDIT | **EDIT page**: SMPL's region (START/LOOP S/LOOP E/END on K1–K4, LOOP on PRESETS, ZOOM on ALGORITHM) or SYNTH's frame rack (FRAME/OFFSET/SPREAD/SHAPE); nothing in GRAN yet | app | app.c |
+| `B_FX` | FX | **nothing yet** — free for the effects page (reverb/delay/chorus). The filter's tap and key tracking moved to the LFO page's screen 2 | app | app.c |
+| `B_LFO` | LFO | **LFO page**, two screens: RATE/DEPTH on K3–K4, then filter TYPE/KEY TRK. Press advances, third press returns to screen 1 | app | app.c |
 | `B_GLO` | GLO | nothing | **free** | — |
 | `B_SAVE` | SAVE | **write the panel state to `OBJ_SETTINGS`** | app | `app/save.c` |
-| `B_ARP` | ARP | **ARP page** toggle (RATE/TYPE/OCT/GATE on K1–K4) | app | app.c |
+| `B_ARP` | ARP | **ARP page** (RATE/TYPE/OCT/GATE on K1–K4); one screen, second press is a no-op | app | app.c |
 | `B_SEQ` | SEQ | nothing (not read anywhere in the platform) | **free** | — |
 | `B_PLAY` | PLAY | **safe mode only**: a second failed boot, then PLAY = "try again" | platform | main_fm1.c:818 |
 | `B_REC` | REC | **power-on only**: held at boot = UPDATE MODE | platform | main_fm1.c:968 |
-| `B_HOME` | HOME | **RESTORE prompt only**: "no" | platform | unity.c:340 |
+| `B_HOME` | HOME | **leave any page** — the panel's only exit, at any screen. Also the platform's "no" in the RESTORE prompt | **app** (platform: unity.c:340) | app.c |
 | `B_OCT-` | OCT- | **power-on only**: with OCT+ = hardware calibration | platform | main_fm1.c:966 |
 | `B_OCT+` | OCT+ | **power-on only**: same | platform | main_fm1.c:966 |
 
@@ -713,16 +794,21 @@ is the band edge and the lines fall at
 0 dB    row  1   41 px from the centre line (the band edge)
 -10 dB  row 29   13 px from the centre
 -20 dB  row 37    5 px
--30 dB  row 40    2 px
--40 dB  row 41    1 px
--50 dB  row 41   1 px  (coincides with -40: 41.6 and 41.9 both round to 41)
+-30 dB  row 40    2 px      <- the last marker drawn
 ```
 
-Denser near the centre, sparser at the top -- the signature of a dB scale. The bottom
-two markers fall on the same row and draw as one, which is honest: on a 41 px half-band
-a dB scale resolves six markers down to five visible lines, and a scope that cannot
-distinguish -40 from -50 at this depth should not pretend to. The measured rows (1, 29,
-37, 40, 41 above the centre at 42) match this exactly. The only
+Denser near the centre, sparser at the top -- the signature of a dB scale. **The
+graticule stops at -30 dBFS**, and the reason is measured rather than aesthetic: below
+it the lines collapse onto each other. -40 dB lands on row 41 and -50 dB also rounds to
+row 41, i.e. **the same pixel row, drawn twice**, with the centre line (row 42) wedged
+between them. Three markers inside 2 px of the centre are not a scale, they are a smudge
+under the quietest part of the trace -- and the player's report was that the grid was
+crowding the near-vertical parts of the waveform right where the eye needs to follow
+them. Cutting at -30 leaves two readable lines near the centre (rows 40 and 44) and takes
+nothing away: a signal down there is near the noise floor and the trace itself is the
+readout. `test_screen.py` asserts the property ("no dB line within 2 px of the centre")
+rather than the row numbers, so changing `SCOPE_REF` will not fail it for the wrong
+reason. The only
 label is "+0" at the right edge, in the top row: the 0 dBFS line is the reference a
 loud chord visibly crosses, and the rest is read off the spacing, because five words
 of six px in a 2 px gap would not read as a scale but as noise.
@@ -963,11 +1049,37 @@ built from state:
 
 | Lamp | Lit when |
 |---|---|
-| `B_ENV` | the ENV page is up |
-| `B_LFO` | the LFO page is up |
-| `B_ARP` | the ARP page is up |
+| `B_ENV` | the ENV page is up (page-open only — see below) |
+| `B_LFO` | the LFO page is up, **on either screen** |
+| `B_ARP` | the ARP page is up, **or blinking while an armed arp's page is shut** |
+| `B_EDIT` | the EDIT page is up, in either source that has one |
 | `B_SEL` | SOURCE is not SYNTH (the power-on default) |
-| `B_EDIT` | SOURCE is SMPL, where EDIT opens the region page |
+| `B_SAVE` | mid while an edit waits, lit once the save line is full |
+
+### One rule, and the two pages that are deliberately outside it
+
+A lamp is a claim, not decoration: it says "there is something here you cannot see".
+Two shapes follow from that (player, 2026-11-03):
+
+- **PAGE OPEN — solid on the page's own button.** A page takes K1–K4 off the voice, so
+  the panel has to say where the knobs went. ENV, LFO, ARP, EDIT.
+- **STILL WORKING — blinking while the page is shut.** For a setting that keeps acting
+  on what you play after its page is gone: LFO's modulation (`rate != 0 && depth != 0`)
+  and ARP rearranging the keys (`rate != 0`). The player asked for the ARP one after
+  noticing that a shut arp page goes dark and the arp is then discovered by playing a
+  chord — the worst moment to find out.
+
+A button must **not** blink for something that cannot be switched off, because the
+blink would be announcing a switch that does not exist. That is why:
+
+- **`B_ENV` never blinks.** The envelope runs on every note; it has no OFF, so a shut
+  ENV page leaves nothing armed. Solid while up, dark when down (player: "env始终是有效的，
+  所以不需要闪烁提醒").
+- **`B_FX` lights nothing at all**, because it has no page — it waits for the effects.
+
+`B_ARP`'s arm condition is `RATE != 0` because that is what the step clock reads. TYPE,
+OCT and GATE have no off of their own and are carried by RATE, so any of them as the
+condition would blink for an arp that never steps.
 
 Keys light while held, which is `plat_leds`'s own behaviour and the reason to call it
 instead of `plat_lights`. `B_SEL` has three states and a two-state lamp, so the lamp
@@ -996,23 +1108,28 @@ button.
 
 ## Free buttons, and what each could carry
 
-Six buttons are entirely unread. The suggestions are grouped by **cost**, because
-there are more free buttons than pending functions.
+The suggestions are grouped by **cost**, because there are more free buttons than
+pending functions. `B_HOME` and `B_FX` are no longer among them: HOME is the panel's
+exit (see **The page button advances** above) and FX waits for the effects.
 
 | Button | Could carry | Cost / caveat |
 |---|---|---|
-| `B_HOME` | **VCO 1 / VCO 2** (planned, not built) | property of the VOICE, not of the material, which is why it is not on `B_EDIT`; idle except during the RESTORE prompt (`unity.c:340`). Was the PANIC candidate until the player reserved it — see spec.md §5d |
+| ~~`B_HOME`~~ | ~~VCO 1 / VCO 2~~ | **taken** — it is the panel's page exit (see **The page button advances**). The player's 2-VCO plan wanted HOME for the VCO selector; the two cannot both hold, and the exit won because it exists today and the 2-VCO patch does not. **Open**: where the VCO selector goes |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
 | `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
-| ~~`B_FX`~~ | ~~filter type~~ | **taken** — it became the FX page (filter tap + key tracking). See the table above. |
+| `B_FX` | **reverb / delay / chorus** | the player's plan: a full page of effects, and it will not fit one screen (same page rule: screen 1 = the four most-used knobs, press again for screen 2). Opens nothing until then, on purpose |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 
-**If only one is done**: `B_GLO` → glide. `B_HOME` is no longer available for PANIC: the
-player reserved it for the VCO selector, on the argument that choosing an oscillator is a
-per-patch mode and panic is reachable by other means (power-cycle on the panel, CC 123 over
-MIDI). That leaves glide as the cheapest genuinely-missing function.
+**If only one is done**: `B_GLO` → glide, which is the cheapest genuinely-missing
+function. `B_HOME` carries the exit now and `B_FX` waits for the effects; `B_SEQ` is
+Saadet's territory.
+
+**`B_HOME` and the two VCOs**: the player's plan for a second oscillator is `B_HOME` as
+the VCO selector (WORKLOG / spec.md §5d), and this session spent `B_HOME` on the page
+exit instead. Those two cannot both hold: unless the exit moves, the VCO selector needs
+another button. Flagged here rather than resolved, because the 2-VCO patch is not built.
 
 ---
 

@@ -153,30 +153,44 @@ the hand and wrong on the screen: the knob labelled SELECT did nothing in two of
 three modes, and the knob labelled PRESETS was choosing the bank. Position is the
 name, so the name has to match the position.
 
-### Toggle pages: ENV, and the material page
+### Pages: a button that advances, and `B_HOME` that leaves
 
-Things that do not fit on the seven encoders are a **toggle**: press the panel
-button and the encoders become that page; press it again and they are the tone
-controls. A short label in the header says which page is up while it is up.
+Things that do not fit on the seven encoders are a **page**: press the panel button
+and the encoders become that page. A short label in the header says which page is up
+while it is up.
+
+**The page's own button does not close it.** It advances: press again and you are on
+the page's second screen, then the third, then back on the first. Leaving is somebody
+else's job — another page button, or `B_HOME`, which always means "back to the voice",
+from any page and any screen. Coming back always starts at screen 1. A one-screen page
+(ENV, ARP) therefore rounds onto itself, so a second press is a no-op; that is how the
+panel teaches that `B_HOME` is the exit. Decided on the instrument 2026-11-03, when the
+LFO gained a second screen: one button cannot mean "next" and "close" at once, and the
+version that meant whichever the page happened to need would have surprised the player
+the first time they pressed a two-screen page expecting it to close.
+
+Screen counts are one table (`PAGE_SCREENS[]` in `app.c`); the LFO has two and is the
+page expected to grow (a second LFO, LFO waveform choice, modulation targets). The lamp
+belongs to the page rather than the screen, and the caption carries the number
+(`LFO PAGE 2`). Full detail, including the lamp rule, is in `panel-map.md`.
 
 **Toggle, not hold.** Holding needs a hand, and the point of an envelope is to
 turn four knobs while playing — a hold gesture spends the hand that should be
 on the keys. Hold is also invisible: nothing on the panel says "you are in a
 page" until the bars change under your fingers.
 
-- **BTN_ENV** → **envelope page**: ATTACK, DECAY, SUSTAIN, RELEASE on K1..K4,
-  three encoders spare. Live in both modes.
+- **B_ENV** → **envelope page**: ATTACK, DECAY, SUSTAIN, RELEASE on K1..K4,
+  three encoders spare. Live in both modes. One screen, so a second press is a no-op.
 - **BTN_BANK** → **material page**: in SMPL, the samples in the resource region
   (and grain size, window, overlap); in SYNTH, nothing — the bank is already on
   a knob, so the button stays **dark** in SYNTH. A dark LED is the panel's own
   way of saying "not in this mode", which is a convention the instrument
   already uses elsewhere.
 
-The two pages are mutually exclusive (pressing one leaves the other), and
-**turning any encoder whose page is up does not leave the page** — you leave by
-pressing the button again, or by pressing PLAY. Leaving by timeout was
-considered and rejected: an envelope tweak with a pause in it should not silently
-revert to the tone page under your fingers.
+Pages are mutually exclusive (opening one closes the rest), and **turning any encoder
+whose page is up does not leave the page** — you leave with `B_HOME` or another page
+button. Leaving by timeout was considered and rejected: an envelope tweak with a pause
+in it should not silently revert to the tone page under your fingers.
 
 At power-on the envelope is A 5 ms, D 300 ms, S 0.7, R 250 ms: a sound on the
 first key press, not a silent instrument waiting to be configured.
@@ -392,8 +406,11 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
 
 ### 5c2. The filter's tap, and key tracking
 
-Both live on the **FX page** (`B_FX`), which is the panel's spare button doing what
-`panel-map.md` had already pencilled in for it.
+Both live on the **LFO page's second screen** (`B_LFO` twice). They had a `B_FX` page of
+their own while they were new; the player's judgment was that they are not a subject of
+their own — they are how the LFO's filter behaves — so they belong to the LFO's page.
+That also frees `B_FX` for the effects the instrument does not have yet. CUT and RES
+stay on K1 and K2 on both screens, so the two screens agree about where the filter is.
 
 **TYPE (K3): LP / HP / BP.** Zavalishin's topology-preserving SVF computes `lp`, `bp`
 and `hp` every sample as intermediate results of one iteration; the voice read `lp`
@@ -1054,7 +1071,8 @@ three failures naming `grain`. A test that cannot fail is not a test.
 Two more suites guard the screen, and both were rewritten after they passed the
 bugs they were written for:
 
-- `app/tests/test_screen.py`, **32 checks** — band geometry, filled envelope,
+- `app/tests/test_screen.py`, **88 checks** — band geometry, filled envelope, the page
+  walk (advance, round, `B_HOME`), the lamp rule and the scope graticule,
   SYNTH's label column, the bank name line, every corner label carrying a name,
   and the 0 dBFS line sitting on row 1.
 - `app/tests/test_grainmap.py`, **71 checks** — lane separation against SPRAY,
@@ -1062,7 +1080,7 @@ bugs they were written for:
 
 ### 9f. Built: the EDIT page (`app/tests/test_edit.py`)
 
-41 checks over the smallest page on the panel, because it is the one with the most ways to
+45 checks over the smallest page on the panel, because it is the one with the most ways to
 be wrong while looking right. Both pictures and numbers are asserted, and the two defects
 the page actually had are each pinned by a check that fails when the defect is put back.
 
@@ -1094,7 +1112,7 @@ What is checked, and the measurement behind each:
 
 ### 9f-bis. Built: SYNTH's EDIT page, the phase ramp (`app/tests/test_synth_edit.py`)
 
-31 checks. The page is the first whose four knobs are **not four independent values**: K3
+56 checks. The page is the first whose four knobs are **not four independent values**: K3
 (SPREAD) rewrites all eight frames at once, so the page has a ramp the eight values are
 derived from, and K2 pulls one frame off it. That is why the checks are mostly about
 *relationships* between frames rather than about one number.
@@ -1124,6 +1142,29 @@ derived from, and K2 pulls one frame off it. That is why the checks are mostly a
   that does nothing then reads 0 and the check fails. Injected: dropping the restore fails
   one check.
 - **SMPL's page is still SMPL's** — after `B_SEL` to SMPL, `B_EDIT` opens `edit_src == 1`.
+
+### 9g-bis. Built: the page walk, and the lamp rule (`test_screen.py`, `test_arp.py`, `test_fx.py`)
+
+The page model is the kind of rule that is cheap to implement and expensive to get
+subtly wrong, because every page's button is one branch and five of them could each
+disagree. Checked as behaviour, on the host:
+
+- **the walk and the round** — `tap LFO` → `page_no 1`, again → `2`, again → `1`, again
+  → `2`. Injected: a version that stops on the last screen fails one check.
+- **one screen is a no-op, not a special case** — ENV and ARP pressed twice stay up.
+- **`B_HOME` leaves every page from any screen**, and its knobs come back: after HOME,
+  `cut` reads 127 again on each of the four pages. Injected: a HOME that does nothing
+  fails five checks, one per page.
+- **HOME from the idle screen changes nothing**, and the voice's knobs still work
+  afterwards (`cut` 127 → 111 after one detent). A button that quietly edited a
+  parameter from the idle screen would be worse than one that is dark.
+- **screen 2 is still the LFO's page** — `K3` there moves `ftype` and does *not* move
+  `lfo_rate`, and the LFO lamp stays lit. Injected: letting screen 1's knob handler
+  answer on screen 2 fails two checks.
+- **the lamp rule** — LFO blinks when armed and its page is shut; ARP likewise
+  (`rate != 0`); ENV is solid while up and **never** blinks; `B_FX` lights nothing.
+  Injected: ARP not blinking fails two; FX blinking anyway fails one; EDIT's lamp back
+  to `src == SRC_SMPL` fails one.
 
 ### 9h. Built: persistence and the save line (`app/tests/test_save.py`)
 
@@ -1256,8 +1297,9 @@ Named so they are decisions and not omissions:
 
 ## 11. Open questions
 
-1. **Pages**: ENV is a toggle, BTN_BANK is SMPL-only (§3) — settled. Open: does the
-   header need the page's name, or is the changed bar set enough of a signal?
+1. **Pages**: the page model is settled (§3) — a page button advances through its
+   screens and rounds, `B_HOME` is the only exit, coming back starts at screen 1. Open:
+   does the header need the page's name, or is the changed bar set enough of a signal?
 2. **Granular budget**: 4 grains × 4 voices as the starting point — does that
    match the texture you want, or is a dense 8-grain single voice more the
    point?
