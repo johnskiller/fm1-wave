@@ -409,28 +409,42 @@ shot grn.png
     ck("EDIT" in seen[1], "EDIT on SYNTH lights its own button", seen[1])
     ck("EDIT" not in seen[2], "and closing the page darkens it", seen[2])
 
-    # ENV and FX are the exception, and they are the exception for a reason that has to
-    # hold or the rule is arbitrary: neither has an OFF. The envelope runs on every note
-    # and the filter sits in the signal path on every sample, so "page closed" leaves
-    # nothing armed to blink about. Solid while up, dark when down, and specifically NOT
-    # blinking afterwards -- a blink would claim the filter can be switched off.
-    for btn, page in (("ENV", "env"), ("FX", "fx")):
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-            f.write(f"tap {btn}\nmaster 200\nwait 100\nleds\n"
-                    f"tap {btn}\nmaster 200\nwait 100\nleds\n"
-                    f"wait 150\nleds\nwait 150\nleds\n")
-            path = f.name
-        try:
-            r = subprocess.run([HOST, path, out], capture_output=True, text=True,
-                               timeout=120, cwd=out)
-        finally:
-            os.unlink(path)
-        got = [l.split("leds:")[1].split("|")[0].strip()
-               for l in r.stdout.splitlines() if "leds:" in l]
-        ck(btn in got[0], f"{btn}'s page lights its own button", got[0])
-        ck(btn not in got[1], f"{btn} goes dark when the page closes", got[1])
-        ck(not any(btn in g for g in got[2:]),
-           f"{btn} does NOT blink afterwards: it has no off to report", str(got[2:]))
+    # ENV is the exception, and for a reason that has to hold or the rule is arbitrary:
+    # the envelope runs on every note, so it has no OFF and "page closed" leaves nothing
+    # armed to blink about. Solid while up, dark when down, and specifically NOT blinking
+    # afterwards -- a blink would announce a switch that does not exist.
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("tap ENV\nmaster 200\nwait 100\nleds\n"
+                "tap ENV\nmaster 200\nwait 100\nleds\n"
+                "wait 150\nleds\nwait 150\nleds\n")
+        path = f.name
+    try:
+        r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                           timeout=120, cwd=out)
+    finally:
+        os.unlink(path)
+    got = [l.split("leds:")[1].split("|")[0].strip()
+           for l in r.stdout.splitlines() if "leds:" in l]
+    ck("ENV" in got[0], "ENV's page lights its own button", got[0])
+    ck("ENV" not in got[1], "ENV goes dark when the page closes", got[1])
+    ck(not any("ENV" in g for g in got[2:]),
+       "ENV does NOT blink afterwards: it has no off to report", str(got[2:]))
+
+    # FX is dark on every frame, page up or down. Its lamp is deliberately absent until
+    # the page moves to another button; asserted so that re-lighting it in passing gets
+    # caught rather than becoming the new normal.
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("tap FX\nmaster 200\nwait 100\nleds\nwait 150\nleds\n")
+        path = f.name
+    try:
+        r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                           timeout=120, cwd=out)
+    finally:
+        os.unlink(path)
+    got = [l.split("leds:")[1].split("|")[0].strip()
+           for l in r.stdout.splitlines() if "leds:" in l]
+    ck(not any("FX" in g for g in got),
+       "FX lights nothing while its page is still on that button", str(got))
 
     # Two pages cannot be up at once. Without this the lit lamp would be ambiguous and
     # which parameters the knobs edit would depend on the order the buttons were hit.

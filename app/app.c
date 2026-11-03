@@ -3987,6 +3987,13 @@ void app_frame(void)
     if (now - last >= 33u) {
         uint32_t lit = 0;
         last = now;
+        /* B_ENV is page-open only, and it is the deliberate exception to the blink
+         * rule below: the envelope runs on every note, so it has no OFF and "page
+         * closed" leaves nothing armed to blink about.
+         *
+         * B_FX gets no lamp at all for now: the page is moving to another button (the
+         * player asked for it in this session), and lighting a button whose page is
+         * about to leave it would only have to be undone. */
         if (env_page)
             lit |= 1u << B_ENV;
         /* The LFO lamp has two readings, because the page and the modulation are two
@@ -4021,14 +4028,6 @@ void app_frame(void)
             lit |= 1u << B_ARP;
         else if (arp_on() && ((now >> 8) & 1u))
             lit |= 1u << B_ARP;
-        /* B_FX is page-open only, and so is B_ENV. Those two are the exception to the
-         * blink rule above, and the reason is that they have no OFF: the envelope runs
-         * on every note and the filter sits in the signal path on every sample, so
-         * "page closed" leaves nothing armed to blink about. A blinking FX lamp would
-         * claim the filter can be switched off. It was not lit at all before this --
-         * the FX page opened and nothing on the panel said so. */
-        if (fx_page)
-            lit |= 1u << B_FX;
         if (src != SRC_SYNTH)
             lit |= 1u << B_SEL;
         /* B_EDIT follows the PAGE, not the source. It read `src == SRC_SMPL`, so
