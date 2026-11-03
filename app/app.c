@@ -62,6 +62,7 @@ static wv_bank  bank = { WV_BANKS[0], 0 };   /* foff is armed by foff_ramp() */
 static const uint8_t *pool;
 static void           pool_poll(void);
 static void           midi_in(void);      /* (defined below: app_render asks it every block) */
+static void           app_note(const char *s);   /* (a few words on the glass for a moment) */
 static uint32_t       pool_len;
 static wv_sample      smp[SMP_MAX];
 static uint8_t        smp_count;
@@ -1234,6 +1235,15 @@ static void input(void)
             page_press(PAGE_EDIT);
             if (edit_page)
                 edit_src = src;
+        } else {
+            /* GRAN has no page yet. Silence here was the one thing this button could do
+             * that a player cannot tell from a fault: EDIT sits among the page buttons,
+             * GRAN's screen shows three live corners and four live knobs, and a press
+             * with no effect at all reads as a broken key. The line costs nothing, takes
+             * no knob, and says which of the two it is -- the button works, there is just
+             * nothing underneath it in this source yet. */
+            app_note("NO EDIT IN GRAN");
+            app_say("NO EDIT", "in GRAN");
         }
     }
 
@@ -1962,6 +1972,29 @@ static int32_t  save_led;       /* B_SAVE's lamp: 0 saved, 1 mid, 2 lit */
  * sending pixels that are already on the glass. A probe, not a setting. */
 static int32_t  frame_blits;
 static int      unsaved_live;   /* unsaved_at holds a start time */
+
+/* A few words on the glass, for a moment.
+ *
+ * app_say() is the screen reader's channel (platform/device/announce.c): it speaks over
+ * SysEx and draws nothing. That is the right home for "SAVED", whose answer the player
+ * hears while looking at the panel -- but it is the wrong channel for answering a button
+ * press, because a press that changes nothing on the glass is indistinguishable from a
+ * broken key, and the player is looking at the glass when they press it.
+ *
+ * So this is a second, much smaller channel: one line, no layout, gone after a moment. It
+ * paints over the picture band's lower row rather than reserving space anywhere, because
+ * a reserved row would cost every screen for the sake of four buttons that use it. */
+#define NOTE_MS 1400
+static char     note_txt[24];
+static uint32_t note_at;        /* plat_ms() when it was set; 0 = nothing to say */
+static void app_note(const char *s)
+{
+    int i;
+    for (i = 0; s[i] && i < (int)sizeof note_txt - 1; i++)
+        note_txt[i] = s[i];
+    note_txt[i] = 0;
+    note_at = plat_ms() | 1u;   /* |1: a note set at ms 0 must still be a note */
+}
 
 static src_skin_t src_skin(void)
 {
@@ -3941,6 +3974,16 @@ void app_frame(void)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ARP PAGE", sk.ink);
             else if (edit_page && src != SRC_SYNTH)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "EDIT PAGE", sk.ink);
+            else if (note_at) {
+                /* Nothing else claims this row when no page is up, so the note goes here:
+                 * the lower row of the picture, at full ink so it is not mistaken for the
+                 * dim page captions beside it. */
+                uint32_t age = plat_ms() - note_at;
+                if (age < NOTE_MS)
+                    cv_text(MAT_X0 + 2, ypage, &FONT_XS, note_txt, sk.ink_hi);
+                else
+                    note_at = 0;
+            }
             /* SYNTH's edit page prints no caption: the rack IS the page (all eight frames
              * at once is not something the other sources ever do), and a caption on its
              * last row sat on top of the near frame's curve. The knob labels in the

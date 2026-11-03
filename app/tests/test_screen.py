@@ -432,6 +432,25 @@ shot grn.png
     ck(expect("tap SEL\ntap EDIT\nturn PRESET 3\n", "region_on", 1),
        "PRESET still turns the loop on in SMPL's EDIT page")
 
+    # ── a press that has nowhere to go still answers ───────────────────────────
+    # B_EDIT belongs to the SOURCE, and GRAN has no page yet. Doing nothing was the one
+    # response a player cannot tell from a fault, so it now says so on the glass. Checked
+    # by pixel rather than by app_say(): that is the screen reader's channel and
+    # announce.c has no drawing calls at all -- "SAVED" has been going to the reader's ear
+    # alone for the same reason, which is why this needed its own line.
+    print("B_EDIT in GRAN says so on the glass")
+    d = tempfile.mkdtemp()
+    base = "master 200\nwait 50\ntap SEL\ntap SEL\nmaster 200\nwait 50\n"
+    s0 = shoot(base + "shot a.png\n", d)["a"]
+    s1 = shoot(base + "tap EDIT\nmaster 200\nshot b.png\n", d)["b"]
+    band = lambda im: sum(1 for y in range(160, 176) for x in range(240)
+                          if im.getpixel((x, y)) != (8, 36, 49))
+    ck(band(s1) > band(s0) + 200, "pressing EDIT in GRAN paints a line on the caption row",
+       "%d ink pixels, was %d" % (band(s1), band(s0)))
+    s2 = shoot(base + "tap EDIT\nmaster 200\nwait 1600\nshot c.png\n", d)["c"]
+    ck(band(s2) == band(s0), "the note is gone again after its moment",
+       "%d ink pixels, base %d" % (band(s2), band(s0)))
+
     # ── B_HOME is the voice page ───────────────────────────────────────────────
     # Not an exit: a page, and the same rule as every other page button (player, this
     # session: "可以把HOME理解为voice页面"). The voice has one screen today -- one
