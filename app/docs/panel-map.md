@@ -239,11 +239,47 @@ centred on it — so a zoomed window is never lost off to the side; turning STAR
 START to the middle. K1–K4 are the navigation. Measured at 128x: turning START leaves the
 live marker at column 115–116 of 232, the centre.
 
-**The step follows the zoom.** A turn moves a boundary by `len / 1000 >> zoom` samples: a
-thousandth of the slot at 1x, so the whole slot is 1000 detents, and finer as the window
-closes. It is floored at 1 sample — `(len/1000) >> 7` is zero on a 3 s slot, and a zero
-step made all four knobs dead at 128x while the page still looked alive. That is a
-measured defect, not a hypothesis: `turn K1 900` left `region_start` at 0.
+**The step is one pixel of the window.** A turn moves a boundary by `(len >> zoom) / 232`
+samples — the window's own span divided by its width — so a detent moves the marker
+exactly as far as it looks like it should, at every zoom. Measured against the picture:
+ratio 0.997 at 1x, 0.992 at 4x, 0.992 at 16x. It is floored at 1 sample, because a slot
+shorter than 232 samples at high zoom divides to zero and a zero step makes all four
+knobs dead while the page still looks alive.
+
+This replaced `len / 1000 >> zoom`, which made the whole slot 1000 detents: on a 3 s slot
+a full pass was ~160 turns of the wrist at 1x while the same turn at 128x moved one
+sample. A turn has to move the marker by what the eye sees, and pixels are the only unit
+that is true at every zoom. The first version also reached zero at 64x — `turn K1 900`
+left `region_start` at 0 — which the same floor fixes.
+
+**This page breaks the source's single colour, on purpose.** Four boundaries are four
+values a hand has to tell apart, and SMPL's one green made them four identical lines — the
+page worked and could not be read. So START / END / LOOP S / LOOP E each get a hue, and
+the knob that moves a boundary is printed in the hue of the line it moves:
+
+| | hue | live | not live |
+|---|---|---|---|
+| START | red `255,96,96` | full | 3/5 |
+| END | yellow `255,208,96` | full | 3/5 |
+| LOOP S | cyan `96,224,255` | full | 3/5 |
+| LOOP E | violet `198,140,255` | full | 3/5 |
+
+**Only the brightness changes, never the hue.** Recolouring the live marker instead would
+mean a line changes identity as the hand moves, which is exactly the question the page
+exists to answer. An off loop drops to 1/5 of its own hue rather than to the theme's ink,
+because an off loop is not a fact about the sound but it is still LOOP S.
+
+This is the one place on the panel where a colour is not the source's colour, and it is
+justified by the page being the only one that shows four of the same kind of thing at
+once. SYNTH and GRAN keep one ink.
+
+**The playhead is white, and the only white on the screen.** It is drawn only while a
+voice is walking this slot — a head parked at 0 would claim the material is playing from
+the start, the same mistake the GRAN picture avoids by not drawing one at all when the
+cloud is silent. Its shape is a 5 px tab at the top of the band plus a dot at the
+material's own height: the four markers are full-height 2 px lines, so a tab and a dot
+read as a cursor and a line reads as an edge. Measured while a key is held: column 4, then
+24, then 58 at 60 / 260 / 620 ms.
 
 **The picture shows four positions, so it needed a different drawing.** In SYNTH and GRAN
 the band shows material. Here it shows a *state*: material inside the region at 2/5 ink,

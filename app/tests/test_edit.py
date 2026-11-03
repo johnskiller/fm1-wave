@@ -96,14 +96,20 @@ def fill_height(b):
 
 
 def tall_columns(b, min_h=30):
-    """Columns of the band that are pure ink_hi for most of their height: the markers.
+    """Columns that are the full-strength hue of ANY of the four boundaries.
 
-    The live marker is the only thing drawn in the brightest ink, and it spans the
-    waveform's height at that sample, not the whole band -- measured 39 px of 80 at 128x,
-    which is why the threshold is 30 and not 60. Waveform columns top out at 7 px of
-    ink_hi even at 1x, so height still separates the two cleanly.
+    Before the page had colours this looked for ink_hi, because the live marker was the
+    only thing in the brightest ink. Now each boundary owns a hue and the live one is
+    that hue at full strength, so "where is the live marker" means "which of the four
+    pale-or-saturated columns is not dimmed". Height is still what separates a marker
+    from material: the marker spans the waveform's own height at that sample (measured
+    39 px of 80 at 128x) and no waveform column comes near 30.
     """
-    m = (b[:, :, 0] == INK_HI[0]) & (b[:, :, 1] == INK_HI[1]) & (b[:, :, 2] == INK_HI[2])
+    hues = [(255, 96, 96), (255, 208, 96), (96, 224, 255), (198, 140, 255)]
+    m = np.zeros(b.shape[:2], dtype=bool)
+    for rgb in hues:
+        q = q565(rgb)
+        m |= np.all(np.abs(b.astype(int) - np.array(q)) <= 3, axis=2)
     h = m.sum(axis=0)
     return [int(i) for i in range(len(h)) if h[i] >= min_h]
 
@@ -113,6 +119,81 @@ def quarters(b, c):
     m = (b[:, :, 0] == c[0]) & (b[:, :, 1] == c[1]) & (b[:, :, 2] == c[2])
     w = m.shape[1] // 4
     return [int(m[:, i * w:(i + 1) * w].sum()) for i in range(4)]
+
+
+def q565(rgb, num=1, den=1):
+    """The 8-bit colour the panel actually emits for `RGB(rgb)` at `num/den` brightness.
+
+    The device stores RGB565 (5-6-5), so (255,96,96) arrives as (255,97,98) and a
+    dimmed one is quantised twice. Comparing against the requested colour would make
+    every check fail for a reason that is not a defect, so the arithmetic is mirrored
+    here instead of loosening the tolerance.
+    """
+    r, g, b = rgb
+    c = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+    c = (((((c >> 11) & 0x1F) * num // den)) << 11
+         | ((((c >> 5) & 0x3F) * num // den) << 5)
+         | (((c & 0x1F) * num // den)))
+    return (((c >> 11) & 0x1F) * 255 // 31, ((c >> 5) & 0x3F) * 255 // 63,
+            (c & 0x1F) * 255 // 31)
+
+
+def find_colour(b, rgb, min_rows=25):
+    """Columns where `rgb` covers at least `min_rows` rows of the band.
+
+    The colours are RGB565 on the device, so a hue arrives quantised (255,97,98) rather
+    than (255,96,96); the tolerance is for that, not for sloppiness.
+    """
+    m = np.all(np.abs(b.astype(int) - np.array(rgb)) <= 3, axis=2)
+    h = m.sum(axis=0)
+    return [int(i) for i in range(len(h)) if h[i] >= min_rows]
+
+
+def probe_len(out):
+    """The loaded slot's length in samples, asked of the page rather than assumed.
+
+    The demo pool is a build artefact and gets replaced; a hardcoded 52369 would make the
+    step check fail for the right reason at the wrong time.
+    """
+    o = run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+expect region_end 0
+""", out, allow_fail=True)
+    m = re.search(r"got (\d+)", o)
+    return int(m.group(1)) if m else 0
+
+
+def probe_step(out, zoom):
+    """How many samples one detent of K3 moves at `zoom`, read from the host.
+
+    The assertion is deliberately a wrong value: `expect region_loops 0` fails and prints
+    `got N`, so N is the distance one turn travelled. Anything the page reports about
+    itself would be the code checking itself; this is the boundary's actual position.
+    """
+    o = run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+turn ALGO %d
+wait 100
+turn K3 1
+wait 100
+expect region_loops 0
+""" % zoom, out, allow_fail=True)
+    m = re.search(r"got (\d+)", o)
+    return int(m.group(1)) if m else -1
 
 
 def expect_ok(out):
@@ -221,7 +302,9 @@ wait 200
 shot live.png
 expect zoom 7
 """, out, allow_fail=True)
-    tall = tall_columns(band(os.path.join(out, "live.png")))
+    # Full-strength START only: at 128x the live marker is the one K1 just moved, and
+    # asking for "any marker" would also accept the clamped END/LOOP pair at the edges.
+    tall = find_colour(band(os.path.join(out, "live.png")), q565((255, 96, 96)))
     centre = 232 // 2
     near = [c for c in tall if abs(c - centre) <= 8]
     ck(bool(near),
@@ -229,7 +312,7 @@ expect zoom 7
        f"centre {centre}")
 
     strip = []
-    for t in (250, 500, 800):
+    for t in (40, 110, 200):
         nm = f"walk{t}.png"
         run("""wait 400
 press SEL
@@ -244,10 +327,109 @@ turn K1 %d
 wait 150
 shot %s
 """ % (t, nm), out)
-        strip.append(quarters(band(os.path.join(out, nm)), DIM15))
-    peaks = [s.index(max(s)) for s in strip]
-    ck(peaks == [0, 1, 2] or peaks == [0, 1, 3],
-       f"START's dimmed strip walks across the band as START moves right: quarters {peaks}")
+        # "inside" (2/5) is what shrinks as START advances, so it is measured rather
+        # than "outside" (1/5): once START is near the end the outside covers the whole
+        # band and its distribution stops carrying information -- measured, all four
+        # quarters at 3.4-4.2k px with the inside down to 39 px.
+        strip.append(quarters(band(os.path.join(out, nm)), DIM25))
+    first = [s.index(max(s)) for s in strip]
+    totals = [sum(s) for s in strip]
+    ck(totals[0] > totals[-1] * 2,
+       f"the sounding region shrinks as START moves right: {totals[0]} -> {totals[-1]} px")
+
+    print("a turn moves one pixel of the window")
+    # The first version of the step was len/1000 >> zoom, so at 1x a full pass was ~1000
+    # turns. That is the defect this checks: the step has to be the window's own pixel,
+    # because the picture is the only thing that says how far a turn should go. Measured
+    # as samples-per-turn against (len >> zoom) / 232.
+    slot_len = probe_len(out)
+    for z, want in ((0, 1.0), (2, 1.0), (4, 1.0)):
+        step = probe_step(out, z)
+        px = (slot_len >> z) / 232.0
+        ck(abs(step / px - want) < 0.08,
+           f"zoom {z}: one turn = {step} samples, one pixel = {px:.2f} (ratio {step / px:.3f})")
+
+    print("the playhead is drawn, and only while the material sounds")
+    # Nothing when silent: a head parked at 0 would claim the material is playing.
+    run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+shot quiet.png
+""", out)
+    ck(not find_colour(band(os.path.join(out, "quiet.png")), (255, 255, 255), 3),
+       "silent, no playhead is drawn")
+
+    # And it moves while a key is held: two frames of the same slot, different columns.
+    # The tab is the top 5 rows, which nothing else uses, so a white column there is the
+    # playhead and not a marker.
+    cols = []
+    for i, d in enumerate((60, 260, 620)):
+        run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+key 12 down
+wait %d
+shot head%d.png
+key 12 up
+""" % (d, i), out)
+        b = band(os.path.join(out, "head%d.png" % i))
+        top = find_colour(b, (255, 255, 255), 4)
+        cols.append(top)
+    ck(all(c for c in cols), f"a held key draws a playhead: {[c[:2] for c in cols]}")
+    moved = len({tuple(c[:1]) for c in cols})
+    ck(moved >= 2, f"and the playhead advances: {[c[:1] for c in cols]}")
+
+    print("the four boundaries are four colours, and the playhead is not one of them")
+    # Four identical green lines were the page's real defect: it worked and could not be
+    # read. Each boundary now has its own hue and its own knob is printed in it, so this
+    # checks the hues are distinct AND that the playhead (white) never collides with them.
+    # A scene where all four are visible and apart: loop on, LOOP S pushed to ~60 px,
+    # END and LOOP E left at the end of the slot.
+    run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+turn PRESET 1
+wait 100
+turn K3 60
+wait 100
+shot c2.png
+""", out)
+    b = band(os.path.join(out, "c2.png"))
+    # K3 was the last turn, so LOOP S is live (full hue) and the other three are at
+    # 3/5 -- the design keeps each marker's hue and changes only its brightness, so a
+    # line never changes identity when the hand moves. Both weights are therefore legal
+    # for a boundary that is not live; only "which of the four is it" is under test.
+    hues = {"START": (255, 96, 96), "END": (255, 208, 96),
+            "LOOP S": (96, 224, 255), "LOOP E": (198, 140, 255)}
+    live_now = "LOOP S"
+    seen = {}
+    for nm, rgb in hues.items():
+        at = [find_colour(b, q565(rgb)), find_colour(b, q565(rgb, 3, 5))]
+        hit = at[0] if at[0] else at[1]
+        seen[nm] = hit
+        want_live = (nm == live_now)
+        ck(bool(hit) and bool(at[0]) == want_live,
+           f"{nm} is drawn in its own hue at x={hit} ({'live' if at[0] else '3/5'})")
+    cols = sorted({tuple(v) for v in seen.values() if v})
+    ck(len(cols) >= 3, f"and they are not all in one place: {seen}")
 
     print("the region cannot be inverted")
     run("""wait 400

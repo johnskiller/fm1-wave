@@ -381,19 +381,26 @@ static int32_t region_step(uint32_t *v, int32_t d, uint32_t step, uint32_t lo, u
     return (int32_t)(n - was);
 }
 
-/* The step a turn moves a marker by, in samples: a thousandth of the slot at zoom 0,
- * so the whole slot is 1000 detents, and proportionally finer as the window closes in.
- * A fixed number of samples would be unusable at both ends -- 1 sample of a 3 s slot
- * is 2500 turns, 1 sample at 8x zoom is invisible. */
+/* The step a turn moves a marker by, in samples: ONE PIXEL OF THE WINDOW.
+ *
+ * A turn has to move the marker by what the eye sees, not by a fixed slice of the
+ * slot. The first version used len/1000 >> zoom, which made the whole slot 1000
+ * detents: at 1x on a 3 s slot a full pass was ~160 turns of the wrist, and that is
+ * why moving a boundary a long way was miserable while the same turn at 128x moved
+ * one sample. Pixels are the unit that matches the picture at every zoom, so the
+ * window's span (len >> zoom) divided by its width in pixels is the step, and a turn
+ * moves the marker exactly as far as it looks like it should.
+ *
+ * The window is 232 px wide, not 240: the material band starts at x=4 and ends at
+ * x=235, so a turn that moved 240 samples' worth would drift against the picture. */
 static uint32_t region_step_samples(const wv_sample *s)
 {
-    uint32_t step = s->len / 1000u >> edit_zoom;
+    uint32_t step = (s->len >> edit_zoom) / MAT_W;
 
-    /* Never zero. `(len / 1000) >> zoom` reaches 0 at 64x on a 3 s slot, and a zero
-     * step makes all four boundary knobs dead -- the page looks alive, the markers do
-     * not move. Measured: at 128x `turn K1 900` left region_start at 0. Below that
-     * point a turn is one sample, which is finer than the eye and exactly what a
-     * close zoom is for. */
+    /* Never zero. A slot shorter than 232 samples at high zoom divides to 0, and a
+     * zero step makes all four boundary knobs dead -- the page looks alive and the
+     * markers do not move. Measured earlier with the other formula: at 128x
+     * `turn K1 900` left region_start at 0. */
     return step ? step : 1u;
 }
 
@@ -1839,6 +1846,39 @@ static void src_grain_map(const src_skin_t *k, const wv_sample *s, int32_t x0, i
     }
 }
 
+/* ── the four boundary colours ──────────────────────────────────────────────
+ *
+ * The EDIT page is the one screen where the source's single ink is not enough. Four
+ * boundaries are four different values a hand has to tell apart at a glance, and the
+ * SMPL theme's one green made them four identical lines -- the page worked and could
+ * not be read. So this page alone breaks the theme: START / END / LOOP S / LOOP E each
+ * get their own hue, and the knob that moves a boundary is printed in the same hue as
+ * the line it moves. Colour is the only thing on this panel that can say "this knob and
+ * that line are the same object" without words, and here that sentence is the whole
+ * page.
+ *
+ * The hues are chosen to survive a 240 px panel in the green ground: a red that is not
+ * the SHAPE red, a yellow that is not SYNTH's amber, a cyan and a violet. Each is
+ * desaturated enough to sit beside the green without vibrating, and the live one is
+ * brightened rather than recoloured, so the identity of a marker never changes when the
+ * hand moves.
+ */
+#define C_ED_START   RGB(255, 96, 96)     /* START   -- red */
+#define C_ED_END     RGB(255, 208, 96)    /* END     -- yellow */
+#define C_ED_LOOPS   RGB(96, 224, 255)    /* LOOP S  -- cyan */
+#define C_ED_LOOPE   RGB(198, 140, 255)   /* LOOP E  -- violet */
+
+/* the same four, dimmed to 2/5 for a boundary that is not being turned */
+static uint16_t ed_hue(int32_t which)
+{
+    switch (which) {
+    case 0:  return C_ED_START;
+    case 1:  return C_ED_END;
+    case 2:  return C_ED_LOOPS;
+    default: return C_ED_LOOPE;
+    }
+}
+
 /* ── SMPL's EDIT picture: the region, the loop, and where the window is ───────
  *
  * The band has one job here that it does not have in the other two sources: it has
@@ -1871,8 +1911,10 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
 {
     int32_t mid = y0 + h / 2;
     uint32_t span, view, i;
-    uint16_t c_live = k->ink_hi;
-    uint16_t c_mark = dim(k->ink_hi, ED_INK_MARK, 5);
+    float    head = 0.0f;               /* the sounding voice's position, in samples */
+    uint8_t  head_live = 0;             /* 0: nothing on this slot is sounding */
+    int32_t  head_x = -1;               /* the column it lands in, -1: not in the window */
+    int32_t  head_y = mid;
 
     if (!s || !s->data || !s->len) {
         cv_rect(x0, mid, w, 1, k->ink);
@@ -1895,11 +1937,40 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
             view = s->len > span ? s->len - span : 0u;
     }
 
+    /* Where the voice is reading, if a sample voice on this slot is sounding. A
+     * playhead is the only thing on this page that shows the loop as a fact rather
+     * than a pair of marks: two dots say "a loop lives here", the playhead bouncing
+     * between them says it is running.
+     *
+     * The newest active voice playing THIS slot, read straight out of the audio state
+     * the way the GRAN picture reads its grains. No lock: the audio thread advances
+     * `pos` and the UI reads it, and a float read is atomic on this core pair, so the
+     * worst case is one frame drawn from a position that moved. */
+    {
+        uint32_t newest = 0;
+        uint8_t  found = 0;
+        for (i = 0; i < WV_VOICES; i++) {
+            /* SAMPLE or SLICE, not just SAMPLE: the engine names a one-shot a SLICE
+             * and a held note a SAMPLE (`v->src = loop ? WV_SRC_SAMPLE : WV_SRC_SLICE`),
+             * so matching only SAMPLE draws no playhead until the loop is switched on
+             * -- which is exactly the state a player is in when they are looking for
+             * one. Both are "a voice walking this material". */
+            if (dsp.v[i].active && dsp.v[i].smp == s
+                && (dsp.v[i].src == WV_SRC_SAMPLE || dsp.v[i].src == WV_SRC_SLICE)
+                && dsp.v[i].age >= newest) {
+                newest = dsp.v[i].age;
+                head = dsp.v[i].rd.pos;
+                found = 1;
+            }
+        }
+        head_live = found;
+    }
+
     /* the material, per column, from the window only */
     for (i = 0; i < (uint32_t)w; i++) {
         uint32_t a = view + (uint32_t)((uint64_t)span * i / (uint32_t)w);
         uint32_t b = view + (uint32_t)((uint64_t)span * (i + 1u) / (uint32_t)w);
-        float lo = 0.0f, hi = 0.0f, pk = 0.0f;
+        float lo = 0.0f, hi = 0.0f, pk = 0.0f, sc;
         uint32_t j;
         int32_t yh, yl;
         uint8_t inside;
@@ -1918,10 +1989,9 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
          * band with its own noise. */
         if (pk < 0.02f)
             pk = 1.0f;
-        {   float sc = (float)(h / 2 - 1) / pk;
-            yh = mid - (int32_t)(hi * sc);
-            yl = mid - (int32_t)(lo * sc);
-        }
+        sc = (float)(h / 2 - 1) / pk;
+        yh = mid - (int32_t)(hi * sc);
+        yl = mid - (int32_t)(lo * sc);
         if (yh < y0) yh = y0;
         if (yl > y0 + h - 1) yl = y0 + h - 1;
         if (yl < yh) yl = yh;
@@ -1936,6 +2006,19 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
         inside = !(b <= rg->start || a >= rg->end);
         cv_rect(x0 + (int32_t)i, yh, 1, yl - yh + 1,
                 inside ? dim(k->ink, 2, 5) : dim(k->ink, ED_INK_OUT, 5));
+
+        /* The playhead's column, caught from the same span this column was drawn
+         * with. Deriving the column from `a` instead would quantise it to a column
+         * edge and make the head jump in steps of one pixel; the fractional part
+         * below puts it inside the column it is really in. */
+        if (head_live && head >= (float)a && head < (float)b) {
+            float f = (float)(head - (float)a) / (float)(b - a);
+            head_x = x0 + (int32_t)i;
+            /* its height inside the column, from the same min/max the column drew */
+            head_y = mid - (int32_t)((hi + (lo - hi) * f) * sc);
+            if (head_y < y0) head_y = y0;
+            if (head_y > y0 + h - 1) head_y = y0 + h - 1;
+        }
     }
 
     /* the four markers, in the window's coordinates. A marker outside the window is
@@ -1962,12 +2045,19 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
             else
                 x = x0 + (int32_t)((uint64_t)(m[n].at - view) * (uint64_t)w / (uint64_t)span);
 
-            if (m[n].live_id == live)
-                c = c_live;
-            else if (m[n].dotted && !rg->on)
-                c = dim(k->ink, ED_INK_OUT, 5);
-            else
-                c = c_mark;
+            /* Each boundary keeps its own hue whether or not it is the live one; only
+             * its brightness changes. Recolouring the live marker instead would mean a
+             * line changes identity as the hand moves, and the page's whole job is
+             * "which line am I moving". */
+            if (m[n].dotted && !rg->on) {
+                /* an off loop is not a fact about the sound, so it drops to 1/5 of its
+                 * own hue rather than to the theme's ink */
+                c = dim(ed_hue((int32_t)n), ED_INK_OUT, 5);
+            } else if (m[n].live_id == live) {
+                c = ed_hue((int32_t)n);
+            } else {
+                c = dim(ed_hue((int32_t)n), ED_INK_MARK, 5);
+            }
 
             /* Two pixels wide and, for the loop pair, a dot every two rows. A 1 px
              * dashed line over an 80 px band was measured at nine visible pixels for
@@ -1982,7 +2072,32 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
             }
         }
     }
+
+    /* The playhead last, on top of both the material and the markers, because it is
+     * the thing that moves and the one thing on this page that is not an edit.
+     *
+     * It must not read as a fifth boundary: the four markers are full-height 2 px
+     * lines, so the playhead is a 5 px tab at the top of the band plus a 3x3 dot at
+     * the material's own height. A tab and a dot are a cursor; a line is an edge.
+     * `ink_hi` is used by the live marker too (the one being turned), and that is
+     * deliberate -- both are "where you are", and they are told apart by shape.
+     *
+     * Nothing is drawn when no sample voice on this slot is sounding: a playhead
+     * parked at 0 would claim the material is playing from the start, which is the
+     * same mistake the GRAN picture avoids by not drawing a playhead at all when the
+     * cloud is silent. */
+    if (head_live && head_x >= x0 && head_x < x0 + w) {
+        /* White, and the only white on the screen: the four hues belong to the four
+         * boundaries, so the one thing that is not an edit cannot borrow any of them. */
+        cv_rect(head_x, y0, 2, 5, C_WHITE);
+        if (head_x + 2 <= x0 + w)
+            cv_rect(head_x + 1, y0, 1, 5, C_WHITE);
+        cv_rect(head_x, head_y, 2, 2, C_WHITE);
+        if (head_x + 2 <= x0 + w)
+            cv_rect(head_x + 1, head_y, 1, 2, C_WHITE);
+    }
 }
+
 
 static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
 {
@@ -2024,19 +2139,33 @@ static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, in
     }
 }
 
+/* A knob in the theme's own ink, which is what every page but EDIT wants. */
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
-                 int32_t v127, int lit)
+                 int32_t v127, int lit);
+
+/* The same, in a chosen colour. Only the EDIT page uses it: there the four boundary
+ * knobs are the four lines in the picture, and a knob printed in its line's hue is how
+ * the panel says which line it moves. `hue` 0 means "the theme's ink". */
+static void knob_c(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
+                   int32_t v127, int lit, uint16_t hue)
 {
-    uint16_t c = lit ? sk.ink_hi : sk.ink;
+    uint16_t c = hue ? hue : (lit ? sk.ink_hi : sk.ink);
+    uint16_t cv = hue ? hue : (lit ? sk.acc : sk.ink);
     cv_text(x, y, &FONT_XS, name, c);
-    cv_text(x, y + 18, &FONT_XS, val, lit ? sk.acc : sk.ink);
+    cv_text(x, y + 18, &FONT_XS, val, cv);
     cv_rect(x, y + 34, w, 8, sk.track);
     if (v127 > 0) {
         int32_t fw = w * v127 / 127;
         if (fw < 1)
             fw = 1;                       /* a bar at "just off zero" is not nothing */
-        cv_rect(x, y + 34, fw, 8, lit ? sk.ink_hi : sk.ink);
+        cv_rect(x, y + 34, fw, 8, hue ? hue : (lit ? sk.ink_hi : sk.ink));
     }
+}
+
+static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
+                 int32_t v127, int lit)
+{
+    knob_c(x, y, w, name, val, v127, lit, 0);
 }
 
 
@@ -2868,10 +2997,12 @@ void app_frame(void)
          * The live marker's knob is lit and the other three are not, because at 8x zoom
          * only one of the four is inside the window and the lit one is the knob the
          * picture is following. */
-        knob(4,   KNOB_TOP, 54, "START",  pos_text(smp_i, region[smp_i].start),  region_mark(smp_i, 0), edit_live == 0);
-        knob(62,  KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1);
-        knob(120, KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2);
-        knob(178, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3);
+        /* Each knob in its boundary's hue, so the four lines in the picture and the
+         * four knobs under it are one set of four objects, not two. */
+        knob_c(4,   KNOB_TOP, 54, "START",  pos_text(smp_i, region[smp_i].start),  region_mark(smp_i, 0), edit_live == 0, C_ED_START);
+        knob_c(62,  KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1, C_ED_END);
+        knob_c(120, KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2, C_ED_LOOPS);
+        knob_c(178, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3, C_ED_LOOPE);
     } else if (lfo_page) {
         /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
          * the page's knobs are read. RATE prints Hz, because a rate in percent is not
