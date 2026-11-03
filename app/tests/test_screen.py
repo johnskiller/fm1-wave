@@ -405,6 +405,33 @@ shot grn.png
         ck(expect("tap %s\ntap %s\n" % (btn, btn), probe, 1),
            "%s pressed twice stays on its one screen" % btn)
 
+    # ── a knob nobody reads must not keep a debt ───────────────────────────────
+    # plat_enc() is a queue: detents wait until something calls plat_enc() for that
+    # encoder. EN_PRESET is the only encoder whose meaning is conditional, and the first
+    # version only drained it inside the branches that used it -- so turning it in a state
+    # that ignores it (SYNTH at rest, SMPL at rest, the ENV page, the LFO's second screen)
+    # saved up the turns and released them in one lump on arriving somewhere that reads
+    # it. Measured before the fix: five detents in SYNTH, where the knob does nothing
+    # visible, then SOURCE -> GRAN and SPRAY was 20 instead of 0.
+    #
+    # Asserted from four different states, because the bug was about which states are
+    # missing, and one of them would have passed by luck.
+    print("a knob that is not being used does not bank its turns")
+    for where, press in (("SYNTH at rest", ""),
+                         ("the ENV page", "tap ENV\n"),
+                         ("the LFO page's second screen", "tap LFO\ntap LFO\n"),
+                         ("the ARP page", "tap ARP\n")):
+        ck(expect(press + "turn PRESET 5\ntap HOME\ntap SEL\ntap SEL\n", "spray", 0),
+           "turning PRESET on %s does not arrive as SPRAY in GRAN" % where)
+    ck(expect("tap SEL\nturn PRESET 5\n", "spray", 0),
+       "nor from SMPL at rest")
+    # And the knob still does its job where it has one.
+    ck(expect("tap SEL\ntap SEL\n", "spray", 0), "GRAN starts at SPRAY 0")
+    ck(expect("tap SEL\ntap SEL\nturn PRESET 5\n", "spray", 20),
+       "and PRESET still sets SPRAY in GRAN")
+    ck(expect("tap SEL\ntap EDIT\nturn PRESET 3\n", "region_on", 1),
+       "PRESET still turns the loop on in SMPL's EDIT page")
+
     # ── B_HOME is the voice page ───────────────────────────────────────────────
     # Not an exit: a page, and the same rule as every other page button (player, this
     # session: "可以把HOME理解为voice页面"). The voice has one screen today -- one

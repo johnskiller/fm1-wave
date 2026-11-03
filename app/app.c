@@ -1435,12 +1435,29 @@ static void input(void)
             region_fix(smp_i);   /* the region lives per slot, so nothing to redo */
         }
     }
+    /* EN_PRESET is read HERE, once, before the branching -- and that placement is the
+     * fix for a real defect, not tidiness.
+     *
+     * plat_enc() is a queue: it returns the detents turned since the last call and
+     * clears them. The first version of this code called plat_enc(EN_PRESET) inside each
+     * branch that used the knob, so in every state that did not use it -- SYNTH at rest,
+     * SMPL at rest, the ENV page, the LFO's second screen -- nothing drained the queue.
+     * The turns sat in the BSP's enc_steps[] (fm1_input.h: fm1_enc_take clears on read)
+     * and were released in one lump the moment the player reached a state that does read
+     * it. Measured on the host: turn PRESET five detents in SYNTH, where the knob visibly
+     * does nothing, then switch SOURCE to GRAN -- SPRAY arrives at 20, not 0. Same from
+     * the ENV page and from SMPL.
+     *
+     * Draining it unconditionally is the only version that cannot regress: a future page
+     * or source that does not use the knob gets a harmless zero instead of a debt. */
+    e = plat_enc(EN_PRESET);
+
     if (src == SRC_GRAN) {
         /* SPRAY on EN_PRESET: bottom-left, next to GRAIN SIZE on bottom-right, because
          * those are the two knobs a granular player turns together. It was on EN_SELECT
          * only because the material had to live somewhere else; now the material is on
          * SELECT and this knob is free. */
-        if ((e = plat_enc(EN_PRESET)) != 0)
+        if (e)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
     } else if (edit_page && src == SRC_SYNTH) {
         /* ZERO on EN_PRESET: turn it either way and the whole ramp goes back to nothing.
@@ -1449,7 +1466,7 @@ static void input(void)
          * knob this value has no middle to return to by ear. The knob is free in SYNTH.
          * All eight frames, not just the selected one: what it undoes is the ramp, and
          * leaving seven offsets behind while the page says "zero" would be a lie. */
-        if ((e = plat_enc(EN_PRESET)) != 0) {
+        if (e) {
             foff_spread = 0;
             foff_ramp();
         }
@@ -1457,7 +1474,7 @@ static void input(void)
         /* LOOP on EN_PRESET: two states, right is on and left is off, so the knob can
          * be turned without looking at the screen -- the same two-state rule the GLOBAL
          * page's rows use. */
-        if ((e = plat_enc(EN_PRESET)) != 0)
+        if (e)
             region[smp_i].on = (e > 0);
     }
     btn_prev = btn;
