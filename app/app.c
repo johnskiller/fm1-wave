@@ -370,6 +370,30 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  * 60 px column sits at x 176..235 with a 4 px gap after the picture and 4 px at the
  * screen edge. The widest string is 54 px, leaving 6 px of slack. */
 #define SYN_W      172                                /* SYNTH's picture, x 4..175 */
+
+/* The stack's shear, in px per frame, chosen by eye off six rendered variants.
+ *
+ * Eight frames on one 172 x 80 picture: each is pushed STK_DX right and STK_DY up from
+ * the one behind it, so the eight read as one object with depth rather than eight traces
+ * on top of each other. No perspective: a frame's width does not shrink with depth,
+ * because a narrower far frame would say the far frame holds less TIME, and every frame
+ * is 256 points.
+ *
+ * STK_DY > STK_DX is the part that matters. Equal steps (5/5) packed the frames as
+ * tightly vertically as horizontally and the eight curves tangled; 9 px apart vertically
+ * against 6 px horizontally is what let the eye separate them, because a frame's own
+ * height is only 2 * STK_AMP = 16 px and the gap between neighbours has to be a
+ * comparable fraction of that. STK_DX was then cut from 6 to keep the near frame as wide
+ * as possible: frame width = 172 - 7 * 6 = 130 px, and the amplitude that still fits in
+ * 80 px is (79 - 7 * 9) / 2 = 8 px.
+ *
+ * The far frames are DIMMED rather than outlined. This band has two colours by design
+ * (ground and ink); a card border would be a third, and eight borders on 16-px-tall
+ * frames would be more ink than the curves. Brightness is the depth cue instead: f0 at
+ * half ink, f7 at full. */
+#define STK_DX     6
+#define STK_DY     8
+#define RACK_LIFT  8              /* how far the edited frame rises */
 #define SYN_COL_W  60                                 /* the labels' column */
 #define SYN_COL_R  (240 - 4)                          /* its right edge: x 235 */
 #define SYN_COL_X  (SYN_COL_R - SYN_COL_W)            /* 175 */
@@ -1298,7 +1322,6 @@ static void input(void)
         if (src == SRC_SYNTH) {
             bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
             bank.frames = WV_BANKS[bank_i];
-        bank.foff = foff_tab[bank_i];
             bank.foff = foff_tab[bank_i];
         } else if (smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
@@ -1993,7 +2016,7 @@ static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * two sources disagreed about how loud their own background was. Both now call this with
  * dim(ink, 2, 5), so they cannot drift apart again.
  */
-static uint16_t dim6(uint16_t c, int32_t num, int32_t den);
+static uint16_t dim(uint16_t c, int32_t num, int32_t den);
 
 static void env_line(const wv_sample *s, int32_t x0, int32_t y0, int32_t w, int32_t h,
                      uint32_t from, uint32_t to, uint16_t colour)
@@ -2516,6 +2539,73 @@ static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, in
         else
             cv_line(x0 + i - 1, py, x0 + i, y, k->ink_hi);
         py = y;
+    }
+}
+
+static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h);
+
+/* ── the eight frames, stacked ───────────────────────────────────────────────
+ *
+ * The SYNTH picture has always drawn the one frame MORPH is on. That answers "what does
+ * this sound like now" and nothing about the bank: the eight frames are the material the
+ * MORPH knob travels through, and this page's whole job is turning them against each
+ * other -- which is invisible if only the current one is drawn.
+ *
+ * So on this page the picture becomes the RACK: all eight frames on a sheared axis, the
+ * one being edited lifted out of it. Not a perspective drawing (see STK_DX / STK_DY).
+ *
+ * It reads each frame through wv_table_read() at morph = frame, which is the same reader
+ * the voices use, so the offsets turned on this page are what the picture shows. A frame
+ * drawn by walking the table directly would be a second implementation of the same idea
+ * and the two would drift.
+ *
+ * COST, stated: 8 polylines instead of 1 -- about 6x the drawing on this band, at 60 fps.
+ * It only runs on this page, which is the page you are on to look rather than to play.
+ */
+static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
+{
+    const int32_t fw   = w - 7 * STK_DX;                          /* the near frame is widest */
+    const int32_t amp  = (h - 2 - 7 * STK_DY - RACK_LIFT) / 2;    /* 7 px at 172 x 80 */
+    const int32_t base0 = y0 + h - 1 - amp;                       /* f0's zero line */
+    int32_t pass, px, py;
+
+    /* Far frame first, so nearer ones overlap it -- that is the order. The edited frame is
+     * drawn LAST whatever its position, or a nearer frame paints over the lift and the
+     * highlight becomes a broken rectangle. (Measured before the fix: 116 px of a 664 px
+     * border, i.e. the bottom two thirds of the raised card were covered.) */
+    for (pass = 0; pass <= (int32_t)WV_FRAMES; pass++) {
+        const int32_t sel = (pass == (int32_t)WV_FRAMES);
+        const int32_t f   = sel ? (int32_t)edit_frame : pass;
+        int32_t x, base;
+        uint16_t ink;
+
+        if (!sel && pass == (int32_t)edit_frame)
+            continue;                                  /* it gets the last pass */
+
+        x    = x0 + f * STK_DX;
+        base = base0 - f * STK_DY - (sel ? RACK_LIFT : 0);
+        ink  = sel ? k->ink_hi : dim(k->ink, 5 + f, 12);
+
+        /* The frame's own zero line. At 15 px of height the curve alone does not say
+         * "this is a plane"; the row does. Not on the edited frame -- its lift already
+         * separates it, and a rule under a raised card reads as a shadow. */
+        if (!sel)
+            cv_rect(x, base, fw, 1, dim(k->ink, 2, 12));
+
+        py = 0;
+        for (px = 0; px < fw; px++) {
+            /* through the same reader the voices use, at morph = this frame, so what is
+             * drawn IS what sounds, offsets and all */
+            float v = wv_table_read(&bank, (float)px / (float)fw, (float)f);
+            int32_t y = base - (int32_t)(v * (float)amp);
+            if (y < y0) y = y0;
+            if (y > y0 + h - 1) y = y0 + h - 1;
+            if (px == 0)
+                cv_rect(x, y, 2, 2, ink);
+            else
+                cv_line(x + px - 1, py, x + px, y, ink);
+            py = y;
+        }
     }
 }
 
@@ -3530,7 +3620,12 @@ void app_frame(void)
         if (!smp_count && src != SRC_SYNTH) {
             cv_text(MAT_X0 + 2, 46, &FONT_XS, "NO SAMPLES", sk.ink);
         } else if (src == SRC_SYNTH) {
-            src_shape(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
+            /* The rack on this page, the single frame everywhere else: this page edits the
+             * eight against each other, and one curve cannot show the thing being edited. */
+            if (edit_page)
+                src_rack(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
+            else
+                src_shape(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
         } else if (src == SRC_GRAN) {
             /* the voice the cloud is most likely to be heard from: the newest one. With
              * several keys down the picture shows one voice's cloud, and the newest is
@@ -3608,7 +3703,7 @@ void app_frame(void)
             cv_text(MAT_LAB_L, ybot, &FONT_XS, "SPRAY", dim(sk.ink_hi, 3, 5));
             cv_text(MAT_LAB_L + txt_w("SPRAY") + 4, ybot, &FONT_XS, pct(k_spray),
                     sk.ink_hi);
-        } else if (edit_page) {
+        } else if (edit_page && src != SRC_SYNTH) {
             nm = "LOOP";
             vv = region[smp_i].on ? "ON" : "OFF";
             w = txt_w(vv);
@@ -3622,7 +3717,7 @@ void app_frame(void)
          * reads no wavetable, so the knob is dead there, and a dead value is worse
          * than an empty corner. */
         if (src == SRC_SYNTH || src == SRC_GRAN || edit_page) {
-            if (edit_page) {
+            if (edit_page && src != SRC_SYNTH) {
                 nm = "ZOOM";
                 vv = zoom_text(edit_zoom);
             } else if (src == SRC_SYNTH) {
@@ -3646,8 +3741,13 @@ void app_frame(void)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE", sk.ink);
             else if (arp_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ARP PAGE", sk.ink);
-            else if (edit_page)
+            else if (edit_page && src != SRC_SYNTH)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "EDIT PAGE", sk.ink);
+            /* SYNTH's edit page prints no caption: the rack IS the page (all eight frames
+             * at once is not something the other sources ever do), and a caption on its
+             * last row sat on top of the near frame's curve. The knob labels in the
+             * column say FRAME / OFFSET / SPREAD / SHAPE, which is more than "EDIT PAGE"
+             * ever said. */
 
             /* ── "not saved" ────────────────────────────────────────────────────
              *
