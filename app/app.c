@@ -637,9 +637,16 @@ static void play_note(uint8_t note, uint8_t vel)
      * `region[i].on` is the LOOP switch. With it off the voice plays start..end once
      * and goes quiet, which is what every SMPL key did before this existed. With it on
      * it wraps inside loop_s..loop_e for as long as the key is held, so a held key on a
-     * long sample keeps sounding instead of running out of material. */
-    wv_note_on_sample(&dsp, &smp[smp_i], note, vel,
-                      region[smp_i].start, region[smp_i].end, region[smp_i].on);
+     * long sample keeps sounding instead of running out of material.
+     *
+     * The loop pair is passed separately. It was not, and the consequence was visible
+     * and audible at once: the two loop lines sat where the page put them, and the
+     * playhead crossed the whole start..end region between them, because the engine had
+     * only ever been told "loop, from start to end". */
+    wv_note_on_sample_loop(&dsp, &smp[smp_i], note, vel,
+                           region[smp_i].start, region[smp_i].end,
+                           region[smp_i].loop_s, region[smp_i].loop_e,
+                           region[smp_i].on);
 }
 
 /* --- the arpeggiator's clock and its walk ------------------------------------
@@ -1014,9 +1021,9 @@ static void input(void)
     if ((e = plat_enc(EN_K2)) != 0) {
         if (edit_page) {
             int32_t d;
-            edit_live = 1;
-            d = region_step(&region[smp_i].end, e, region_step_samples(&smp[smp_i]),
-                            region[smp_i].start + 2u, smp[smp_i].len);
+            edit_live = 2;
+            d = region_step(&region[smp_i].loop_s, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].start, region[smp_i].loop_e - 2u);
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_d = (uint8_t)clamp((int32_t)k_eg_d + e * 4, 0, 127);
@@ -1026,9 +1033,9 @@ static void input(void)
     if ((e = plat_enc(EN_K3)) != 0) {
         if (edit_page) {
             int32_t d;
-            edit_live = 2;
-            d = region_step(&region[smp_i].loop_s, e, region_step_samples(&smp[smp_i]),
-                            region[smp_i].start, region[smp_i].loop_e - 2u);
+            edit_live = 3;
+            d = region_step(&region[smp_i].loop_e, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].loop_s + 2u, region[smp_i].end);
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
@@ -1039,9 +1046,9 @@ static void input(void)
     if ((e = plat_enc(EN_K4)) != 0) {
         if (edit_page) {
             int32_t d;
-            edit_live = 3;
-            d = region_step(&region[smp_i].loop_e, e, region_step_samples(&smp[smp_i]),
-                            region[smp_i].loop_s + 2u, region[smp_i].end);
+            edit_live = 1;
+            d = region_step(&region[smp_i].end, e, region_step_samples(&smp[smp_i]),
+                            region[smp_i].start + 2u, smp[smp_i].len);
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
@@ -2998,11 +3005,18 @@ void app_frame(void)
          * only one of the four is inside the window and the lit one is the knob the
          * picture is following. */
         /* Each knob in its boundary's hue, so the four lines in the picture and the
-         * four knobs under it are one set of four objects, not two. */
+         * four knobs under it are one set of four objects, not two.
+         *
+         * The order is the picture's order, left to right: start, then the loop pair,
+         * then end. The first version had END on K2 because the four values are listed
+         * that way everywhere else (start, end, loop start, loop end), and that put a
+         * hand's second knob at the far right end of the sample while the third and
+         * fourth were inside it -- the knobs read left to right and the material does
+         * not, so a small move of the loop was a reach across the whole row. */
         knob_c(4,   KNOB_TOP, 54, "START",  pos_text(smp_i, region[smp_i].start),  region_mark(smp_i, 0), edit_live == 0, C_ED_START);
-        knob_c(62,  KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1, C_ED_END);
-        knob_c(120, KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2, C_ED_LOOPS);
-        knob_c(178, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3, C_ED_LOOPE);
+        knob_c(62,  KNOB_TOP, 54, "LOOP S", pos_text(smp_i, region[smp_i].loop_s), region_mark(smp_i, 2), edit_live == 2, C_ED_LOOPS);
+        knob_c(120, KNOB_TOP, 54, "LOOP E", pos_text(smp_i, region[smp_i].loop_e), region_mark(smp_i, 3), edit_live == 3, C_ED_LOOPE);
+        knob_c(178, KNOB_TOP, 54, "END",    pos_text(smp_i, region[smp_i].end),    region_mark(smp_i, 1), edit_live == 1, C_ED_END);
     } else if (lfo_page) {
         /* The LFO page takes K3-K4 and leaves CUT and RES alone: see the note where
          * the page's knobs are read. RATE prints Hz, because a rate in percent is not

@@ -379,9 +379,18 @@ uint32_t wv_note_on(wv_state *s, uint8_t note, uint8_t vel, float inc)
 }
 
 /* The common body of both sample note-ons. `inc` is the whole difference between
- * a chop and a pitched sample, so it is a parameter and not a mode. */
+ * a chop and a pitched sample, so it is a parameter and not a mode.
+ *
+ * `lr0`/`lr1` are the loop's own bounds, and 0/0 means "the whole region".
+ *
+ * They have to be separate arguments. The reader always had two independent pairs --
+ * `wv_reader_range` for what sounds and `wv_reader_loop` for what repeats -- but this
+ * function passed `start, end` to both, so every loop was the whole region no matter
+ * what the page showed. The symptom was exactly that: LOOP S and LOOP E drawn in the
+ * right places, the playhead crossing the whole start..end span between them. */
 static uint32_t sample_voice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
-                             uint32_t start, uint32_t end, int loop, float inc)
+                             uint32_t start, uint32_t end, int loop,
+                             uint32_t lr0, uint32_t lr1, float inc)
 {
     uint32_t pick;
     wv_voice *v;
@@ -392,6 +401,15 @@ static uint32_t sample_voice(wv_state *s, const wv_sample *smp, uint8_t note, ui
         end = smp->len;
     if (start >= end)
         start = 0;
+    /* The loop lives inside the region, always: a loop outside it would never be
+     * reached, and a loop of zero length would make the reader one-shot while the page
+     * says otherwise. */
+    if (lr1 == 0 || lr1 > end)
+        lr1 = end;
+    if (lr0 < start || lr0 >= lr1)
+        lr0 = start;
+    if (lr1 < lr0 + 2u)
+        lr1 = (lr0 + 2u <= end) ? lr0 + 2u : end;
 
     pick = voice_alloc(s);
     /* a sample voice's position is its own, in the slot's samples: the reader owns
@@ -403,7 +421,7 @@ static uint32_t sample_voice(wv_state *s, const wv_sample *smp, uint8_t note, ui
     wv_reader_start(&v->rd, smp, start, inc);
     wv_reader_range(&v->rd, start, end);
     if (loop)
-        wv_reader_loop(&v->rd, start, end);
+        wv_reader_loop(&v->rd, lr0, lr1);
     return pick;
 }
 
@@ -412,7 +430,20 @@ uint32_t wv_note_on_sample(wv_state *s, const wv_sample *smp, uint8_t note, uint
 {
     if (!smp || !smp->data || !smp->len)
         return 0xFFFFFFFFu;
-    return sample_voice(s, smp, note, vel, start, end, loop, wv_smp_inc(smp, (float)note));
+    return sample_voice(s, smp, note, vel, start, end, loop, 0, 0,
+                        wv_smp_inc(smp, (float)note));
+}
+
+/* The same, with the loop's own bounds. Used by the panel, where "what sounds" and
+ * "what repeats" are two separate pairs the player sets. */
+uint32_t wv_note_on_sample_loop(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                                uint32_t start, uint32_t end,
+                                uint32_t loop_start, uint32_t loop_end, int loop)
+{
+    if (!smp || !smp->data || !smp->len)
+        return 0xFFFFFFFFu;
+    return sample_voice(s, smp, note, vel, start, end, loop,
+                        loop_start, loop_end, wv_smp_inc(smp, (float)note));
 }
 
 uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
@@ -425,7 +456,7 @@ uint32_t wv_note_on_slice(wv_state *s, const wv_sample *smp, uint8_t note, uint8
      * an 11.025 kHz chop advances a quarter of a sample per output sample. Written as
      * 1.0f (the first version) a 210 ms chop played in 52 ms — four times too fast,
      * which sounds like a truncated sample rather than like a wrong rate. */
-    return sample_voice(s, smp, note, vel, start, end, loop,
+    return sample_voice(s, smp, note, vel, start, end, loop, 0, 0,
                         (float)smp->rate * (1.0f / 44100.0f));
 }
 

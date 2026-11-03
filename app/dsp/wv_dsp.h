@@ -175,6 +175,18 @@ uint32_t wv_note_on(wv_state *s, uint8_t note, uint8_t vel, float inc);
  * drum hit). `end` 0 means the slot's end. The increment comes from the slot's own
  * rate and root (wv_smp_inc), so a slot at its root plays at 1x and an octave up is
  * exactly 2x. Returns the voice index used, or 0xFFFFFFFF for a slot with no data. */
+/* A pitched sample held with a loop whose bounds are NOT the region's: what sounds is
+ * [start, end), what repeats is [loop_start, loop_end). The loop lives inside the
+ * region, and 0/0 means "the whole region" (what wv_note_on_sample always did).
+ *
+ * This exists because the two pairs are genuinely two: a sample that plays an intro
+ * and then sustains a tail loop is the ordinary use, and one range cannot express it.
+ * wv_note_on_sample is kept as the "loop the whole thing" form so the existing
+ * callers (tests, offline renderers) do not have to change. */
+uint32_t wv_note_on_sample_loop(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
+                                uint32_t start, uint32_t end,
+                                uint32_t loop_start, uint32_t loop_end, int loop);
+
 uint32_t wv_note_on_sample(wv_state *s, const wv_sample *smp, uint8_t note, uint8_t vel,
                            uint32_t start, uint32_t end, int loop);
 

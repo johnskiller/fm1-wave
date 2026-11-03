@@ -121,6 +121,26 @@ def quarters(b, c):
     return [int(m[:, i * w:(i + 1) * w].sum()) for i in range(4)]
 
 
+def band_full(path):
+    """The whole 240x240 frame. The material band starts at y=86 (MAT_PAD 6 above the
+    picture at 92), and the playhead's tab is at 90..94, so slicing from 92 cuts its top
+    two rows off and every measurement reads "no head". That cost a whole debugging
+    round: the head was there and the window was wrong."""
+    return np.array(Image.open(path).convert("RGB"))
+
+
+def head_col(b):
+    """The playhead's column in a full frame, or None.
+
+    White, and only white, in rows 90..94: that is the tab at the top of the material
+    band, which no marker and no waveform uses.
+    """
+    m = np.all(b[90:95, :, :] == np.array([255, 255, 255]), axis=2)
+    h = m.sum(axis=0)
+    cols = [int(i) for i in range(len(h)) if h[i] >= 4]
+    return cols[0] if cols else None
+
+
 def q565(rgb, num=1, den=1):
     """The 8-bit colour the panel actually emits for `RGB(rgb)` at `num/den` brightness.
 
@@ -171,7 +191,7 @@ expect region_end 0
 
 
 def probe_step(out, zoom):
-    """How many samples one detent of K3 moves at `zoom`, read from the host.
+    """How many samples one detent of K2 (LOOP S) moves at `zoom`, read from the host.
 
     The assertion is deliberately a wrong value: `expect region_loops 0` fails and prints
     `got N`, so N is the distance one turn travelled. Anything the page reports about
@@ -188,7 +208,7 @@ release EDIT
 wait 200
 turn ALGO %d
 wait 100
-turn K3 1
+turn K2 1
 wait 100
 expect region_loops 0
 """ % zoom, out, allow_fail=True)
@@ -255,7 +275,7 @@ shot k0.png
 turn K1 40
 wait 100
 shot k1.png
-turn K2 -40
+turn K4 -40
 wait 100
 shot k2.png
 """, out)
@@ -267,7 +287,7 @@ shot k2.png
     q2 = quarters(k2, DIM15)
     ck(q1[0] > q0[0] + 200, f"K1 (START) dims the left quarter: {q0[0]} -> {q1[0]}")
     ck(q1[3] <= q0[3] + 60, f"K1 leaves the right quarter alone: {q0[3]} -> {q1[3]}")
-    ck(sum(q2) > sum(q1) + 300, f"K2 (END) dims more material: {sum(q1)} -> {sum(q2)}")
+    ck(sum(q2) > sum(q1) + 300, f"K4 (END) dims more material: {sum(q1)} -> {sum(q2)}")
 
     # The window follows the marker being turned. With START pushed right, the window
     # centres on START, so the material before it (now at 1/5) is on the LEFT of the
@@ -391,6 +411,74 @@ key 12 up
     moved = len({tuple(c[:1]) for c in cols})
     ck(moved >= 2, f"and the playhead advances: {[c[:1] for c in cols]}")
 
+    print("a loop repeats between LOOP S and LOOP E, not between START and END")
+    # The engine was told `loop, from start to end` no matter what the page showed, so
+    # the two loop lines sat where the page put them and the playhead crossed the whole
+    # region between them. Nothing about the region's pixels could catch that: the marks
+    # were right and the sound was wrong. So the head is followed over time.
+    o = run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+turn PRESET 1
+wait 60
+turn K2 60
+wait 60
+turn K3 -80
+wait 60
+expect region_loops 0
+expect region_loope 0
+""", out, allow_fail=True)
+    loop_s = int(re.search(r"expect region_loops == 0, got (\d+)", o).group(1))
+    loop_e = int(re.search(r"expect region_loope == 0, got (\d+)", o).group(1))
+    slot = probe_len(out)
+    want_lo = 232 * loop_s // slot
+    want_hi = 232 * loop_e // slot
+    ck(want_hi - want_lo > 40, f"the loop window is wide enough to see: {want_lo}..{want_hi} px")
+
+    heads = []
+    for i, d in enumerate((200, 500, 900, 1300, 1700, 2100, 2500)):
+        run("""wait 400
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+turn PRESET 1
+wait 60
+turn K2 60
+wait 60
+turn K3 -80
+wait 60
+key 12 down
+wait %d
+shot lp%d.png
+key 12 up
+""" % (d, i), out)
+        heads.append(head_col(band_full(os.path.join(out, "lp%d.png" % i))))
+    ck(all(h is not None for h in heads), f"the head is drawn throughout: {heads}")
+    # The first frames are the INTRO: the region is start..end and the loop lives inside
+    # it, so a held note walks in from START and only then repeats. That is what a
+    # sampler does and it is the reason the region and the loop are two separate pairs.
+    # What must be inside the loop is everything after the head first reaches LOOP S.
+    entered = next((i for i, h in enumerate(heads) if h >= want_lo - 6), None)
+    ck(entered is not None and entered < len(heads) - 1,
+       f"the head reaches the loop and keeps going: {heads} vs loop {want_lo}..{want_hi}")
+    inside = heads[entered:]
+    ck(min(inside) >= want_lo - 6 and max(inside) <= want_hi + 6,
+       f"after the intro, every frame is inside the loop: {inside} vs {want_lo}..{want_hi}")
+    # and it wraps: a monotonic sweep to the loop's end then a jump backwards
+    wraps = sum(1 for a, b2 in zip(heads, heads[1:]) if b2 < a - 20)
+    ck(wraps >= 1, f"the head wraps inside the loop instead of running to END: {heads}")
+
     print("the four boundaries are four colours, and the playhead is not one of them")
     # Four identical green lines were the page's real defect: it worked and could not be
     # read. Each boundary now has its own hue and its own knob is printed in it, so this
@@ -408,7 +496,7 @@ release EDIT
 wait 200
 turn PRESET 1
 wait 100
-turn K3 60
+turn K2 60
 wait 100
 shot c2.png
 """, out)
@@ -534,11 +622,11 @@ press EDIT
 wait 60
 release EDIT
 wait 200
-turn K2 -30
+turn K4 -30
 wait 100
 expect region_end 0
 """, out, allow_fail=True)
-    ck(not expect_ok(o), "K2 moves END")
+    ck(not expect_ok(o), "K4 moves END")
     o = run("""wait 400
 press SEL
 wait 60

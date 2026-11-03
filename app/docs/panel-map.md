@@ -208,14 +208,31 @@ made `touch_poll` dead code.
 
 | | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
 |---|---|---|---|---|---|---|---|
-| page up | **START** | **END** | **LOOP S** | **LOOP E** | SLOT | **ZOOM** | **LOOP** on/off |
+| page up | **START** | **LOOP S** | **LOOP E** | **END** | SLOT | **ZOOM** | **LOOP** on/off |
+
+**The knobs are in the picture's order, left to right.** START, the loop pair, then END.
+The first version had END on K2 because every list of these four values is written
+start / end / loop start / loop end — but that put a hand's second knob at the far right
+of the sample while the third and fourth were inside it, so nudging the loop was a reach
+across the whole row while END, the boundary a player sets once, sat in the middle of the
+work.
 
 SMPL only — `B_EDIT` does nothing in SYNTH or GRAN, where there is no material region to
 edit. It is the fourth of the mutually exclusive pages.
 
 **Path A, one region and one loop.** The slot is not chopped into pieces. There is one
 `start`–`end` span that sounds, and inside it one `loop_s`–`loop_e` span that repeats
-when LOOP is on. Chopping was the earlier plan and was dropped: the automatic chop was
+when LOOP is on.
+
+**The region and the loop are two pairs, and the engine takes them separately.** A held
+note walks in from START and then repeats inside the loop — the intro-plus-sustain that
+is the ordinary use of a sampler. This was wrong for one round: the page drew LOOP S and
+LOOP E where they belonged, but `sample_voice` passed `start, end` to `wv_reader_loop`,
+so the engine looped the whole region whatever the marks said. Nothing in the picture
+could catch it — the marks were right and the sound was wrong — so it is now guarded by
+following the playhead over time: it must sweep in from START, then stay inside
+LOOP S..LOOP E and wrap there. Measured with a loop at 59..152 px of 232: the head reads
+22, 51, 90, 129, 76, 115, 154 — in, then 129 → 76 is the wrap. Chopping was the earlier plan and was dropped: the automatic chop was
 already good enough to *play*, and what a sample instrument actually lacked was a loop
 and a way to trim it.
 
