@@ -544,7 +544,8 @@ position to `[0, len-1]`, which is why SPRAY is one-sided.
 | **cloud region** | the slot stops being the whole cloud. `wv_grains_start()` already takes `[start, end)` and already wraps inside it — `app.c` passes `0, 0` | **call site only**, and it reuses the region marks SMPL already has |
 | **reverse grains** | `g->inc` negative | a sign and a clamp: `read_at()` returns 0 for `pos < 0`, so a reverse grain must start at least `len_out × rate` into the material or its own window fades it out |
 | **pitch spread** | per-grain random rate multiple at spawn; shimmer | one line in `spawn()` |
-| **density** | overlap other than 2 | the expensive one: the sin²/cos² gain argument is **tied to overlap = 2** (§5c), so any other value needs real window-sum compensation |
+| **density** (grain count) | overlap other than 2 | the expensive one: the sin²/cos² gain argument is **tied to overlap = 2** (§5c), so any other value needs real window-sum compensation |
+| **stereo spread** | per-grain pan across the field | the render path is mono today (§5c: one `out` buffer, one write). Panning each grain needs the voice to produce L and R, which is the same change a stereo SYNTH would need — so this axis is priced by the "per-grain filter and pan; stereo grains" line in §10 (Not in v1), not by a `pan` field. A per-grain pan whose output is summed to mono would be inaudible, which is the trap to avoid |
 
 The first is the one that matters most and costs least: a cloud over a chosen span is the
 central control of a granular instrument — scanning position and length — and the
@@ -557,15 +558,21 @@ and watch where the cloud's grains actually read, not where the page says they s
 
 Ordered by what is already true, not by what sounds best:
 
+0. **~~SYNTH's per-frame phase~~ — BUILT** (`e1a14ab`, page `3d7daa4`). Eight bytes, no
+   flash, no RAM copy, and the hot-path measurement came back fine. K1 FRAME, K2 OFFSET
+   (points of 256), K3 SPREAD (points per frame), K4 SHAPE. It is also the page that
+   proved the model in §5d: a source's structure, on EDIT, with nothing else competing
+   for the button.
 1. **GRAN's cloud region** — a call site. `wv_grains_start()` takes `[start, end)` and
    wraps inside it today; `app.c` passes `0u, 0`. Reuses SMPL's region marks, needs no
    storage, and is the axis a granular instrument is built around. The reference frame is
    one press of `B_EDIT` while SOURCE is GRAN.
-2. **SYNTH's per-frame phase** — 8 bytes, no flash, no RAM copy. Blocked only on the
-   hot-path measurement: if two extra phase operations per voice per sample cost more CPU
-   than the split can absorb, the answer is no and it costs nothing to have found out.
-3. **GRAN's reverse grains** — a sign and a clamp on `g->inc`; `read_at()` returns 0 for
-   `pos < 0`, so the start has to move back by the window.
+2. **GRAN's reverse grains** — a sign and a clamp on `g->inc`; `read_at()` returns 0 for
+   `pos < 0`, so the start has to move back by the window. The player's first named GRAN
+   edit control.
+3. **GRAN's density, then stereo spread** — both are named as GRAN edit controls, and both
+   are engine work rather than page work: density needs the window-sum compensation, and
+   spread needs a stereo path before a per-grain pan means anything.
 4. **SYNTH's frame operations** — the first item that costs flash, and therefore the
    first that is a trade against the 276 KiB pool. It waits until there is a reason.
 5. **GRAN's density** — overlap other than 2 needs real gain compensation; it is the only
@@ -576,12 +583,34 @@ whole panel state to `OBJ_SETTINGS`. A deep edit that is lost at power-off is a 
 uses, so this had to land first. The next two items still cost no storage, which is why
 they come before the frame operations.
 
-**And the page model is upstream of persistence.** If a second oscillator arrives, EDIT
-stops meaning "this source's structure" and starts meaning "this voice's structure", and
-the page model changes with it: SMPL's four boundaries, SYNTH's frame offsets and GRAN's
-grain motion would compete for one button and one row of knobs. Deciding the voice-level
-model first means all three have somewhere to go; building them first means re-homing all
-three later.
+**The page model, decided** (player, 2026-11-03). The collision above does not happen, and
+the reason is that the two axes were never the same axis:
+
+  - **`B_EDIT` edits a SOURCE.** Not a voice, not an oscillator -- the thing SOURCE is
+    currently on. SMPL has its region editor, SYNTH has the frame rack, GRAN will have
+    what a grain needs: reverse, density, how far the cloud is spread across the stereo
+    field. Each of those is a property of the material, so each of them belongs on the
+    button that is already pointed at the material.
+  - **`B_HOME` chooses between the two VCOs of one patch** (planned, not built). Two
+    oscillators are a property of the VOICE, so they get their own button rather than
+    sharing EDIT's.
+
+That split is what makes the three source editors stop competing: adding GRAN's page does
+not take anything from SMPL's or SYNTH's, and a second VCO does not take anything from any
+of them. It also settles what the word "EDIT" has meant all along -- §5d's opening line
+says edit the voice, and the pages built since then have all been source structure. The
+button was named for the deeper idea and has been used for the narrower one; the narrower
+one is what it does.
+
+`B_HOME` is the right button for it and was idle: the platform reads it only inside the
+RESTORE prompt (`unity.c:340`, "no" to a factory restore) and PANIC was the only other
+candidate. A VCO selector is a per-patch mode, which is closer to "home" than to the
+panic the panel already reaches through all-notes-off at power-cycle.
+
+Still to settle when a second VCO is actually built: what the screen does with two
+oscillators' worth of picture (the material band draws one source today), and whether the
+four knobs follow the selected VCO or stay on the voice's shared filters. Neither is
+blocking, because both are visible the moment the button exists.
 
 ---
 

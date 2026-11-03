@@ -979,7 +979,7 @@ only says "moved"; the screen says which.
 
 | Function | State | Why unassigned |
 |---|---|---|
-| **PANIC** / all-notes-off | not implemented | `B_HOME` is the natural home (idle except during restore) |
+| **PANIC** / all-notes-off | not implemented | no button left for it: `B_HOME` is reserved for the VCO selector (spec.md §5d). Panic reaches the panel anyway -- the platform silences the synth at power-cycle, and MIDI CC 123 covers the external case |
 | Material page | not implemented | no button of its own; spec's `BTN_BANK` names a control this panel does not have |
 | Octave shift | not implemented | `B_OCT-` / `B_OCT+`, power-on conflict only |
 | Glide / portamento | not in the DSP | `B_GLO` is free |
@@ -1001,7 +1001,7 @@ there are more free buttons than pending functions.
 
 | Button | Could carry | Cost / caveat |
 |---|---|---|
-| `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
+| `B_HOME` | **VCO 1 / VCO 2** (planned, not built) | property of the VOICE, not of the material, which is why it is not on `B_EDIT`; idle except during the RESTORE prompt (`unity.c:340`). Was the PANIC candidate until the player reserved it — see spec.md §5d |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
 | `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
 | ~~`B_FX`~~ | ~~filter type~~ | **taken** — it became the FX page (filter tap + key tracking). See the table above. |
@@ -1009,8 +1009,10 @@ there are more free buttons than pending functions.
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 
-**If only one is done**: `B_HOME` → PANIC. It costs a dozen lines and fixes the one
-failure mode that makes an instrument unusable in front of people.
+**If only one is done**: `B_GLO` → glide. `B_HOME` is no longer available for PANIC: the
+player reserved it for the VCO selector, on the argument that choosing an oscillator is a
+per-patch mode and panic is reachable by other means (power-cycle on the panel, CC 123 over
+MIDI). That leaves glide as the cheapest genuinely-missing function.
 
 ---
 

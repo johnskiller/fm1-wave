@@ -1120,12 +1120,20 @@ static void input(void)
         if (arp_page)
             env_page = 0, lfo_page = 0, edit_page = 0, fx_page = 0;
     }
-    /* B_EDIT: the sample editor, and the fourth page. It replaced a one-press
-     * re-chop: a button that re-analysed the slot and gave no way to see or change
-     * what it found was a button that either worked or did not, and the panel has
-     * four knobs going spare in SMPL. EDIT is only meaningful in SMPL. */
+    /* B_EDIT: edit THE CURRENT SOURCE's structure -- SMPL's region, SYNTH's frame rack,
+     * and GRAN's grain controls when they exist. It replaced a one-press re-chop: a
+     * button that re-analysed the slot and gave no way to see or change what it found
+     * was a button that either worked or did not, and the panel has four knobs going
+     * spare in every source.
+     *
+     * The rule is "a source's own structure", which is why this button never has to
+     * compete with the two oscillators of one patch: choosing a VCO is a property of the
+     * voice, not of the material, and that is planned for B_HOME instead (spec.md §5d).
+     * So adding GRAN's page here takes nothing from SMPL's or SYNTH's. */
     if (btn_pressed(btn, B_EDIT)) {
-        /* Only SMPL has anything to edit, and the button does nothing anywhere else.
+        /* Today that is SMPL and SYNTH. GRAN has no page yet, and the button does
+         * nothing there rather than guessing one -- see the GRAN order in spec.md §5d
+         * (cloud region first, it is already a call site).
          *
          * It used to switch the source to SMPL from SYNTH and GRAN, on the argument
          * that a button which does nothing is a broken button. That was wrong in use:
