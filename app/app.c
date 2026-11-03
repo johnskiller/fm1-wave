@@ -255,6 +255,16 @@ static uint8_t arp_gated;                 /* the note of this step has already e
 #define KNOB_H     64                                 /* the 46 px of text plus a 26 px arc
                                                        * box: the bar is gone, see knob_arc() */
 
+/* The save line: the top two rows of MAT_PAD, under the scope's baseline.
+ *
+ * LENGTH covers SAVE_LINE_FULL_CHANGES groups; beyond that the line is simply full, because
+ * saying "a lot" is all a 232 px bar can say about a record with 28 changeable groups. 8 was
+ * chosen against how the instrument is actually used -- a hand turns two or three knobs, not
+ * twenty -- so that those two or three show clearly. COLOUR reaches full ink at
+ * SAVE_LINE_FULL_MS. Both numbers are first guesses and both are in this one place. */
+#define SAVE_LINE_FULL_CHANGES 8
+#define SAVE_LINE_FULL_MS      300000u                /* 5 minutes */
+
 #define MAT_PAD    6                                  /* above and below the picture */
 #define MAT_WAVE   80                                 /* the picture's own height */
 #define MAT_H      (MAT_PAD + MAT_WAVE + MAT_PAD)     /* 92 */
@@ -1505,6 +1515,27 @@ typedef struct {
 } src_skin_t;
 
 static src_skin_t sk;   /* set once per frame from src_skin(), read by the painters */
+
+/* How long the current unsaved run has been open, for the save line.
+ *
+ * The line under the scope is the only place on screen that says "this is not saved", and it
+ * says two things at once: LENGTH is how many groups differ (save_change_count), COLOUR is
+ * how long they have been that way. Time is the second axis because the two questions are
+ * different -- "did I change much?" and "have I been sitting on it?" -- and a single bar
+ * cannot answer both.
+ *
+ * The clock starts when the count first rises from zero, not at boot, so a fresh unit with
+ * nothing changed shows no elapsed time. It keeps running while the player keeps editing:
+ * the point is how long THIS batch of edits has been unsaved, not how long ago the first
+ * one happened.
+ *
+ * `unsaved_at` is plat_ms() and wraps after 49.7 days. `now - unsaved_at` is unsigned, so
+ * the subtraction is correct across the wrap -- no special case needed. */
+static uint32_t unsaved_at;     /* plat_ms() when the count rose from zero; 0 = not dirty */
+static int32_t  save_line_len;  /* what the save line drew last frame, px */
+static int32_t  save_line_step; /* its brightness step, 0..3 (dim(x, step+2, 5)) */
+static uint32_t save_line_age;  /* ms since the first unsaved edit */
+static int      unsaved_live;   /* unsaved_at holds a start time */
 
 static src_skin_t src_skin(void)
 {
@@ -2797,10 +2828,26 @@ void app_frame(void)
     input();
 
     /* Keep save_dirty() honest: the whole record is compared against what flash holds,
-     * once a frame. This is what the "not saved" mark on the screen reads. */
+     * once a frame. This is what the save line under the scope reads. */
     {
         save_rec r;
         save_snapshot(&r);
+        /* On the FIRST frame with no record in flash, what boot set up IS the baseline.
+         *
+         * The defaults are not all zero: region_reset_all() gives every slot its whole self
+         * (region_end = the slot's length, 52369 for the demo PAD) while save_load() left
+         * rec_written zeroed, so the first scan compared a real record against an empty one
+         * and reported unsaved from frame one. Measured: `expect save_dirty 0` passed
+         * before any frame ran and read 1 after `wait 100`.
+         *
+         * This is not new -- it was true before the save line existed. It was invisible
+         * because the old mark was two words nobody had asked the meaning of at boot; a bar
+         * that measures the distance to flash cannot be built on top of it.
+         *
+         * Done here rather than at the end of app_init because app_init has not finished
+         * when save_load() returns: ui_apply(), the bank's frame count and region_fix() all
+         * still move the state afterwards, and a baseline taken at that moment marks those
+         * corrections as edits. By the first frame everything that runs at boot has run. */
         save_scan(&r);
     }
 
@@ -3106,6 +3153,62 @@ void app_frame(void)
      * which is the rule this panel has kept since the first layout. */
     cv_begin(240, MAT_H, sk.bg);
     {
+        /* ── the save line ──────────────────────────────────────────────────────
+         *
+         * Two pixels under the scope, in the padding the band already had.
+         *
+         * It used to be the words "NOT SAVED" at the top left of the picture, and the
+         * measurement that condemned that is that the words sat ON the waveform: in the
+         * label's own 13 x 62 box, 443 px of SYNTH's waveform and 403 px of SMPL's and
+         * GRAN's were erased to make room, in the brightest part of the picture. Moving it
+         * into MAT_PAD's top 2 rows costs the picture nothing -- the wave reaches no higher
+         * than y = 90 and the line is at y = 84, so four rows of air stay between them.
+         *
+         * LENGTH is the number of groups that differ from flash (save_change_count: 17
+         * parameters, 3 selectors, 8 regions -- a region counts once, because dragging a
+         * loop boundary is one edit). COLOUR is how long they have been unsaved: dim at
+         * first, `ink` at SAVE_LINE_FULL_MS, never ink_hi, because ink_hi is what a knob
+         * arc fills with and the bottom of this band is not a fifth control.
+         *
+         * Nothing is drawn when the record matches flash. A permanent empty track would
+         * be two rows of grey that mean "saved", which is the absence of news, and this
+         * screen has no room for news that says nothing.
+         *
+         * The divisions are integer: the count is 0..28 and the width is 232 px, so the
+         * unit is 232/SAVE_LINE_FULL_CHANGES. Rounded up, so one change is never zero
+         * pixels -- a line that stays empty for the first edit reads as broken. */
+        if (save_dirty()) {
+            int32_t n = save_change_count();
+            int32_t w = n * 232 / SAVE_LINE_FULL_CHANGES;
+            uint32_t age;
+
+            if (w > 232)
+                w = 232;
+            if (w < 1)
+                w = 1;
+            save_line_len = w;
+            if (!unsaved_live) {
+                unsaved_live = 1;
+                unsaved_at = plat_ms();
+            }
+            age = plat_ms() - unsaved_at;
+            /* 1/5 -> 5/5 of ink across SAVE_LINE_FULL_MS. The brightness is the second
+             * axis, so it starts low enough to be ignorable and reaches full ink only
+             * after the player has left the edit unsaved long enough to matter. */
+            {
+                int32_t step = (int32_t)(age * 3u / SAVE_LINE_FULL_MS);
+                if (step > 3)
+                    step = 3;
+                save_line_step = step;
+                save_line_age = age;
+                cv_rect(MAT_X0, 0, w, 2, dim(sk.ink, step + 2, 5));
+            }
+        } else {
+            unsaved_live = 0;
+            save_line_len = 0;
+            save_line_step = 0;
+        }
+
         /* The picture runs the full width, and the three knob values sit on top of it in
          * the corners their knobs occupy:
          *
@@ -3267,22 +3370,6 @@ void app_frame(void)
              *
              * Nothing is drawn once it is saved: a permanent "saved" light would be one
              * more thing on the screen that means nothing. */
-            if (save_dirty()) {
-                /* Left edge, under the page name, NOT the right edge. The right-hand side
-                 * of this band is SYNTH's label column (BANK, MORPH -- § SYN_W), and a
-                 * 42 px mark anchored there reached back to x 192 and closed the 12 px gap
-                 * the geometry promises between the picture (ends at 175) and the labels
-                 * (start at 189). Measured by test_screen.py, which asserts that gap as a
-                 * clean strip: the mark is what broke it, so the mark moves.
-                 *
-                 * One line below the page name, because both can be up at once (a page is
-                 * open and there are unsaved edits) and two strings on one row would
-                 * collide on the left. 10 px apart is one FONT_XS row plus its leading. */
-                const char *ns = "NOT SAVED";
-                const int32_t yns = MAT_PAD + 11;    /* under the slot name, at the top */
-                cv_rect(MAT_X0 + 2, yns + 3, 3, 3, dim(sk.ink_hi, 3, 5));
-                cv_text(MAT_X0 + 9, yns, &FONT_XS, ns, dim(sk.ink_hi, 3, 5));
-            }
         }
     }
     cv_blit(0, SCOPE_H);
@@ -3431,6 +3518,9 @@ int app_expect(const char *what, int *got)
      * what proves B_SAVE wrote ONCE and not once per frame. */
     if (!strcmp(what, "saved"))       { *got = save_loaded(); return 1; }
     if (!strcmp(what, "save_dirty"))  { *got = save_dirty(); return 1; }
+    if (!strcmp(what, "save_line"))   { *got = save_line_len;  return 1; }
+    if (!strcmp(what, "save_ink"))    { *got = save_line_step; return 1; }
+    if (!strcmp(what, "save_age"))    { *got = (int)save_line_age; return 1; }
     if (!strcmp(what, "save_count"))  { *got = (int)save_count(); return 1; }
     if (!strcmp(what, "save_last"))   { *got = save_last_result(); return 1; }
     if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }
@@ -3674,6 +3764,31 @@ void app_init(void)
             for (i = 0; i < SMP_MAX; i++)
                 region_fix(i);
         }
+    } else {
+        /* No record in flash: the state boot just settled on IS "saved".
+         *
+         * Nothing has been edited yet, so there is nothing to save, and the player should
+         * not be told to save a sound they never touched.
+         *
+         * This is not cosmetic. The boot defaults are not all zero -- region_reset_all()
+         * gives every slot its whole self (region_end is the slot's length, 52369 for the
+         * demo PAD) while save_load() leaves its baseline zeroed. So the first scan
+         * compared a real record against an empty one and reported "unsaved" from the
+         * first frame. Measured: `expect save_dirty 0` passed before any frame ran and
+         * read 1 after `wait 100`.
+         *
+         * That was already true before the save line existed, and it was invisible because
+         * the old mark was two words nobody had asked the meaning of at boot. A bar whose
+         * length is the distance to flash cannot stand on top of it.
+         *
+         * Placed last in app_init, not at the end of the save_load() block above and not at
+         * the first frame: everything that settles the boot state has to have run, and on
+         * the host a script's first command runs after app_init but before the first
+         * frame -- adopting at the first frame swallowed that command as part of the
+         * baseline (measured: `spin K1 -34` then `expect save_dirty 1` read 0). */
+        save_rec r;
+        save_snapshot(&r);
+        save_adopt(&r);
     }
 }
 

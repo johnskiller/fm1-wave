@@ -48,6 +48,7 @@ static save_rec  rec;                       /* the live record, as last scanned 
 static save_rec  rec_written;               /* what is in flash: the dirty baseline */
 static uint8_t   loaded;                    /* 1: flash had a good record */
 static uint8_t   dirty;                     /* rec differs from rec_written */
+static uint8_t   changes;                   /* groups differing, for the screen */
 static int8_t    last_rc;                   /* the last write's result, for the screen */
 static uint32_t  saves;                     /* writes since boot, for the tests */
 
@@ -77,6 +78,10 @@ uint32_t save_count(void)  { return saves; }
 /* Is there a change in RAM that flash does not have? The screen's "not saved" mark. */
 int save_dirty(void) { return dirty; }
 
+/* Groups differing, for the screen. Recomputed every frame by save_scan, so it is never
+ * stale: putting a value back where it was makes the count fall again. */
+int save_change_count(void) { return changes; }
+
 /* The record as loaded (or as last written), for app.c to copy into its statics. */
 const save_rec *save_loaded_rec(void) { return &rec; }
 
@@ -105,13 +110,63 @@ int save_load(void)
 
 /* app.c -> us, once a frame (app_frame, after input). Compares the whole record: no
  * writer has to remember to raise a flag. */
+/* How many groups of the record differ from what flash holds.
+ *
+ * `dirty` alone answers "is there anything unsaved"; the screen draws how MUCH, so the same
+ * pass has to say which parts moved. A GROUP is the unit a hand changes in one action: one
+ * parameter, one selector, or one slot's region. Dragging a loop boundary writes four fields
+ * but is one edit, and counting bytes would make a single drag look like four times the work.
+ *
+ * The order below is the record's own, so the count can be matched to the struct by eye. */
+int save_changes(const save_rec *live)
+{
+    const uint8_t *a = (const uint8_t *)&rec_written.cut;
+    const uint8_t *b = (const uint8_t *)&live->cut;
+    const int nbytes = (int)(offsetof(save_rec, bank_i) - offsetof(save_rec, cut));
+    int n = 0, i;
+
+    for (i = 0; i < nbytes; i++)            /* cut .. arp_gate: single-byte parameters */
+        if (a[i] != b[i])
+            n++;
+    if (rec_written.bank_i != live->bank_i) n++;
+    if (rec_written.smp_i != live->smp_i)   n++;
+    if (rec_written.src != live->src)       n++;
+    for (i = 0; i < SAVE_SLOTS; i++) {      /* one slot's region is one group, not five */
+        const save_region *x = &rec_written.region[i], *y = &live->region[i];
+        if (x->start != y->start || x->end != y->end || x->loop_s != y->loop_s
+            || x->loop_e != y->loop_e || x->on != y->on)
+            n++;
+    }
+    return n;
+}
+
+/* Adopt a record as the "what flash holds" baseline without writing anything.
+ *
+ * B_SAVE is the only writer, so a unit with no record has no baseline at all, and the first
+ * scan would compare the boot defaults against a zeroed struct. This makes the state the unit
+ * booted into count as saved -- which it is: nothing has been edited yet, and the player has
+ * no reason to be told to save a sound they never touched.
+ *
+ * Only called at boot when flash held no record; a real record is always its own baseline. */
+void save_adopt(const save_rec *base)
+{
+    rec_written = *base;
+    rec_written.magic = SAVE_MAGIC;
+    rec_written.version = (uint16_t)SAVE_VERSION;
+    rec_written.bytes = (uint16_t)sizeof(save_rec);
+    dirty = 0;
+    changes = 0;
+}
+
 void save_scan(const save_rec *live)
 {
     if (same_body(live, &rec_written)) {
         dirty = 0;
+        changes = 0;
         return;
     }
     dirty = 1;
+    changes = (uint8_t)save_changes(live);
     rec = *live;
 }
 

@@ -44,8 +44,11 @@ typedef struct {
 int             save_load(void);              /* boot: 1 if flash had a good record */
 const save_rec *save_loaded_rec(void);        /* the record to copy into app.c's statics */
 void            save_scan(const save_rec *live);   /* once a frame: keeps save_dirty honest */
+void            save_adopt(const save_rec *base);  /* boot with no record: this IS saved */
 int             save_now(const save_rec *live);    /* B_SAVE: 0 written, < 0 refused */
 int             save_loaded(void);
 int             save_dirty(void);             /* RAM has a change flash does not: the mark */
+int             save_changes(const save_rec *live); /* groups differing from flash */
+int             save_change_count(void);      /* the last scan's count, for the screen */
 int             save_last_result(void);       /* the last write: 0 ok, -1 failed */
 uint32_t        save_count(void);             /* writes since boot, for the tests */

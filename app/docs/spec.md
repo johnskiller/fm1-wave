@@ -704,11 +704,46 @@ waits for silence is a save that does not happen when the chord is the thing wor
 
 The price is that an edit lives in RAM until saved, and a parameter that turns and never
 persists is exactly the kind of bug you cannot hear. So the panel says it: `save_dirty()`
-is true whenever the live record differs from the one in flash, and the screen draws a dim
-`NOT SAVED` mark in the top-left of the material band until it doesn't. It is compared by
-the whole record once a frame rather than set by hand at each of the ~40 writers — one
-forgotten `dirty = 1` would be that same silent bug, and comparing 190 B at 60 Hz is
-cheaper than the risk.
+is true whenever the live record differs from the one in flash, and the screen draws a line
+until it doesn't. It is compared by the whole record once a frame rather than set by hand at
+each of the ~40 writers — one forgotten `dirty = 1` would be that same silent bug, and
+comparing 190 B at 60 Hz is cheaper than the risk.
+
+**The line, and why it replaced the words.** It used to be the text `NOT SAVED` at the top
+left of the material band, and that was measured as damage: in the label's own 13 x 62 box on
+SYNTH, 443 px of the waveform were erased to make room (403 px on SMPL and GRAN), in the
+brightest part of the picture. The replacement is two rows in the padding the band already
+had — `y 84..85`, directly under the scope's 0 dBFS line, which is `MAT_PAD`'s top two rows.
+The wave reaches no higher than `y 90`, so four rows of air stay between the line and the
+picture at any length.
+
+It carries two numbers on two axes, because both questions are worth answering and neither
+fits the other:
+
+- **length** = how many groups differ from flash, over `SAVE_LINE_FULL_CHANGES` (8) groups
+  across 232 px. A group is a saved field, and a region counts once — dragging a loop
+  boundary is one edit, not four. The ceiling is 28 (17 parameters, 3 selectors, 8 regions);
+  8 was chosen because a run of edits is short and 232/28 = 8 px per group would make the
+  first few invisible.
+- **colour** = how long they have been left that way, from `dim(ink, 2, 5)` to `ink` over
+  `SAVE_LINE_FULL_MS` (5 minutes), then flat. `ink_hi` is deliberately not the ceiling: that
+  is the colour a knob arc fills with, and a line in it reads as a fifth control.
+
+Nothing is drawn when the record matches flash. A permanent empty track would be two rows of
+grey meaning "saved", which is the absence of news.
+
+The count is `save_change_count()`, which the save line added to `save.c`. `save_scan()`
+compares field by field rather than in one `memcmp`, because it has to say *how many* and not
+just *whether*; at 190 B once a frame this is not worth optimising.
+
+**A unit with no record has no baseline.** `B_SAVE` is the only writer, so a fresh unit's
+`OBJ_SETTINGS` is empty — and the boot defaults are not all zero (`region_reset_all()` gives
+every slot its whole self; `region_end` is 52369 for the demo PAD). Comparing a real record
+against a zeroed one reported "unsaved" from the first frame. Measured: `expect save_dirty 0`
+passed before any frame ran and read 1 after `wait 100`. `save_adopt()` now takes the state
+`app_init()` settled on as the baseline when flash held nothing. This was already wrong
+before the line existed; it was invisible because the old mark was two words whose meaning at
+boot nobody had asked about.
 
 **The version gate is real.** A record whose `version` is not `SAVE_VERSION` is rejected
 and the defaults boot, so a firmware update that changes the layout cannot read an old
@@ -906,9 +941,9 @@ What is checked, and the measurement behind each:
 - **EDIT does nothing outside SMPL** — from SYNTH and from GRAN, `src` and `edit` both
   unchanged afterwards. Injected: the old "switch the source there" behaviour fails both.
 
-### 9h. Built: persistence (`app/tests/test_save.py`)
+### 9h. Built: persistence and the save line (`app/tests/test_save.py`)
 
-45 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
+51 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
 it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 
 - **a knob survives a reboot** — CUT turned to 40, `reboot`, `cut` reads 40. Injected:
@@ -929,13 +964,15 @@ it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 - **the version gate both ways** — a planted record of another version is rejected and the
   defaults boot; the same record at this version is accepted and its values boot. Both
   halves, because a gate that refuses everything passes the first half alone.
-- **the mark is drawn, and out of the way** — the `NOT SAVED` ink is counted in the
-  material band while dirty and gone once saved, and its extent stays left of x 176, the
-  picture's edge. That second one came from a measured regression: anchored to the band's
-  right edge the 42 px string reached back into SYNTH's label column and closed the 12 px
-  gap `test_screen.py` asserts, so the mark moved to the top left. A clean-columns test
-  could not catch it (the labels ink those columns anyway); the check is about the mark's
-  own extent, measured by differencing the two screenshots.
+- **the save line, both of its axes** — length is asserted through `save_line` (0 px at
+  boot, 29 px for one changed group, 0 again after the save), colour through `save_ink`
+  (0..3, reaching 3 only after 5 minutes) and through the pixels: the fully-bright line must
+  be exactly `ink`, and `ink_hi` must not appear. The line is also counted on both of its
+  rows while unsaved and on neither once saved, and the picture's top four rows (`y 86..89`)
+  must stay empty so a long line cannot become a lid on the waveform. SMPL and GRAN are
+  checked separately because the line takes the source's own colour — and they measure
+  58 px, not 29, because switching SOURCE is itself a saved field, which is the check that
+  caught length counting knobs instead of groups.
 
 ### 9i. Built: the knob art (`app/tests/test_knob.py`)
 
