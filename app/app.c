@@ -404,8 +404,8 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  * frames would be more ink than the curves. Brightness is the depth cue instead: f0 at
  * half ink, f7 at full. */
 #define STK_DX     6              /* px right per frame */
-#define STK_DY     6              /* px up per frame */
-#define RACK_LIFT  8              /* how far the edited frame rises */
+#define STK_DY     3              /* px up per frame */
+#define RACK_LIFT  6              /* how far the edited frame rises */
 #define SYN_COL_W  60                                 /* the labels' column */
 #define SYN_COL_R  (240 - 4)                          /* its right edge: x 235 */
 #define SYN_COL_X  (SYN_COL_R - SYN_COL_W)            /* 175 */
@@ -1899,7 +1899,13 @@ static src_skin_t src_skin(void)
         k.track  = RGB(30, 20, 5);
         k.ink    = RGB(232, 136, 30);
         k.ink_hi = RGB(255, 184, 70);
-        k.acc    = C_WHITE;
+        /* White, pulled two thirds of the way toward this skin's own hue. Pure white on
+         * an amber ground reads as a different material -- a paper cut-out laid on the
+         * picture -- and the player asked for it to sit in the family. (246,232,214) is
+         * white by any measure (all three channels high, no saturated cast) and it still
+         * carries a warm bias a few points off the ink's hue, so K1's frame reads as
+         * "lit up" rather than "cut out". */
+        k.acc    = RGB(246, 232, 214);
     }
     return k;
 }
@@ -2622,11 +2628,23 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
          * progress, and both of them when MORPH sits exactly on a frame), 0 = silent. */
         lit = (f == m0) ? 2 : ((f == m1) ? 1 : 0);
 
-        /* Brightness carries the job, in three steps, and NOT scaled by ft: at 172 px
-         * a 60/40 split drawn as two brightnesses 3 % apart reads as one frame, and the
-         * question here is "which two", not "in what ratio". A silent frame sits at
-         * (4+f)/16 -- far ones darker, so the rack still has depth -- and the two being
-         * mixed take ink_hi and 8/12 of it. */
+        /* ── TWO DIFFERENT QUESTIONS, TWO DIFFERENT MARKS ────────────────────────
+         *
+         * MORPH's pair answers "what am I hearing" and lives in the amber family: the
+         * louder member at ink_hi, the other at 8/12. K1's frame answers "what am I
+         * pointing at" and is WHITE (k->acc), with the lift on top of it.
+         *
+         * Colour is the right axis for this and brightness is not. Brightness is already
+         * spoken for twice -- it carries depth ((4+f)/16, far frames darker) and it
+         * carries "this one is sounding" -- so a third meaning in the same channel would
+         * be three levels of the same colour and the player would have to count them.
+         * White is the platform's own accent for exactly this: "what is being touched /
+         * where we are" (gfx.c:29), and it is already the colour the panel uses for a
+         * knob under the hand. Nothing else in this band is white.
+         *
+         * The two can coincide: when K1's frame is one of the pair, the frame is white
+         * and lifted, and its own index label carries the state.
+         */
         if (lit == 2)
             ink = k->ink_hi;
         else if (lit == 1)
@@ -2634,17 +2652,8 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
         else
             ink = dim(k->ink, 4 + f, 16);
 
-        /* the edited frame: the lift is its mark, and its index is drawn bright below.
-         * Its ink is the pair's if it is sounding, else a mid step -- it must not look
-         * like a silent frame while being edited. */
-        if (sel && !lit)
-            ink = dim(k->ink_hi, 7, 12);
-
-        /* The frame's own zero line. At 28 px of height the curves of neighbouring frames
-         * overlap, so this row is what still says where each plane sits. Dim, and drawn
-         * only for frames that are not sounding: under a lit frame it competes. */
-        if (!lit)
-            cv_rect(x, base, fw, 1, dim(k->ink, 2, 16));
+        if (sel)
+            ink = k->acc;                   /* K1's frame: white, whatever MORPH says */
 
         py = 0;
         for (px = 0; px < fw; px++) {
@@ -2661,18 +2670,6 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
             py = y;
         }
 
-        /* the frame's index, at the left end of its own baseline: on this page the
-         * numbers are the only thing that ties a plane to "f3", and the pair highlight
-         * is meaningless without knowing which two. Only the selected frame and the
-         * sounding pair get one -- eight labels in 80 px is a list, not a picture. */
-        if (sel || lit) {
-            char fb[3];
-            fb[0] = 'f';
-            fb[1] = (char)('0' + f);
-            fb[2] = 0;
-            cv_text(x + 1, base - amp - 1, &FONT_XS, fb,
-                    sel ? k->ink_hi : ink);
-        }
     }
 }
 

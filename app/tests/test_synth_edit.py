@@ -25,6 +25,8 @@ import os
 import subprocess
 import tempfile
 
+from PIL import Image
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(HERE)
 HOST = os.path.join(APP, "build", "host", "wave_host")
@@ -302,6 +304,46 @@ show foff_spread
         ck(hi != lo, f"MORPH {morph}: two distinct frames are mixed")
         ck(hi < 8 and lo < 8, f"MORPH {morph}: pair stays inside the bank")
     ck(got and got[0] != got[-1], "the lit pair moves as MORPH travels the bank")
+
+    # ── the rack's two marks, told apart by colour ─────────────────────────────
+    # The pair MORPH mixes is amber (ink_hi and 8/12 of it); K1's frame is the skin's
+    # accent, which on SYNTH is warm white (246,232,214) -- white enough to read as a
+    # different thing, warm enough to sit in the amber family. Brightness cannot carry
+    # both: depth already owns brightness, so a third level would be a third step of the
+    # same colour that the player has to count.
+    print("K1's frame is the accent and MORPH's pair is amber, and they never swap")
+    script = ("master 200\nwait 100\ntap EDIT\nmaster 200\nwait 100\n"
+              "turn K1 3\nmaster 200\nwait 100\nshot k3\n"
+              "turn ALGO 4\nmaster 200\nwait 100\nshot k3m\n")
+    with tempfile.TemporaryDirectory() as out:
+        sp = os.path.join(out, "two.txt")
+        open(sp, "w").write(script + "q\n")
+        subprocess.run([HOST, sp, out], capture_output=True, text=True, timeout=120, cwd=out)
+        def shot(name):
+            """`shot NAME` has produced both a file called NAME and a directory NAME
+            holding one extensionless file, depending on the host build. Accept either;
+            a fixed assumption here has already cost one debugging round."""
+            p = os.path.join(out, name)
+            if os.path.isdir(p):
+                files = [f for f in os.listdir(p) if os.path.isfile(os.path.join(p, f))]
+                assert files, f"shot {name} produced an empty directory"
+                p = os.path.join(p, files[0])
+            assert os.path.isfile(p), f"shot {name} produced nothing"
+            return Image.open(p).convert("RGB")
+
+        def band(im):
+            return [im.getpixel((x, y)) for y in range(84, 176) for x in range(4, 178)]
+        a = band(shot("k3"))
+        b = band(shot("k3m"))
+    # the skin says (246,232,214); the LCD is RGB565, so what lands on the glass is
+    # (246,234,213). Asserting the source value would fail for the wrong reason.
+    ACC = (246, 234, 213)
+    HI = (255, 186, 65)
+    ck(ACC in a, "K1's frame is drawn in the accent")
+    ck(HI in a, "and MORPH's pair is still amber on the same screen")
+    ck(a.count(ACC) > 100, f"the accent covers a curve, not a speck ({a.count(ACC)} px)")
+    ck(b.count(ACC) == a.count(ACC), "moving MORPH does not change K1's frame")
+    ck(b.count(ACC) > 100, "the accent survives a MORPH move")
 
     print(f"\n{'ALL PASSED' if not fails else 'FAILED'} ({count} checks, {len(fails)} failed)")
     if fails:
