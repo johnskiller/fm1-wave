@@ -352,11 +352,12 @@ and the loop pair dotted. Two defects were measured and fixed on the way in:
 `B_SAVE` writes all eight slots' regions (and every knob) to `OBJ_SETTINGS`. An unsaved
 region resets to the whole slot at power-off.
 
-What says so on screen is **the save line**: two rows at `y 84..85`, in the padding between
-the scope's 0 dBFS line and the top of the picture. Its **length** is how many groups differ
-from flash (8 groups = full width, 29 px each), its **colour** is how long they have been
-unsaved (dim to `ink` over 5 minutes, never `ink_hi`), and it is absent entirely when the
-record matches flash. It replaced the words `NOT SAVED`, which were measured erasing 443 px
+What says so on screen is **the save line**: two rows at `y 87..88`, in the padding below the
+scope's 0 dBFS line and above the picture (three rows of air below the graticule, one above
+the wave). Its **length** is how many groups differ from flash (8 groups = the full 240 px,
+30 px each), its **colour** is how long they have been unsaved (3/5 `ink` to `ink` over 5
+minutes in four steps, never `ink_hi`), and it is absent entirely when the record matches
+flash. Being the source's own `ink`, it is amber in SYNTH, green in SMPL and cyan in GRAN. It replaced the words `NOT SAVED`, which were measured erasing 443 px
 of SYNTH's waveform in the brightest part of the picture.
 
 ## Buttons
@@ -985,7 +986,7 @@ there are more free buttons than pending functions.
 |---|---|---|
 | `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
-| `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 51 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob |
+| `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
 | `B_FX` | **filter type** (LP / BP / HP) | the SVF already computes all three every sample and only `lp` is used, so the switch is free of arithmetic — see `spec.md` §5d |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |

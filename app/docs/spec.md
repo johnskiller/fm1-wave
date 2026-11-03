@@ -713,21 +713,53 @@ comparing 190 B at 60 Hz is cheaper than the risk.
 left of the material band, and that was measured as damage: in the label's own 13 x 62 box on
 SYNTH, 443 px of the waveform were erased to make room (403 px on SMPL and GRAN), in the
 brightest part of the picture. The replacement is two rows in the padding the band already
-had — `y 84..85`, directly under the scope's 0 dBFS line, which is `MAT_PAD`'s top two rows.
-The wave reaches no higher than `y 90`, so four rows of air stay between the line and the
-picture at any length.
+had — `y 87..88` — `MAT_PAD` rows 3..4 (`SAVE_LINE_ROW`), not its top two. The top two were the
+first attempt and the player rejected them on sight: `y 83` is the scope's 0 dBFS graticule,
+a full-width 240 px grey line at `(98,97,106)`, so the save line started on the very next
+row with no air, and two full-width bars on consecutive rows read as one crowded block
+("离scope的下线太近"). Three rows of gap now separate them, and the wave's first ink is
+`y 91`, so a row of air remains below the line at its heaviest.
+
+It spans the full 240 px, not the picture's 232: it is a readout of the panel, not a picture
+of the material, and starting at `x 4` left a 4 px gap that read as a mistake.
 
 It carries two numbers on two axes, because both questions are worth answering and neither
 fits the other:
 
 - **length** = how many groups differ from flash, over `SAVE_LINE_FULL_CHANGES` (8) groups
-  across 232 px. A group is a saved field, and a region counts once — dragging a loop
-  boundary is one edit, not four. The ceiling is 28 (17 parameters, 3 selectors, 8 regions);
-  8 was chosen because a run of edits is short and 232/28 = 8 px per group would make the
-  first few invisible.
-- **colour** = how long they have been left that way, from `dim(ink, 2, 5)` to `ink` over
-  `SAVE_LINE_FULL_MS` (5 minutes), then flat. `ink_hi` is deliberately not the ceiling: that
-  is the colour a knob arc fills with, and a line in it reads as a fifth control.
+  across 240 px, so 30 px per group. A group is a saved field, and a region counts once —
+  dragging a loop boundary is one edit, not four. The ceiling is 28 (17 parameters, 3
+  selectors, 8 regions); 8 was chosen because a run of edits is short and 8 px per group
+  would make the first few invisible.
+- **colour** = how long they have been left that way, from `dim(ink, 3, 5)` to `ink` over
+  `SAVE_LINE_FULL_MS` (5 minutes) in four steps, then flat. The floor is 3/5, not 2/5:
+  measured against each skin's own ground the 2/5 step sat only dLum +26 (SYNTH), +34 (SMPL)
+  and +26 (GRAN) from the background, which the player reported as not standing out
+  ("一开始的红色不够醒目"). At 3/5 the same numbers are +56 / +68 / +58. Four steps are
+  kept rather than three because at three, 2 minutes and 0 seconds drew the same colour —
+  a ramp that does not move for the first third of its life.
+  `ink_hi` is deliberately not the ceiling: that is the colour a knob arc fills with, and a
+  line in it reads as a fifth control.
+
+**B_SAVE's lamp says the same thing, on the button you would press about it.** Three levels,
+because that is what the matrix can show: the glow every unlit button has (saved), `mid`
+(felucca-bsp's steady ~12 % level, an edit waiting) and `lit` (the line is full). The top
+level is tied to `SAVE_LINE_FULL_MS` rather than given a threshold of its own, so "the line
+is full" and "the button is fully lit" are one event said in two places and cannot drift.
+
+**What the tests cannot see about that lamp.** `plat_host.c`'s `plat_lights_mid` takes a
+button mask and a key mask and discards the buttons (`(void)b; mid_keys = k & ~lit_keys`), so
+the simulator cannot record a mid *button*. Measured: deleting the `plat_lights_mid` call
+leaves `test_save.py` at 55/55 green. The app's own state machine (`save_led` 0/1/2, and the
+299 s / 301 s boundary around the line's threshold) is covered; a B_SAVE that sat at glow
+while an edit waited would be caught by eye on the device and by nothing here. Closing that
+means teaching the host to record mid buttons, which is a change to `platform/`.
+The lit path *is* checked end to end — `leds` prints the lit set, and `SAVE` must be out of
+it while unsaved and in it once the line fills.
+
+Because the colour is the source's own `ink`, the line is amber in SYNTH, green in SMPL and
+cyan in GRAN. That is the skin's rule applied consistently, not the line having a palette of
+its own; the player asked, and the answer is "it follows whatever source you are looking at".
 
 Nothing is drawn when the record matches flash. A permanent empty track would be two rows of
 grey meaning "saved", which is the absence of news.
@@ -943,7 +975,7 @@ What is checked, and the measurement behind each:
 
 ### 9h. Built: persistence and the save line (`app/tests/test_save.py`)
 
-51 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
+55 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
 it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 
 - **a knob survives a reboot** — CUT turned to 40, `reboot`, `cut` reads 40. Injected:
@@ -965,13 +997,13 @@ it, so "turn a knob, reboot, read it back" is a real test and not a mock.
   defaults boot; the same record at this version is accepted and its values boot. Both
   halves, because a gate that refuses everything passes the first half alone.
 - **the save line, both of its axes** — length is asserted through `save_line` (0 px at
-  boot, 29 px for one changed group, 0 again after the save), colour through `save_ink`
+  boot, 30 px for one changed group, 0 again after the save), colour through `save_ink`
   (0..3, reaching 3 only after 5 minutes) and through the pixels: the fully-bright line must
   be exactly `ink`, and `ink_hi` must not appear. The line is also counted on both of its
   rows while unsaved and on neither once saved, and the picture's top four rows (`y 86..89`)
   must stay empty so a long line cannot become a lid on the waveform. SMPL and GRAN are
   checked separately because the line takes the source's own colour — and they measure
-  58 px, not 29, because switching SOURCE is itself a saved field, which is the check that
+  60 px, not 30, because switching SOURCE is itself a saved field, which is the check that
   caught length counting knobs instead of groups.
 
 ### 9i. Built: the knob art (`app/tests/test_knob.py`)

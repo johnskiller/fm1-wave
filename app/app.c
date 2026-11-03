@@ -255,15 +255,26 @@ static uint8_t arp_gated;                 /* the note of this step has already e
 #define KNOB_H     64                                 /* the 46 px of text plus a 26 px arc
                                                        * box: the bar is gone, see knob_arc() */
 
-/* The save line: the top two rows of MAT_PAD, under the scope's baseline.
+/* The save line: two rows of MAT_PAD, in the air below the scope's baseline.
  *
  * LENGTH covers SAVE_LINE_FULL_CHANGES groups; beyond that the line is simply full, because
  * saying "a lot" is all a 232 px bar can say about a record with 28 changeable groups. 8 was
  * chosen against how the instrument is actually used -- a hand turns two or three knobs, not
  * twenty -- so that those two or three show clearly. COLOUR reaches full ink at
- * SAVE_LINE_FULL_MS. Both numbers are first guesses and both are in this one place. */
+ * SAVE_LINE_FULL_MS. Both numbers are first guesses and both are in this one place;
+ * SAVE_LINE_ROW is where the line sits. */
 #define SAVE_LINE_FULL_CHANGES 8
 #define SAVE_LINE_FULL_MS      300000u                /* 5 minutes */
+
+/* Which rows of MAT_PAD the line occupies, and why not the top two.
+ *
+ * It started at MAT_PAD + 0..1, which is the row directly under the scope's 0 dBFS
+ * graticule -- one row below a full-width 240 px grey line, with no air between them.
+ * Measured: that graticule is (98,97,106) and a full-brightness line is (238,137,24); two
+ * full-width bars stacked on consecutive rows read as one crowded block, and the player
+ * said so ("离scope的下线太近"). Down here the gap is three rows, and the wave's first ink
+ * is y 91, so there is still a row of air below the line at its heaviest. */
+#define SAVE_LINE_ROW          3                      /* 0..2 stay empty under the scope */
 
 #define MAT_PAD    6                                  /* above and below the picture */
 #define MAT_WAVE   80                                 /* the picture's own height */
@@ -1118,8 +1129,27 @@ static void input(void)
      * indicator uses one button, while a detented encoder for the same thing spends
      * a knob that GRAN needs for SPRAY. The screen, not the button's lamp, says which
      * source is live; a lamp can only say on or off, and there are three. */
-    if (btn_pressed(btn, B_SEL))
+    if (btn_pressed(btn, B_SEL)) {
         src = (uint8_t)((src + 1u) % 3u);
+        /* Leaving SMPL leaves EDIT. THE PAGE BELONGS TO THE SOURCE, not to the panel.
+         *
+         * Without this, opening EDIT in SMPL and then switching SOURCE left `edit_page`
+         * set on a source that has no EDIT page at all, and the flag is read all over the
+         * screen: on GRAN the bottom-right corner printed ZOOM instead of GRAIN, the four
+         * knobs below became START / LOOP S / LOOP E / END instead of CUT / RES / SHAPE /
+         * AMOUNT, and the material band drew SMPL's region boundaries over a granular
+         * cloud that has none. On SYNTH it was the same with LOOP and MORPH replaced.
+         *
+         * Measured on the host: SMPL + EDIT, then `tap SEL` twice, `expect edit` stayed 1
+         * through GRAN and back to SYNTH.
+         *
+         * B_EDIT itself already refuses to act outside SMPL (see the comment there: a
+         * button that does nothing where it does not apply is quieter than one that
+         * changes the instrument). This is the other half of that rule -- the page cannot
+         * outlive the source that owns it. */
+        if (src != SRC_SMPL)
+            edit_page = 0;
+    }
 
     /* B_SAVE: write the whole panel state to flash, now.
      *
@@ -1535,6 +1565,7 @@ static uint32_t unsaved_at;     /* plat_ms() when the count rose from zero; 0 = 
 static int32_t  save_line_len;  /* what the save line drew last frame, px */
 static int32_t  save_line_step; /* its brightness step, 0..3 (dim(x, step+2, 5)) */
 static uint32_t save_line_age;  /* ms since the first unsaved edit */
+static int32_t  save_led;       /* B_SAVE's lamp: 0 saved, 1 mid, 2 lit */
 static int      unsaved_live;   /* unsaved_at holds a start time */
 
 static src_skin_t src_skin(void)
@@ -3175,15 +3206,20 @@ void app_frame(void)
          * screen has no room for news that says nothing.
          *
          * The divisions are integer: the count is 0..28 and the width is 232 px, so the
-         * unit is 232/SAVE_LINE_FULL_CHANGES. Rounded up, so one change is never zero
-         * pixels -- a line that stays empty for the first edit reads as broken. */
+         * unit is 240/SAVE_LINE_FULL_CHANGES, the full screen width. Rounded up, so one
+         * change is never zero pixels -- a line that stays empty for the first edit reads
+         * as broken. */
         if (save_dirty()) {
             int32_t n = save_change_count();
-            int32_t w = n * 232 / SAVE_LINE_FULL_CHANGES;
+            /* Full 240, not the picture's 232. The line is a readout of the whole panel, not
+             * a picture of the material, so it spans the screen edge to edge -- starting at
+             * x 4 left a 4 px gap that reads as a mistake rather than as a margin. One unit
+             * is therefore 240/8 = 30 px. */
+            int32_t w = n * 240 / SAVE_LINE_FULL_CHANGES;
             uint32_t age;
 
-            if (w > 232)
-                w = 232;
+            if (w > 240)
+                w = 240;
             if (w < 1)
                 w = 1;
             save_line_len = w;
@@ -3192,16 +3228,26 @@ void app_frame(void)
                 unsaved_at = plat_ms();
             }
             age = plat_ms() - unsaved_at;
-            /* 1/5 -> 5/5 of ink across SAVE_LINE_FULL_MS. The brightness is the second
-             * axis, so it starts low enough to be ignorable and reaches full ink only
-             * after the player has left the edit unsaved long enough to matter. */
+            /* 3/5 -> 5/5 of ink across SAVE_LINE_FULL_MS. The brightness is the second
+             * axis: it starts bright enough to be read at a glance and still has room to
+             * say "this has been sitting here too long". */
             {
+                /* 3/5 -> 5/5, not 2/5 -> 5/5. Measured against each skin's own ground the
+                 * old first step sat only dLum +26 (SYNTH) / +34 (SMPL) / +26 (GRAN) from
+                 * the background, which is not a line, it is a rumour of one; the player
+                 * reported exactly that ("一开始的红色不够醒目"). At 3/5 the same numbers
+                 * are +56 / +68 / +58, still well under ink_hi (+125 / +135 / +119 + the
+                 * highlight step), so the ramp keeps its meaning and its ceiling.
+                 *
+                 * Three steps instead of four is the cost, and it is paid where it matters
+                 * least: this line has one job on its first frame -- to be seen -- and
+                 * four steps it cannot see are worth less than three it can. */
                 int32_t step = (int32_t)(age * 3u / SAVE_LINE_FULL_MS);
                 if (step > 3)
                     step = 3;
                 save_line_step = step;
                 save_line_age = age;
-                cv_rect(MAT_X0, 0, w, 2, dim(sk.ink, step + 2, 5));
+                cv_rect(0, SAVE_LINE_ROW, w, 2, dim(sk.ink, step + 2, 5));
             }
         } else {
             unsaved_live = 0;
@@ -3479,7 +3525,39 @@ void app_frame(void)
             lit |= 1u << B_SEL;
         if (src == SRC_SMPL)
             lit |= 1u << B_EDIT;
-        plat_leds(lit, in_keys);
+
+        /* B_SAVE says the same thing the line under the scope says, on the button you
+         * would press about it. The two read the same state and change on the same frame.
+         *
+         * Three levels, because that is what the matrix can show: lit, mid (felucca-bsp's
+         * steady ~12 % level) and the glow every unlit button already has.
+         *
+         *   saved              glow, like every button at rest -- no news
+         *   unsaved            mid
+         *   unsaved 5 minutes  lit, the same instant the line reaches full ink
+         *
+         * Tying "fully lit" to SAVE_LINE_FULL_MS rather than inventing a second threshold
+         * is the point: one event, said in two places. A lamp with its own clock would be
+         * a second thing to keep in step, and it would be the one that drifts.
+         *
+         * plat_lights_mid, not plat_lights: the mid level is a separate call in the
+         * platform's contract ("call it after plat_lights each time the lights change").
+         * plat_leds is still the right base because it owns PLAY's green LED and the glow. */
+        {
+            uint32_t mid = 0;
+
+            save_led = 0;
+            if (save_dirty()) {
+                save_led = save_line_step >= 3 ? 2 : 1;
+                if (save_led == 2)
+                    lit |= 1u << B_SAVE;
+                else
+                    mid |= 1u << B_SAVE;
+            }
+            plat_leds(lit, in_keys);
+            if (mid)
+                plat_lights_mid(mid, 0);
+        }
     }
 }
 
@@ -3521,6 +3599,7 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "save_line"))   { *got = save_line_len;  return 1; }
     if (!strcmp(what, "save_ink"))    { *got = save_line_step; return 1; }
     if (!strcmp(what, "save_age"))    { *got = (int)save_line_age; return 1; }
+    if (!strcmp(what, "save_led"))    { *got = (int)save_led; return 1; }
     if (!strcmp(what, "save_count"))  { *got = (int)save_count(); return 1; }
     if (!strcmp(what, "save_last"))   { *got = save_last_result(); return 1; }
     if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }

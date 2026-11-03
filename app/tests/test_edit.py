@@ -543,6 +543,69 @@ expect edit 0
       0 if from_src == "SYNTH" else 2), out, allow_fail=True)
         ck(expect_ok(o), f"EDIT in {from_src} leaves the source alone:\n{o.strip()[-200:]}")
 
+    print("leaving SMPL leaves the EDIT page behind")
+    # The other half of the rule above, and a defect the first half could not see: B_SEL
+    # changed the source and left `edit_page` set, so a page that only SMPL can show
+    # stayed up on sources that have no such page. The flag is read all over the screen,
+    # so this was not a stray label -- on GRAN the bottom-right corner printed ZOOM
+    # instead of GRAIN and the four knobs below became START / LOOP S / LOOP E / END
+    # instead of CUT / RES / SHAPE / AMOUNT, and the material band drew region
+    # boundaries over a cloud that has none.
+    #
+    # Measured before the fix: `expect edit` read 1 through GRAN and back to SYNTH.
+    def sel(n=1):
+        return "\n".join(["press SEL\nwait 60\nrelease SEL\nwait 140"] * n)
+
+    o = run("""wait 400
+%s
+press EDIT
+wait 60
+release EDIT
+wait 200
+expect edit 1
+%s
+expect src 2
+expect edit 0
+%s
+expect src 0
+expect edit 0
+%s
+expect src 1
+expect edit 0
+""" % (sel(), sel(), sel(), "press SEL\nwait 60\nrelease SEL\nwait 140"), out, allow_fail=True)
+    ck(expect_ok(o), f"EDIT closes when the source leaves SMPL, and stays closed on return:\n{o.strip()[-260:]}")
+
+    # And the knobs go back with it, which is what makes the flag matter: the leaked page
+    # renames all four knobs below the picture (START / LOOP S / LOOP E / END instead of
+    # CUT / RES / SHAPE / AMOUNT) and swaps GRAIN for ZOOM in the corner. So the test is a
+    # pixel comparison against a GRAN that never opened EDIT. Identical bands mean the
+    # leaked page left no mark on the render; anything else means the flag still reaches
+    # the painters.
+    o = run("""wait 400
+%s
+expect src 2
+shot clean.png
+""" % sel(2), out, allow_fail=True)
+    ck(expect_ok(o), "GRAN reached without touching EDIT:\n" + o.strip()[-200:])
+
+    o = run("""wait 400
+%s
+press EDIT
+wait 60
+release EDIT
+wait 200
+%s
+expect src 2
+expect edit 0
+shot after.png
+""" % (sel(), sel()), out, allow_fail=True)
+    ck(expect_ok(o), "GRAN after leaving EDIT:\n" + o.strip()[-200:])
+
+    clean = np.array(Image.open(os.path.join(out, "clean.png")).convert("RGB"))[176:240]
+    after = np.array(Image.open(os.path.join(out, "after.png")).convert("RGB"))[176:240]
+    diff = int((np.abs(clean.astype(int) - after.astype(int)).sum(axis=2) > 8).sum())
+    ck(diff == 0, f"and the knob band is identical to a GRAN that never opened EDIT: {diff} px differ")
+
     print("the four boundaries are four colours, and the playhead is not one of them")
     # Four identical green lines were the page's real defect: it worked and could not be
     # read. Each boundary now has its own hue and its own knob is printed in it, so this
