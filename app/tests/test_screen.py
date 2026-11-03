@@ -388,6 +388,50 @@ shot grn.png
     ck(expect("press LFO\n", "lfo", 1), "B_LFO opens the page")
     ck(expect("tap LFO\ntap LFO\n", "lfo", 0), "B_LFO toggles it shut")
 
+    # ── every page announces itself on its own button ──────────────────────────
+    # The rule the panel follows is "a page lights its button solid; a setting that
+    # keeps working after the page closes blinks instead". EDIT was the exception: its
+    # lamp read `src == SRC_SMPL`, so opening the frame rack on SYNTH lit nothing. A
+    # page that takes K1-K4 away from the voice and gives no sign of it is the one
+    # case where the player has no way to tell where the knobs went.
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("leds\ntap EDIT\nmaster 200\nwait 100\nleds\n"
+                "tap EDIT\nmaster 200\nwait 100\nleds\n")
+        path = f.name
+    try:
+        r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                           timeout=120, cwd=out)
+    finally:
+        os.unlink(path)
+    seen = [l.split("leds:")[1].split("|")[0].strip()
+            for l in r.stdout.splitlines() if "leds:" in l]
+    ck("EDIT" not in seen[0], "nothing is lit at rest", seen[0])
+    ck("EDIT" in seen[1], "EDIT on SYNTH lights its own button", seen[1])
+    ck("EDIT" not in seen[2], "and closing the page darkens it", seen[2])
+
+    # ENV and FX are the exception, and they are the exception for a reason that has to
+    # hold or the rule is arbitrary: neither has an OFF. The envelope runs on every note
+    # and the filter sits in the signal path on every sample, so "page closed" leaves
+    # nothing armed to blink about. Solid while up, dark when down, and specifically NOT
+    # blinking afterwards -- a blink would claim the filter can be switched off.
+    for btn, page in (("ENV", "env"), ("FX", "fx")):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(f"tap {btn}\nmaster 200\nwait 100\nleds\n"
+                    f"tap {btn}\nmaster 200\nwait 100\nleds\n"
+                    f"wait 150\nleds\nwait 150\nleds\n")
+            path = f.name
+        try:
+            r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                               timeout=120, cwd=out)
+        finally:
+            os.unlink(path)
+        got = [l.split("leds:")[1].split("|")[0].strip()
+               for l in r.stdout.splitlines() if "leds:" in l]
+        ck(btn in got[0], f"{btn}'s page lights its own button", got[0])
+        ck(btn not in got[1], f"{btn} goes dark when the page closes", got[1])
+        ck(not any(btn in g for g in got[2:]),
+           f"{btn} does NOT blink afterwards: it has no off to report", str(got[2:]))
+
     # Two pages cannot be up at once. Without this the lit lamp would be ambiguous and
     # which parameters the knobs edit would depend on the order the buttons were hit.
     ck(expect("tap ENV\ntap LFO\n", "env", 0), "LFO closes the ENV page")

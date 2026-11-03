@@ -3963,12 +3963,22 @@ void app_frame(void)
      * want different rhythms, and the platform's own comment warns that driving the
      * LEDs from a render starves the scanner.
      *
-     * What is lit is a state, not a highlight:
-     *   B_ENV   the page is up -- a page has to announce itself on the panel, and
-     *           this is the whole reason a page is allowed to take K1-K4
+     * What is lit is a state, not a highlight, and there are exactly two shapes:
+     *
+     *   PAGE OPEN       solid on that page's own button. A page takes K1-K4 away from
+     *                   the voice, so it has to say on the panel where the knobs went.
+     *                   ENV, FX, EDIT are this and nothing else.
+     *
+     *   STILL WORKING   blinking while the page is shut. For a setting that keeps
+     *                   acting on what you play after its own page is gone: LFO's
+     *                   modulation, ARP rearranging the keys. The distinction is not
+     *                   cosmetic -- a blink means "something is running that you cannot
+     *                   see", and a button that blinks for a thing that cannot be
+     *                   switched off is a lie.
+     *
      *   B_SEL   SOURCE is not SYNTH, the power-on default. Three states on a two-state
      *           lamp, so the lamp only says "moved"; the screen says which
-     *   B_EDIT  SOURCE is SMPL, where EDIT is the chop button and does nothing else
+     *
      * Keys light while held, which is plat_leds's own behaviour and the reason to
      * call it instead of plat_lights.
      *
@@ -3994,11 +4004,43 @@ void app_frame(void)
             lit |= 1u << B_LFO;
         else if (k_lfo_rate != 0 && k_lfo_depth != 0 && ((now >> 8) & 1u))
             lit |= 1u << B_LFO;
+        /* B_ARP reads the same way B_LFO does, for the same reason: the page is a
+         * view, the setting is a switch, and a closed page must not hide something
+         * that is audibly working. Arpeggio is the worst case of the rule -- a player
+         * who forgets the arp is armed finds out by playing a note, and that is the
+         * moment the surprise is least welcome.
+         *
+         *   page up            solid: the knobs are RATE and TYPE right now
+         *   page down, on      blinking: the arp is still rearranging what you play
+         *
+         * "on" is arp_on(), i.e. RATE != 0, because that is what the transport reads
+         * (app.c's step clock returns early on !k_arp_rate). Not TYPE or OCT or GATE:
+         * those four have no "off" and are carried by RATE, so using any of them as
+         * the arm condition would blink a lamp for an arp that never steps. */
         if (arp_page)
             lit |= 1u << B_ARP;
+        else if (arp_on() && ((now >> 8) & 1u))
+            lit |= 1u << B_ARP;
+        /* B_FX is page-open only, and so is B_ENV. Those two are the exception to the
+         * blink rule above, and the reason is that they have no OFF: the envelope runs
+         * on every note and the filter sits in the signal path on every sample, so
+         * "page closed" leaves nothing armed to blink about. A blinking FX lamp would
+         * claim the filter can be switched off. It was not lit at all before this --
+         * the FX page opened and nothing on the panel said so. */
+        if (fx_page)
+            lit |= 1u << B_FX;
         if (src != SRC_SYNTH)
             lit |= 1u << B_SEL;
-        if (src == SRC_SMPL)
+        /* B_EDIT follows the PAGE, not the source. It read `src == SRC_SMPL`, so
+         * EDIT on SYNTH opened the rack and left the lamp dark -- the one page on the
+         * panel that did not announce itself. Measured: after `tap EDIT` in SYNTH,
+         * edit_page is 1 and the lit set is empty ("leds: buttons" with nothing after
+         * it).
+         *
+         * Solid, not blinking: EDIT has no "armed while you are elsewhere" state. The
+         * region, the frame offsets and the grain controls only exist while the page is
+         * up, so a blinking lamp would claim something is running that is not. */
+        if (edit_page)
             lit |= 1u << B_EDIT;
 
         /* B_SAVE says the same thing the line under the scope says, on the button you

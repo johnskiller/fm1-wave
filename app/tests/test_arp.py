@@ -220,6 +220,41 @@ def main():
     check("a note started by the arp lets go when the arp is switched off under it", ok,
           "" if ok else bad[0].strip())
 
+
+    # ── the lamp, which is the whole point of the arp's page ────────────────────
+    # The panel rule is: a page announces itself solid, and a setting that keeps
+    # working after the page closes blinks. LFO has read that way since it shipped.
+    # ARP did not -- it went dark on close, so an armed arpeggio was invisible until
+    # the next note came out rearranged. The player asked for the two to match, and
+    # they now do, because both read the same shape: page up -> solid, else armed ->
+    # blink at (now >> 8) & 1.
+    #
+    # "armed" is RATE != 0 (arp_on()), not TYPE/OCT/GATE: those three have no off and
+    # are carried by RATE, so any of them as the condition would blink a lamp for an
+    # arp that never steps.
+    print("arp: the lamp announces the page, then keeps blinking while armed")
+    out, rc = run("leds\n"
+                  "tap ARP\nmaster 200\nwait 100\nleds\n"
+                  "turn K1 4\nmaster 200\nwait 100\nleds\n"
+                  "tap ARP\nmaster 200\nwait 100\nleds\n"
+                  "wait 150\nleds\nwait 150\nleds\nwait 150\nleds\n")
+    seen = [l.split("leds:")[1].split("|")[0].strip() for l in out if "leds:" in l]
+    check("nothing is lit before the page is opened", "ARP" not in seen[0], seen[0])
+    check("opening the page lights it solid", "ARP" in seen[1], seen[1])
+    check("turning RATE up arms it, still on the page", "ARP" in seen[2], seen[2])
+    check("closing the page does not darken an armed arp", "ARP" in seen[3], seen[3])
+    on = [("ARP" in s) for s in seen[4:]]
+    check("and it blinks after the page is closed", any(on) and not all(on), str(on))
+
+    # RATE back to zero while the page is shut: the last sample must stay dark. The
+    # order matters -- turning K1 while ARP's page is up would move RATE again.
+    out, rc = run("tap ARP\nturn K1 4\ntap ARP\nmaster 200\nwait 100\n"
+                  "tap ARP\nturn K1 -4\ntap ARP\nmaster 200\nwait 100\n"
+                  "wait 150\nleds\nwait 150\nleds\nwait 150\nleds\n")
+    off = [("ARP" in l.split("leds:")[1]) for l in out if "leds:" in l]
+    check("an arp at RATE 0 does not blink after the page closes",
+          off and not any(off), str(off))
+
     print(f"\n{checks} checks, {failures} failed")
     return 1 if failures else 0
 
