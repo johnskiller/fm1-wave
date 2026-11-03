@@ -261,6 +261,23 @@ shot grn.png
     ck(42 - 41 == 1 and 42 + 41 == 83,
        "the scope's full scale reaches the band edge, leaving no headroom above 0 dBFS")
 
+    # ── the graticule must not crowd the centre ────────────────────────────────
+    # The scale is linear in amplitude, so dB rules bunch up toward the centre. Drawn
+    # down to -50 they landed on y 40/41/43/44 -- three rules inside 4 px with the
+    # centre rule at 42 between them, and -40 and -50 on the SAME row, so -50 drew
+    # nothing. The player reported the near-vertical trace fighting the grid there.
+    # The rules now stop at -30, which is the innermost at 40/44. Asserted as a
+    # property (no rule within 2 px of the centre) rather than as a list of rows, so a
+    # future change to the scale has to keep the air rather than match the numbers.
+    full_rows = [y for y in range(2, 82)
+                 if sum(1 for x in range(240) if im.getpixel((x, y)) == SCOPE_DIM) > 200]
+    crowded = [y for y in full_rows if abs(y - 42) < 2]
+    ck(not crowded, "no dB rule sits within 2 px of the centre rule", f"rows {crowded}")
+    ck(len(full_rows) >= 4,
+       f"and the scale still reads as several lines ({len(full_rows)} rows)")
+    ck(max(full_rows) - min(full_rows) > 10,
+       "the outermost rule is well away from the centre, so the spacing is visible")
+
     # ── the debug corner (app.c dbg_draw, DBG_ON) ──────────────────────────────
     # Three rows at the top left: the render's load, the second core, the clock. What
     # this checks is that it draws at all and where it sits, not its values: the values

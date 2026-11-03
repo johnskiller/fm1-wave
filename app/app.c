@@ -3468,7 +3468,23 @@ void app_frame(void)
                 int32_t db, col;
                 for (col = 1; col * 20 < 240; col++)
                     cv_line(col * 20, 0, col * 20, SCOPE_H - 1, GRID_DIM);
-                for (db = 0; db >= -50; db -= 10) {
+                /* Down to -30 dBFS, not -50. The scale is linear in amplitude, so the
+                 * lines bunch up geometrically toward the centre: measured on this band,
+                 * -30 lands at y 40/44, -40 at 41/43, and -50 at 41/43 as well -- the
+                 * last two are the SAME ROW, so -50 drew nothing and -40 drew a line
+                 * 1 px from the centre rule with the trace's own back-and-forth running
+                 * through it. Three rules inside 4 px of the centre is what made a
+                 * near-vertical trace look like it was fighting the graticule.
+                 *
+                 * Stopping at -30 keeps every line at least 2 px from the centre rule
+                 * (-30 is the innermost, at 40/44) and leaves the spacing that reads as
+                 * a scale: 28 px from 0 to -10, 8 to -20, 3 to -30. Below -30 the
+                 * remaining space is 2 px, which cannot carry a rule that says anything.
+                 *
+                 * What is lost, stated: nothing below -30 dBFS is marked. A trace down
+                 * there is 0.032 of full scale, i.e. a 2 px line, and it already had no
+                 * grid to read against. */
+                for (db = 0; db >= -30; db -= 10) {
                     /* The y of db on this band, each side of the centre. fm_db2lin is
                      * the platform's own dB -> linear, and it is scaled by SCOPE_REF:
                      * the lines are dB relative to the eight-voice peak that reaches
