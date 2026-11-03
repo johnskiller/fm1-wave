@@ -936,6 +936,41 @@ it, so "turn a knob, reboot, read it back" is a real test and not a mock.
   could not catch it (the labels ink those columns anyway); the check is about the mark's
   own extent, measured by differencing the two screenshots.
 
+### 9i. Built: the knob art (`app/tests/test_knob.py`)
+
+20 checks on the smallest drawing in the app, which is also the one a player sees most:
+the four knobs under the screen. A bar became a 270-degree arc with a tick, and every
+property that makes the arc readable was got wrong in some draft of it, so each is
+measured from a host screenshot rather than asserted from the source.
+
+- **the gap is at the bottom and about a quarter turn** — the track colour's angles are
+  collected on the ring, and the widest run of empty degrees has to be centred on straight
+  down within 25 deg and be 70..110 deg wide. Injected: a full-circle span makes it 11 deg
+  and fails.
+- **the track spans about 270 degrees** — 360 minus the gap, 250..290.
+- **the fill grows and the track gives way** — the filled and track pixel counts inside one
+  knob's annulus are both monotonic across v = 0, 32, 64, 96, and the fill's range is more
+  than 5x. Injected: a fill condition that is always true gives 82, 83, 83, 83 and no track
+  at all.
+- **it fills from the lower left, clockwise** — the fill's angles at v = 0 start at -135 and
+  at v = 64 the run ends on the value's own angle from the formula (-135 + v/127 * 270).
+  Injected: filling the last N segments instead of the first N puts the fill at -3..135.
+- **the gap stays empty at every value** — 0 ink pixels inside +-30 deg of straight down,
+  at all four values. Injected: a hand from the centre puts ink in the gap at v = 0.
+- **the value is centred, the name is not** — the four values have to read as four objects,
+  so the value's ink is centred within 6 px of the column's middle while the name starts at
+  its left edge.
+- **the ENV page has an arc under all four knobs** — a page that leaks a knob from the page
+  before it is visible here.
+
+Three mistakes this file made about itself, all found by the checks failing on correct
+code: it computed the knob's centre from the source and was 3.5 px off (the band's canvas
+origin is not where the reading assumed); it counted ink over the whole band, where the
+value's text shares the fill's colour; and it expected the ENV page's arcs to be drawn in
+`sk.ink`, when a page's knobs are lit and fill at `sk.ink_hi`. The centre is now measured
+by a circle fit (31.5, 224.5) and recorded, the counts are taken inside an annulus, and the
+mask includes all three brightnesses.
+
 ### 9g. The panel, as built
 
 `docs/panel-map.md` is the authority and is checked by `panel.txt`; this section

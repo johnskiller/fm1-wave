@@ -414,7 +414,7 @@ to draw and refuses to compile if they do not sum to 240:
 #define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
 #define SCOPE_HALF ((SCOPE_H - 2) / 2)                /* 41 */
 #define KNOB_TOP   4
-#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* 46 */
+#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* 46: name, value, then the arc box */
 #define KNOB_H     64
 #if (MAT_H + KNOB_H + SCOPE_H) != 240
 #error "the three bands must fill the 240 px screen"
@@ -448,7 +448,8 @@ Measured, with the derivation in place:
 band       rows        ink extent
 scope      0..83       33..50    (the trace; centre line at 42)
 material   84..175     91..169   SYNTH (79 px of the 80 px picture), 91..171 ENV/GRAN, 94..160 SMPL
-knobs      176..239    183..221  (39 px of ink, 18 px spare for the round knob art)
+knobs      176..239    183..233  (name, value, then a 26 px arc: three quarters of a
+                                turn with a tick on it, gap at the bottom)
 ```
 
 ### The three material pictures
@@ -715,6 +716,58 @@ graticule, it is a missing one.
 
 The trace runs over it (drawn after), which is how a real scope looks: the grid is
 behind the signal.
+
+### The knob art: an arc and a tick
+
+A knob is a 270-degree arc with a tick on it, not a bar. The bar answered "how much" but
+not "how far round", and that is the question four knobs under a screen get asked from a
+metre away.
+
+```
+   (name)              name: FONT_XS, sk.ink (or the page's hue in EDIT)
+   (value)             value: FONT_XS, centred under the name
+      ___
+    /  |  \            arc: r = 11, 2 px stroke, 32 segments, 270 deg
+   |   |   |           gap: 90 deg, centred on straight down
+    \     /            fill: sk.ink_hi (or ink when the page is not lit)
+      ---              tick: a 3 px radial line across the arc at the value's angle
+```
+
+**Where zero is.** The gap sits at the bottom, so the two ends of the range are visible as
+ends. A full circle was the first draft and it hides exactly that: a ring tells you the
+value but not where the range starts.
+
+**Which way it fills.** From the lower left, clockwise, 270 degrees at v=127. The hardware
+encoder turns clockwise for more (`turn K1 +1` raises the value), so the arc fills the way
+the hand turns. An anticlockwise fill would be a second convention in one panel.
+
+**Why a tick and not a hand.** The first pointer was a line from the centre out to the arc.
+It reads well at rest and fails at one specific place: at v=0 a hand pointing lower-left
+runs through the gap and fills part of it, so the control reads as a nearly closed ring.
+A radial tick across the arc keeps the gap empty at every value, and it survives a smaller
+radius.
+
+**The stroke is two radii, not a line beside a line.** The first attempt drew the segment
+and then "thickened" it by nudging the start point one pixel along the segment's own
+direction -- which is the line's direction, not the stroke's, so the second line landed on
+the first and the arc came out 1 px thick (measured: exactly one lit pixel in every row of
+the ring). A stroke is a second radius.
+
+**The geometry is checked, the look is not.** `app/tests/test_knob.py` (20 checks) pins the
+facts the design rests on, each one measured from a host screenshot: the gap is centred on
+down and about a quarter turn; the track spans about 270 degrees; the fill grows with the
+value while the track gives way; the fill is contiguous from the lower left and ends on the
+value's own angle; the gap stays empty at every value; the value is centred in its column.
+Each of those four had a draft that got it wrong, and each is pinned by a check that fails
+when the defect is put back. Whether the result is pleasant is the player's call by looking
+at it.
+
+A note for whoever extends this: the knob's centre is at **(31.5, 224.5)** on screen, and
+that is not what the source says. Reading `cy = y + 34 + KNOB_ARC_BOX/2 - 2` with
+`y = KNOB_TOP = 4` gives 221, because the band's canvas starts at `SCOPE_H + MAT_H = 176`
+and `y` is already inside it. Deriving the centre from the source and trusting it made a
+correct arc fail its own span check. Measure the circle; the source reading is the thing
+that was wrong.
 
 ### The material band
 

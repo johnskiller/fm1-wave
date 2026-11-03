@@ -248,8 +248,8 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  */
 #define KNOB_TOP   4                                  /* knob(): where its ink starts */
 #define KNOB_INK   (KNOB_TOP + 34 + 8)                /* label, value, bar = 46 px */
-#define KNOB_H     64                                 /* 18 px spare: the round knob art
-                                                       * that replaces the bar is not written yet */
+#define KNOB_H     64                                 /* the 46 px of text plus a 26 px arc
+                                                       * box: the bar is gone, see knob_arc() */
 
 #define MAT_PAD    6                                  /* above and below the picture */
 #define MAT_WAVE   80                                 /* the picture's own height */
@@ -2189,20 +2189,116 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
 /* The same, in a chosen colour. Only the EDIT page uses it: there the four boundary
  * knobs are the four lines in the picture, and a knob printed in its line's hue is how
  * the panel says which line it moves. `hue` 0 means "the theme's ink". */
+/* -------------------------------------------------------------- knob art --- */
+
+/* A knob is an ARC and a pointer, not a bar, and the reason is the panel's own problem:
+ * four knobs under a screen are read from a metre away, and a bar answers "how much" but
+ * not "how far round". An arc with a pointer reads the way the encoder under the hand
+ * turns -- the pointer's angle IS the value -- so a glance at the row says where each
+ * knob sits in its range without reading a single number.
+ *
+ * Geometry, all of it fixed so the four knobs are one instrument and not four widgets:
+ *
+ *   the arc spans 270 degrees, from 135 deg below-left round the top to 135 deg
+ *   below-right, so the gap sits at the bottom where the value's text is. A full circle
+ *   was the first attempt: it hides WHERE zero is, and the bottom gap is what makes the
+ *   ends of the range readable as ends.
+ *
+ *   the sweep starts at the lower left and runs CLOCKWISE, which is the direction the
+ *   hardware encoder turns for more (measured: turn K1 +1 moves a value up). A knob that
+ *   fills anticlockwise would be a second convention in the same panel.
+ *
+ *   the track is drawn at 1/5 ink and the filled part at full ink or the page's hue, the
+ *   same two brightnesses the bar used, so "off" still reads as a scale and not as empty
+ *   space.
+ *
+ * Radius 11 inside a 26 px box: the box is what the four columns can afford (54 px wide,
+ * 18 px tall under the value) and 11 leaves a 3 px margin either side so two adjacent
+ * arcs never touch. The knob is 22 px across and the pointer is 3 px, which is the
+ * smallest pointer that survives one pixel of RGB565 rounding at both ends.
+ *
+ * Drawn with cv_line segments rather than a real arc primitive (platform/ has none, and
+ * this file may not add one): 32 segments over 270 deg is 8.4 deg each, and at r=11 that
+ * is a 1.6 px step, so the arc reads smooth at this size. */
+#define KNOB_ARC_R     11
+#define KNOB_ARC_BOX   26
+#define KNOB_ARC_SEGS  32
+#define KNOB_ARC_THICK 2                          /* px: two radii, so the stroke survives */
+#define KNOB_ARC_SPAN  (0.75f * FM_TWO_PI)        /* 270 deg: three quarters of a turn */
+
+/* One segment of the arc, from `a0` to `a1` radians. Angle 0 points UP and grows
+ * clockwise, so the drawing reads as the knob does. The 3 px stroke is a second line
+ * offset one pixel along the radius's normal at the midpoint -- cheaper than a real
+ * thick-line routine and exact enough at r=11. */
+static void knob_arc_seg(int32_t cx, int32_t cy, float a0, float a1, uint16_t c)
+{
+    /* Two radii, not one line beside another. The first version drew the segment and then
+     * "thickened" it by nudging the start point one pixel along the segment's own
+     * direction -- which is the line's direction, not the stroke's, so the second line
+     * landed on top of the first and the arc came out 1 px thick (measured: every row of
+     * the control's ring had exactly one lit pixel). A stroke is a second radius. */
+    int32_t i;
+    for (i = 0; i < KNOB_ARC_THICK; i++) {
+        int32_t r = KNOB_ARC_R - i;
+        int32_t x0 = cx + (int32_t)(0.5f + (float)r * fm_sinf(a0));
+        int32_t y0 = cy - (int32_t)(0.5f + (float)r * fm_cosf(a0));
+        int32_t x1 = cx + (int32_t)(0.5f + (float)r * fm_sinf(a1));
+        int32_t y1 = cy - (int32_t)(0.5f + (float)r * fm_cosf(a1));
+        cv_line(x0, y0, x1, y1, c);
+    }
+}
+
+/* The knob itself: track, filled arc, pointer. `v` is 0..127, `c` the filled colour. */
+static void knob_arc(int32_t cx, int32_t cy, int32_t v, uint16_t c, uint16_t track)
+{
+    const float start = -0.5f * KNOB_ARC_SPAN;    /* lower left */
+    float frac = (float)(v < 0 ? 0 : v > 127 ? 127 : v) * (1.0f / 127.0f);
+    float swept = KNOB_ARC_SPAN * frac;
+    int32_t i;
+
+    for (i = 0; i < KNOB_ARC_SEGS; i++) {
+        float a0 = start + KNOB_ARC_SPAN * (float)i / (float)KNOB_ARC_SEGS;
+        float a1 = start + KNOB_ARC_SPAN * (float)(i + 1) / (float)KNOB_ARC_SEGS;
+        knob_arc_seg(cx, cy, a0, a1, track);
+        if (KNOB_ARC_SPAN * (float)(i + 1) / (float)KNOB_ARC_SEGS <= swept)
+            knob_arc_seg(cx, cy, a0, a1, c);
+    }
+
+    /* The pointer: a short tick ACROSS the arc at the value's angle, not a hand from the
+     * centre. A hand was the first version and the measurement that condemned it is that
+     * it runs through the 90-degree gap at the bottom, so at v=0 it fills part of the gap
+     * and the control reads as a nearly closed ring -- the one place the "where does the
+     * range end" information lives. A tick outward from the arc keeps the gap empty at
+     * every value, and it also survives a much smaller radius than a hand does.
+     *
+     * It sits on the arc's own radius, one pixel proud of it, so the tick is the brightest
+     * thing on the control and reads as the position at a glance. */
+    {
+        float a = start + swept;
+        int32_t r0 = KNOB_ARC_R - KNOB_ARC_THICK + 1;
+        int32_t r1 = KNOB_ARC_R + 2;
+        int32_t x0 = cx + (int32_t)(0.5f + (float)r0 * fm_sinf(a));
+        int32_t y0 = cy - (int32_t)(0.5f + (float)r0 * fm_cosf(a));
+        int32_t x1 = cx + (int32_t)(0.5f + (float)r1 * fm_sinf(a));
+        int32_t y1 = cy - (int32_t)(0.5f + (float)r1 * fm_cosf(a));
+        cv_line(x0, y0, x1, y1, c);
+    }
+}
+
 static void knob_c(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
                    int32_t v127, int lit, uint16_t hue)
 {
     uint16_t c = hue ? hue : (lit ? sk.ink_hi : sk.ink);
     uint16_t cv = hue ? hue : (lit ? sk.acc : sk.ink);
+    int32_t cx = x + w / 2;
+    int32_t cy = y + 34 + KNOB_ARC_BOX / 2 - 2;
+
     cv_text(x, y, &FONT_XS, name, c);
-    cv_text(x, y + 18, &FONT_XS, val, cv);
-    cv_rect(x, y + 34, w, 8, sk.track);
-    if (v127 > 0) {
-        int32_t fw = w * v127 / 127;
-        if (fw < 1)
-            fw = 1;                       /* a bar at "just off zero" is not nothing */
-        cv_rect(x, y + 34, fw, 8, hue ? hue : (lit ? sk.ink_hi : sk.ink));
-    }
+    /* the value, centred under the name: a knob's number belongs to the knob's middle,
+     * not to its left edge, or four different-length values look like four left-aligned
+     * strings and the row stops reading as four objects. */
+    cv_text(cx - txt_w(val) / 2, y + 18, &FONT_XS, val, cv);
+    knob_arc(cx, cy, v127, hue ? hue : (lit ? sk.ink_hi : sk.ink), dim(sk.ink, 1, 5));
 }
 
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
