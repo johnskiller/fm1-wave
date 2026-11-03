@@ -448,7 +448,7 @@ Measured, with the derivation in place:
 band       rows        ink extent
 scope      0..83       33..50    (the trace; centre line at 42)
 material   84..175     91..169   SYNTH (79 px of the 80 px picture), 91..171 ENV/GRAN, 94..160 SMPL
-knobs      176..239    183..233  (name, value, then a 26 px arc: three quarters of a
+knobs      176..239    193..239  (name, then a 46 px ring, r = 23: three quarters of a
                                 turn with a tick on it, gap at the bottom)
 ```
 
@@ -724,14 +724,32 @@ not "how far round", and that is the question four knobs under a screen get aske
 metre away.
 
 ```
-   (name)              name: FONT_XS, sk.ink (or the page's hue in EDIT)
-   (value)             value: FONT_XS, centred under the name
-      ___
-    /  |  \            arc: r = 11, 2 px stroke, 32 segments, 270 deg
-   |   |   |           gap: 90 deg, centred on straight down
-    \     /            fill: sk.ink_hi (or ink when the page is not lit)
-      ---              tick: a 3 px radial line across the arc at the value's angle
+   (name)              name: FONT_XS, sk.ink, left-aligned in the column
+    _____              arc: r = 23, 5 px stroke, 128 segments, 270 deg
+   /     \             gap: 90 deg, centred on straight down
+  |  127  |            value: FONT_XS, centred INSIDE the ring
+   \     /             fill: sk.ink_hi (or ink when the page is not lit)
+    -----              tick: a 4 px radial line across the stroke at the value's angle
 ```
+
+**The ring is as big as the band allows, and the value lives inside it.** The band is 64 px;
+the name takes 15, two pixels of air are left, and what remains is 47 -- so `r = 23` with the
+stroke's outer edge on the band's last row. 23 is not a taste: one more pixel and the ring is
+clipped by the band. Four columns of 54 px hold a 46 px ring with 4 px either side, so
+neighbours cannot touch.
+
+Putting the value in the hole is what makes that radius possible, and it costs the hole its
+width: the space for text is the **chord** at the glyph's height, not the diameter. The glyphs
+of FONT_XS occupy 9 rows (measured -- the font's cell is 15 px but its ink is not), so at a
+clear hole radius of 18 the chord is 35 px, against 33 px for the widest string the app can
+print. That bound is why the EDIT page prints seconds ("12.810s", 33 px) and not milliseconds
+("52369ms", 50 px). Three decimals rather than two because at 128x zoom the window is 8
+samples wide and two decimals would print the same number for different positions; a
+boundary control whose number does not move is broken.
+
+**The stroke is five radii, and five is the widest that fits.** Six puts the clear hole at 17
+and the chord at 32.8 px -- one pixel short of the widest value. So the thickness is set by
+the text, not chosen.
 
 **Where zero is.** The gap sits at the bottom, so the two ends of the range are visible as
 ends. A full circle was the first draft and it hides exactly that: a ring tells you the
@@ -747,27 +765,60 @@ runs through the gap and fills part of it, so the control reads as a nearly clos
 A radial tick across the arc keeps the gap empty at every value, and it survives a smaller
 radius.
 
-**The stroke is two radii, not a line beside a line.** The first attempt drew the segment
+**A stroke is a filled quad, not a bundle of 1 px lines.** The first attempt drew the segment
 and then "thickened" it by nudging the start point one pixel along the segment's own
 direction -- which is the line's direction, not the stroke's, so the second line landed on
 the first and the arc came out 1 px thick (measured: exactly one lit pixel in every row of
 the ring). A stroke is a second radius.
 
-**The geometry is checked, the look is not.** `app/tests/test_knob.py` (20 checks) pins the
+That fix carried a defect that only showed up at 5 px. Drawing one 1 px Bresenham chain per
+radius does not tile the band: each chain rounds its own way, so two neighbours can straddle
+a pixel and leave the background showing through the stroke. Measured on the host, a finished
+ring enclosed **6 background pixels per knob** at r = 19.8 .. 21.9 -- inside the stroke, not
+in the gap and not at a segment join. With two chains (the earlier 2 px stroke) the two lines
+almost always touch, which is why nothing was visible until the stroke got thick. It was not
+the trigonometry table: the 128-entry table is exact at the segment ends, and the older
+`fm_sinf` version holes the same way at this width.
+
+So each segment is the **quad** between (inner[k], outer[k]) and (inner[k+1], outer[k+1]),
+filled row by row: for every row its four edges give a left and a right x, and the span
+between them is one `cv_rect`. Consecutive segments share an edge, so there is no seam left to
+hole. This is also faster than the five-chain version, measured by running the same 400-tap
+script through both on the host: **0.344 s against 0.350 s** (490 `cv_rect` calls against 640
+`cv_line` calls, and `cv_rect` fills a row without Bresenham's per-pixel error term).
+
+Two details are load-bearing and were both found by measuring, not by reasoning:
+
+- The row bounds are **closed** (`ay <= y && y <= ey`). The usual half-open test is right for a
+  general polygon but wrong at the 12 o'clock vertex, where every edge of the quad is either
+  horizontal or ends exactly on that row, so no edge claimed it and the top of the ring kept a
+  1 px background dot at every value (`FFFFFFFFFF.FFFFFFFFFF` on row 197 of the host shot).
+- The test is done for **both windings** of each edge. Dropping the reversed cases looks like
+  dead code -- the quad's winding is constant -- and puts 12 holes back, because the closed
+  bounds make some rows fall outside the single-winding spans.
+
+**The core has no 32-bit divide routine.** The image's only divide symbol is `__udivdi3`
+(64-bit), so the `knob_edge_x` interpolation compiles to the hardware divide instruction.
+
+**The geometry is checked, the look is not.** `app/tests/test_knob.py` (25 checks) pins the
 facts the design rests on, each one measured from a host screenshot: the gap is centred on
 down and about a quarter turn; the track spans about 270 degrees; the fill grows with the
 value while the track gives way; the fill is contiguous from the lower left and ends on the
-value's own angle; the gap stays empty at every value; the value is centred in its column.
+value's own angle; the gap stays empty at every value; the value is centred in its column and
+fits inside the hole; and **the stroke carries no pinholes** -- that last one exists because
+the art shipped with 6 of them per knob, and putting the old five-chain drawing back turns it
+red on all four values.
 Each of those four had a draft that got it wrong, and each is pinned by a check that fails
 when the defect is put back. Whether the result is pleasant is the player's call by looking
 at it.
 
-A note for whoever extends this: the knob's centre is at **(31.5, 224.5)** on screen, and
-that is not what the source says. Reading `cy = y + 34 + KNOB_ARC_BOX/2 - 2` with
-`y = KNOB_TOP = 4` gives 221, because the band's canvas starts at `SCOPE_H + MAT_H = 176`
-and `y` is already inside it. Deriving the centre from the source and trusting it made a
-correct arc fail its own span check. Measure the circle; the source reading is the thing
-that was wrong.
+A note for whoever extends this: the knob's centre is at **(31.5, 216.0)** on screen, and
+that is not what the source says. An earlier note here gave 224.5 for a smaller ring, read
+off the pixel scan of that version; when the ring grew to r = 23 the centre moved with it and
+the scan is what tracked it. `cy = KNOB_ARC_TOP + KNOB_ARC_R` with `KNOB_ARC_TOP =
+KNOB_TOP + FONT_XS.h + 2 = 17` gives 40 inside the band, and the band's canvas starts at
+`SCOPE_H + MAT_H = 176`, so 216. Measure the circle; the source reading is the thing that got
+it wrong twice.
 
 ### The material band
 

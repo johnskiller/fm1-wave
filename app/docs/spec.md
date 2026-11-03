@@ -575,7 +575,8 @@ span more than one sample.
 Every corner label names its parameter. A position is only a name when it is the
 same name in every mode, and the top right is BANK in SYNTH but SLOT elsewhere.
 
-**Band 3 — knobs, y 176..239.** Four knobs, each a name, a value and a bar.
+**Band 3 — knobs, y 176..239.** Four knobs, each a name and a 270-degree ring with the
+value inside it.
 `CUT / RES / SHAPE / AMOUNT` normally; `A / D / S / R` while the ENV page is up.
 No encoder numbers: the position is the name. The one just turned highlights.
 
@@ -938,10 +939,11 @@ it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 
 ### 9i. Built: the knob art (`app/tests/test_knob.py`)
 
-20 checks on the smallest drawing in the app, which is also the one a player sees most:
-the four knobs under the screen. A bar became a 270-degree arc with a tick, and every
-property that makes the arc readable was got wrong in some draft of it, so each is
-measured from a host screenshot rather than asserted from the source.
+25 checks on the smallest drawing in the app, which is also the one a player sees most:
+the four knobs under the screen. A bar became a 270-degree arc with a tick, then the ring
+grew to `r = 23` with a 5 px stroke and the value moved inside it, and every property that
+makes the arc readable was got wrong in some draft of it, so each is measured from a host
+screenshot rather than asserted from the source.
 
 - **the gap is at the bottom and about a quarter turn** — the track colour's angles are
   collected on the ring, and the widest run of empty degrees has to be centred on straight
@@ -957,19 +959,36 @@ measured from a host screenshot rather than asserted from the source.
   Injected: filling the last N segments instead of the first N puts the fill at -3..135.
 - **the gap stays empty at every value** — 0 ink pixels inside +-30 deg of straight down,
   at all four values. Injected: a hand from the centre puts ink in the gap at v = 0.
-- **the value is centred, the name is not** — the four values have to read as four objects,
-  so the value's ink is centred within 6 px of the column's middle while the name starts at
-  its left edge.
+- **the value is centred inside the hole, the name is not** — the four values have to read as
+  four objects, so the value's ink is centred within 2 px of the column's middle while the
+  name starts at its left edge. The value is sampled **by row**, over the 9 rows its glyphs
+  occupy, not through a circle: a radial window at the hole's radius catches the stroke's
+  rounded shoulder once the stroke is thick, and read a centre of 25 against 31.
+- **the value fits inside the hole** — its measured width against the **chord** at glyph
+  height, 35 px, which is what bounds the stroke at 5 px and the EDIT page's text format at
+  seconds with three decimals.
 - **the ENV page has an arc under all four knobs** — a page that leaks a knob from the page
   before it is visible here.
+- **the stroke carries no pinholes** — the background is flood-filled from outside each
+  knob's box; anything still background, inside it, unreachable from the edge and inside the
+  stroke's own radial band is a hole. 8-connected, because a 4-connected flood splits a
+  diagonal contact and over-reports holes a person cannot see. `r_lo = 18.5` excludes the
+  glyphs' own counters -- the hole inside a "6" is the letter, not a defect. **This check
+  exists because the art shipped with 6 holes per knob:** drawing the stroke as five 1 px
+  Bresenham chains cannot tile a 5 px band. Putting the old five-chain drawing back fails all
+  four values at 6 px each.
 
-Three mistakes this file made about itself, all found by the checks failing on correct
+Five mistakes this file made about itself, all found by the checks failing on correct
 code: it computed the knob's centre from the source and was 3.5 px off (the band's canvas
 origin is not where the reading assumed); it counted ink over the whole band, where the
-value's text shares the fill's colour; and it expected the ENV page's arcs to be drawn in
-`sk.ink`, when a page's knobs are lit and fill at `sk.ink_hi`. The centre is now measured
-by a circle fit (31.5, 224.5) and recorded, the counts are taken inside an annulus, and the
-mask includes all three brightnesses.
+value's text shares the fill's colour; it expected the ENV page's arcs to be drawn in
+`sk.ink`, when a page's knobs are lit and fill at `sk.ink_hi`; it took the value's ink
+through a radial window at r = 19, which is the stroke's own innermost radius at a 5 px
+stroke, so it measured the ring; and it computed the hole's chord with the font's cell
+height of 15 px instead of the 9 rows its glyphs actually ink, which read as "a 5 px stroke
+cannot fit the widest value" when it does. The centre is measured by a circle fit
+(31.5, 216.0) and recorded, the value is sampled by row, and the chord uses the measured
+glyph height.
 
 ### 9g. The panel, as built
 

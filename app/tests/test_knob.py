@@ -113,24 +113,21 @@ shots = {v: img(D, f"v{v}.png") for v in VALS}
 # ── 1. the arc is a ring with a gap, and the gap is at the bottom ───────────────
 # A ring with no gap loses the only cue for where the range starts and ends. A gap
 # somewhere other than the bottom makes the control read as rotated.
-# The knob's centre, in screen coordinates.
+# The knob's centre, in screen coordinates, and the radius band the art lives in.
 #
-# Measured, by a least-squares circle fit over the arc's own pixels (v=0, column 0):
-# centre (31.43, 224.55), radius 10.01. cx matches app.c's `col_x + w/2` = 4 + 27 = 31.
-#
-# cy does NOT match the obvious reading of the source, and that is worth writing down:
-# `cy = y + 34 + KNOB_ARC_BOX/2 - 2` with y = KNOB_TOP = 4 gives 176 + 34 + 13 - 2 = 221,
-# 3.5 px above where the arc actually is. The reason is that the KNOB band's canvas
-# starts at SCOPE_H + MAT_H = 176 and the knob's `y` argument is KNOB_TOP = 4 INSIDE that
-# canvas, so the sum is 176 + 4 + 34 + 11 = 225, not 176 + 34 + 11. Deriving the centre
-# from the source and trusting it made a correct arc fail its own span check, which is
-# exactly the class of mistake this file exists to catch -- so the centre is measured and
-# the source reading is recorded as the thing that was wrong.
+# Measured, not derived: the ring was widened from R=11 to R=23 when the value moved
+# inside it, and the centre moved with it. `cy = KNOB_ARC_TOP + KNOB_ARC_R` with
+# KNOB_ARC_TOP = KNOB_TOP + 17 = 17 gives 40 on the band, 176 + 40 = 216 on screen. That
+# one agrees with the source now -- the earlier disagreement (source said 221, pixels said
+# 224.5) was an arithmetic slip in the reading, recorded in spec.md 9i, and re-deriving it
+# here rather than carrying the old measured value is the point: the geometry changed, so
+# the measurement had to be redone.
 CX = 31.5
-CY = 224.5
+CY = 216.0
+R0, R1 = 20.0, 26.5     # the stroke's own radii (23 and 22), plus the pointer's plinth
 
 
-def annulus(a, colour, r0=9.0, r1=14.0, tol=6):
+def annulus(a, colour, r0=R0, r1=R1, tol=6):
     """Angles present on the ring at radius r0..r1 -- the arc, without the text."""
     m = near(a, colour, tol)
     out = set()
@@ -177,7 +174,7 @@ def ink_counts(a):
         c = 0
         for y, x in zip(ys, xs):
             r = math.hypot(x - CX, y - CY)
-            if 9.0 <= r <= 14.0:
+            if R0 <= r <= R1:
                 c += 1
         if acc == "f":
             nf = c
@@ -257,23 +254,47 @@ for v in VALS:
     hit = 0
     for k in range(-30, 31):
         ang = math.radians(k)             # straight down is 0 here
-        for r in (10, 11, 12):
+        for r in (21, 22, 23):
             x = int(CX) + int(round(r * math.sin(ang)))
             y = int(CY) + int(round(r * math.cos(ang)))
             if 0 <= y < a.shape[0] and s[y, x]:
                 hit += 1
     ok(hit == 0, f"the bottom gap is empty at v={v}", f"{hit} ink px inside +-30 deg")
 
-# ── 5. the value is centred under its knob, and the name is not ────────────────
+# ── 5. the value is centred INSIDE the ring, and the name is not ───────────────
 # Four left-aligned strings read as a list; four centred values read as four objects.
+# The value lives in the ring's hole now, so it is sampled at the ring's own middle row
+# band and inside the inner radius -- a rectangle that excludes the stroke on both sides
+# by construction. Reading it at the old y+22 row found the ring's own pixels instead.
 a = shots[64]
-row = a[BAND_Y + 22:BAND_Y + 30, COL_X[0]:COL_X[0] + COL_W]
-ink = near(row, SYNTH_INK) | near(row, SYNTH_BG) & False
-cols = [x for x in range(row.shape[1]) if ink[:, x].any()]
-ok(bool(cols) and abs((cols[0] + cols[-1]) / 2 - COL_W / 2) <= 6,
+ccx = COL_X[0] + COL_W // 2
+# Sample the value by ROW, not through a circle. A radial window cannot work once the
+# stroke is thick: at r = 18 the circle still reaches y = cy +- 18, and the 5 px stroke's
+# rounded shoulder lives exactly there, so the window read the ring's own pixels and
+# reported a centre of 25 against 31. The glyphs occupy 9 rows around the middle
+# (measured), and those rows are well inside the hole at every radius that matters.
+hole = []
+for y in range(int(CY) - 4, int(CY) + 5):
+    for x in range(ccx - 22, ccx + 23):
+        if (near(a, SYNTH_INK) | near(a, SYNTH_INK_HI))[y, x] and abs(x - ccx) < 18:
+            hole.append(x)
+ok(bool(hole) and abs((min(hole) + max(hole)) / 2 - ccx) <= 2,
    "the value is centred in its column",
-   f"ink x {cols[0]}..{cols[-1]} of 0..{COL_W - 1}")
-name_row = a[BAND_Y + 4:BAND_Y + 12, COL_X[0]:COL_X[0] + COL_W]
+   f"ink x {min(hole) if hole else '-'}..{max(hole) if hole else '-'} vs centre {ccx}")
+# and it must FIT the hole: the widest string any page prints has to clear the stroke.
+# Measured against the chord at the text's own height (FONT_XS is 15 px tall, so text
+# spans +-7.5 of the middle), not the inner diameter, which is the wider and wrong number.
+# The half-height is MEASURED, not taken from the font: FONT_XS's cell is 15 px but its
+# glyphs put ink on 9 rows (-4..+4 around the middle). Using 7.5 here made the chord 32.7
+# for a 5 px stroke against a 33 px string -- a conflict that does not exist on screen,
+# and the kind of "over" that would have sent the stroke back to 4 px for no reason.
+GLYPH_HALF = 4.5
+hole_r = 23.0 - 5                      # innermost lit radius is 23-4 = 19, clear hole 18
+hole_chord = 2 * math.sqrt(hole_r ** 2 - GLYPH_HALF ** 2)
+widest = (max(hole) - min(hole) + 1) if hole else 0
+ok(widest <= hole_chord, "and the value fits inside the ring's hole",
+   f"{widest} px against a {hole_chord:.0f} px chord")
+name_row = a[BAND_Y + 0:BAND_Y + 12, COL_X[0]:COL_X[0] + COL_W]
 ncols = [x for x in range(name_row.shape[1])
          if (near(name_row, SYNTH_INK) | near(name_row, (238, 137, 24)))[:, x].any()]
 ok(bool(ncols) and ncols[0] <= 3, "the name stays left-aligned in its column",
@@ -295,13 +316,70 @@ for col in COL_X:
     # filled end to end and has no track pixels left at all. Counting the track found
     # 3 of 4, and the missing one was the knob that was working correctly.
     hit = 0
-    for y in range(BAND_Y + 34, BAND_Y + 60):
-        for xx in range(c - 14, c + 15):
-            if ink[y, xx] and math.hypot(xx - c, y - CY) <= 14:
+    for y in range(BAND_Y + 17, BAND_Y + 64):
+        for xx in range(c - 26, c + 27):
+            if ink[y, xx] and R0 <= math.hypot(xx - c, y - CY) <= R1:
                 hit += 1
     if hit > 20:
         n_arcs += 1
 ok(n_arcs == 4, "the ENV page has an arc under each of its four knobs", f"{n_arcs}/4")
+
+# ── 7. the stroke has no pinholes in it ───────────────────────────────────────
+# This is the check that was missing when the art shipped with holes. A ring drawn as
+# separate 1 px Bresenham chains per radius (the first 5 px stroke) does not tile the
+# band: each chain rounds its own way and two neighbours can straddle a pixel, so the
+# background shows through the stroke. Measured on the host at the time: 6 enclosed
+# background pixels per knob at r = 19.8 .. 21.9, and they looked like exactly what they
+# were -- specks of the background colour inside the ring. Two chains (the earlier 2 px
+# stroke) almost always touch, which is why nobody saw it until the stroke got thick.
+#
+# So: flood the background from outside each knob's box, and anything still background
+# AND inside it that is not reachable from the edge is a hole in the stroke. Counted over
+# the stroke's own radial band, because the glyphs have counters of their own -- the hole
+# inside a "6" or a "4" is the letter, not a defect, and counting those would make this
+# check fail for the wrong reason.
+from collections import deque
+
+
+def stroke_holes(a, cx, cy, r_lo, r_hi):
+    bg = near(a, SYNTH_BG)
+    lit = ~bg
+    x0, y0 = cx - 25, cy - 25
+    sub = lit[y0:cy + 26, x0:cx + 26]
+    h, w = sub.shape
+    outside = np.zeros_like(sub)
+    q = deque()
+    for x in range(w):
+        for y in (0, h - 1):
+            if not sub[y, x] and not outside[y, x]:
+                outside[y, x] = True
+                q.append((y, x))
+    for y in range(h):
+        for x in (0, w - 1):
+            if not sub[y, x] and not outside[y, x]:
+                outside[y, x] = True
+                q.append((y, x))
+    # 8-connected: two background pixels touching at a corner are one gap to the eye, and
+    # a 4-connected flood over-reports holes that a person cannot see.
+    near8 = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+    while q:
+        y, x = q.popleft()
+        for dy, dx in near8:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w and not sub[ny, nx] and not outside[ny, nx]:
+                outside[ny, nx] = True
+                q.append((ny, nx))
+    enclosed = (~sub) & (~outside)
+    ys, xs = np.nonzero(enclosed)
+    return sum(1 for yy, xx in zip(ys, xs)
+               if r_lo <= math.hypot(x0 + xx - cx, cy - (y0 + yy)) <= r_hi)
+
+
+for v in VALS:
+    a = shots[v]
+    n = stroke_holes(a, int(CX), int(CY), 18.5, 24.0)
+    ok(n == 0, f"the stroke has no pinholes at cut {v}", f"{n} enclosed background px")
+
 
 print(f"\n{checks} checks, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -246,7 +246,11 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  *
  * So: content first, height second, and the sum is checked by an assertion below.
  */
-#define KNOB_TOP   4                                  /* knob(): where its ink starts */
+/* The name starts at the band's own first row. It used to start 4 px down, which was
+ * affordable while the value had two rows under it; with the ring taking 47 of the 64 px,
+ * those 4 px are exactly what pushed the ring's bottom edge past the band (measured:
+ * cy + 23 = 67 against a 64 px band, so the last four rows of every ring were clipped). */
+#define KNOB_TOP   0                                  /* knob(): where its ink starts */
 #define KNOB_INK   (KNOB_TOP + 34 + 8)                /* label, value, bar = 46 px */
 #define KNOB_H     64                                 /* the 46 px of text plus a 26 px arc
                                                        * box: the bar is gone, see knob_arc() */
@@ -1243,15 +1247,38 @@ static char *pos_text(uint8_t slot, uint32_t at)
     static uint8_t turn;
     char *b = ring[turn++ % 4];
     uint32_t rate = smp[slot].rate ? smp[slot].rate : 44100u;
-    uint32_t ms = (uint32_t)((uint64_t)at * 1000u / rate);
-    int n = 0, i = 0;
-    char t[10];
+    /* SECONDS with three decimals, not milliseconds.
+     *
+     * A boundary is a place in the material, and this is that place in the unit a sampler
+     * puts it in. It was `52369ms`, five digits plus the unit, which measured 50 px and no
+     * longer fits anywhere: the value moved INSIDE the knob's ring, and the hole is 37 px
+     * wide at the text's own height (a chord at +-7.5 of a 20 px inner radius, not the
+     * inner diameter -- that is the arithmetic this had to be checked against). Seconds
+     * are 33 px at the widest the slots can be, and read as a time rather than a count.
+     *
+     * The divisor is the slot's own rate, so 22.05 kHz material and 44.1 kHz material both
+     * print the wall-clock length you hear.
+     *
+     * Longest case: 12.810 s (a 44.1 kHz slot at the 3.2 s limit is 3.200, and 12.810 is
+     * the 11.025 kHz one). The three decimals are kept because at 128x zoom the window is
+     * 8 samples and a two-decimal millisecond figure would show the same number for
+     * different positions -- a boundary control whose number does not move is broken. */
+    {
+        uint64_t us = (uint64_t)at * 1000000u / rate;
+        uint32_t ip = (uint32_t)(us / 1000000u);
+        uint32_t fp = (uint32_t)(us % 1000000u) / 1000u;   /* milliseconds 0..999 */
+        int n = 0, i2 = 0;
+        char t[10];
 
-    do { t[i++] = (char)('0' + ms % 10); ms /= 10; } while (ms);
-    while (i) b[n++] = t[--i];
-    b[n++] = 'm';
-    b[n++] = 's';
-    b[n] = 0;
+        do { t[i2++] = (char)('0' + ip % 10u); ip /= 10u; } while (ip);
+        while (i2) b[n++] = t[--i2];
+        b[n++] = '.';
+        b[n++] = (char)('0' + fp / 100u);
+        b[n++] = (char)('0' + (fp / 10u) % 10u);
+        b[n++] = (char)('0' + fp % 10u);
+        b[n++] = 's';
+        b[n] = 0;
+    }
     return b;
 }
 
@@ -2220,48 +2247,159 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
  * Drawn with cv_line segments rather than a real arc primitive (platform/ has none, and
  * this file may not add one): 32 segments over 270 deg is 8.4 deg each, and at r=11 that
  * is a 1.6 px step, so the arc reads smooth at this size. */
-#define KNOB_ARC_R     11
-#define KNOB_ARC_BOX   26
+/* The band was 64 px tall for a reason, and the small arc was not using it. The value goes
+ * INSIDE the ring now, which frees the two text rows under the name and lets the ring have
+ * the rest of the band: R = 23 instead of 11, four times the area.
+ *
+ *      name                     y + 0    (FONT_XS, 15 px tall)
+ *      ring                     y + 17 .. y + 63
+ *      value, centred inside    the ring's middle row
+ *
+ * R = 23 is the measured maximum, not a round choice: the band is 64, the name takes 15,
+ * two pixels of air make 17, and 64 - 17 = 47 gives (47 - 1) / 2 = 23 so the ring's stroke
+ * lands on rows 17..63 exactly. A 23 px radius inside a 54 px column leaves 4 px either
+ * side, so two adjacent rings never touch.
+ *
+ * The value has to fit the hole, and the hole is not the inner diameter: FONT_XS is 15 px
+ * tall, so text is a chord at +-7.5 from the middle, where the ring is narrower. With
+ * R - 3 inner radius that chord is 39 px, against the widest value string in the app at
+ * 32 px ("0.001s"). Measured, not eyeballed, because "-Dw" is the one thing this layout
+ * cannot do. */
+#define KNOB_ARC_R     23
+#define KNOB_ARC_BOX   (2 * KNOB_ARC_R + 1)       /* 47: ring plus its own stroke */
+#define KNOB_ARC_TOP   (KNOB_TOP + 17)            /* 21 on the band, 197 on screen */
 #define KNOB_ARC_SEGS  32
-#define KNOB_ARC_THICK 2                          /* px: two radii, so the stroke survives */
+/* FIVE pixels of stroke. It was two, which at R=23 read as a thin hairline: the ring is
+ * 145 px of circumference and 2 px of it is 1.4 % of the visible arc, so the value was
+ * carried almost entirely by the tick. Three was tried on paper and five was asked for.
+ *
+ * The cost is the hole, and the hole is measured against the widest value string rather
+ * than guessed: stroke 5 puts the innermost lit radius at 19, the hole's clear radius at
+ * 18, and FONT_XS's glyphs occupy 9 rows (measured: ink on y = -4..+4 around the middle,
+ * not the font's full 15 px cell). The chord at +-4.5 is 34.9 px, against 33 px for the
+ * widest string the app can print ("12.810s"). Four pixels of margin, and thickness 6
+ * would be 32.8 -- one pixel short of the text. This is the thickest stroke that fits. */
+#define KNOB_ARC_THICK 5                          /* px: radii 23, 22, 21, 20, 19 */
 #define KNOB_ARC_SPAN  (0.75f * FM_TWO_PI)        /* 270 deg: three quarters of a turn */
 
-/* One segment of the arc, from `a0` to `a1` radians. Angle 0 points UP and grows
- * clockwise, so the drawing reads as the knob does. The 3 px stroke is a second line
- * offset one pixel along the radius's normal at the midpoint -- cheaper than a real
- * thick-line routine and exact enough at r=11. */
-static void knob_arc_seg(int32_t cx, int32_t cy, float a0, float a1, uint16_t c)
+/* ── the ring's trigonometry is a table ──────────────────────────────────────
+ *
+ * The arc's angles are compile-time constants: 32 segments of a fixed 270 degrees at a
+ * fixed radius, drawn every frame on a page that redraws at the UI rate. Computing that
+ * with fm_sinf/fm_cosf cost 260 calls a frame for four knobs (32 segments x 2 radii x 2
+ * ends x 2 functions, plus the pointer), which is 4 x 13 multiply-adds of a degree-13
+ * minimax polynomial to produce the same coordinates forever.
+ *
+ * 129 entries of int8 sin and cos, quarter of a pixel at R = 23 (measured worst error
+ * 0.086 px), 258 B of flash. The table is indexed by SEGMENT, not by angle: segment k
+ * starts at table[k] and ends at table[k+1], so the compiler can fold the two adjacent
+ * segments' shared point into one lookup and no interpolation is needed anywhere.
+ *
+ * fm_tanf is unaffected -- it is sin(x)/sin(pi/2-|x|), not a series, and it is used by
+ * the filter, where a table would have to interpolate to stay quiet. */
+#define KNOB_TRIG_N    128
+static const int8_t knob_sin[KNOB_TRIG_N + 1] = {
+     -90,  -93,  -96,  -99, -102, -105, -107, -110, -112, -114, -116, -118, -120, -121, -122, -124,
+    -125, -125, -126, -127, -127, -127, -127, -127, -126, -126, -125, -124, -123, -122, -121, -119,
+    -117, -115, -113, -111, -109, -106, -104, -101,  -98,  -95,  -92,  -89,  -85,  -82,  -78,  -74,
+     -71,  -67,  -63,  -58,  -54,  -50,  -46,  -41,  -37,  -32,  -28,  -23,  -19,  -14,   -9,   -5,
+       0,    5,    9,   14,   19,   23,   28,   32,   37,   41,   46,   50,   54,   58,   63,   67,
+      71,   74,   78,   82,   85,   89,   92,   95,   98,  101,  104,  106,  109,  111,  113,  115,
+     117,  119,  121,  122,  123,  124,  125,  126,  126,  127,  127,  127,  127,  127,  126,  125,
+     125,  124,  122,  121,  120,  118,  116,  114,  112,  110,  107,  105,  102,   99,   96,   93,
+      90,
+};
+
+static const int8_t knob_cos[KNOB_TRIG_N + 1] = {
+     -90,  -86,  -83,  -79,  -76,  -72,  -68,  -64,  -60,  -56,  -51,  -47,  -43,  -38,  -34,  -29,
+     -25,  -20,  -16,  -11,   -6,   -2,    3,    8,   12,   17,   22,   26,   31,   35,   40,   44,
+      49,   53,   57,   61,   65,   69,   73,   77,   81,   84,   88,   91,   94,   97,  100,  103,
+     106,  108,  111,  113,  115,  117,  118,  120,  122,  123,  124,  125,  126,  126,  127,  127,
+     127,  127,  127,  126,  126,  125,  124,  123,  122,  120,  118,  117,  115,  113,  111,  108,
+     106,  103,  100,   97,   94,   91,   88,   84,   81,   77,   73,   69,   65,   61,   57,   53,
+      49,   44,   40,   35,   31,   26,   22,   17,   12,    8,    3,   -2,   -6,  -11,  -16,  -20,
+     -25,  -29,  -34,  -38,  -43,  -47,  -51,  -56,  -60,  -64,  -68,  -72,  -76,  -79,  -83,  -86,
+     -90,
+};
+static int32_t knob_cx(int32_t v, int32_t k) { return (int32_t)knob_cos[k] * v / 127; }
+static int32_t knob_sy(int32_t v, int32_t k) { return (int32_t)knob_sin[k] * v / 127; }
+
+/* x where the edge (x0,y0)-(x1,y1) crosses row y, rounded to nearest. The caller skips
+ * horizontal edges, so y1 != y0 always. */
+static int32_t knob_edge_x(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t y)
 {
-    /* Two radii, not one line beside another. The first version drew the segment and then
-     * "thickened" it by nudging the start point one pixel along the segment's own
-     * direction -- which is the line's direction, not the stroke's, so the second line
-     * landed on top of the first and the arc came out 1 px thick (measured: every row of
-     * the control's ring had exactly one lit pixel). A stroke is a second radius. */
-    int32_t i;
-    for (i = 0; i < KNOB_ARC_THICK; i++) {
-        int32_t r = KNOB_ARC_R - i;
-        int32_t x0 = cx + (int32_t)(0.5f + (float)r * fm_sinf(a0));
-        int32_t y0 = cy - (int32_t)(0.5f + (float)r * fm_cosf(a0));
-        int32_t x1 = cx + (int32_t)(0.5f + (float)r * fm_sinf(a1));
-        int32_t y1 = cy - (int32_t)(0.5f + (float)r * fm_cosf(a1));
-        cv_line(x0, y0, x1, y1, c);
+    int32_t num = (y - y0) * (x1 - x0), den = y1 - y0;
+    if (den < 0) { den = -den; num = -num; }
+    if (den == 0) return x0;                 /* horizontal: either end will do */
+    return x0 + (num >= 0 ? (num + den / 2) / den : (num - den / 2) / den);
+}
+
+/* One segment of the ring, FILLED between the inner and the outer radius.
+ *
+ * The first version traced KNOB_ARC_THICK separate 1 px Bresenham chains, one per radius,
+ * and that is what left the pinholes: measured on the host, a finished ring enclosed 6
+ * background pixels at r = 19.8 .. 21.9 -- between two of those chains, not in the bottom
+ * gap and not at a segment join. Chains 1 px apart do not tile a 5 px band, because each
+ * one rounds its own way and two neighbours can straddle a pixel. Two chains (the original
+ * 2 px stroke) almost always end up touching, which is why no hole was visible until the
+ * stroke got thick. It is not the trigonometry table: the table is exact at the 128
+ * segment ends, and the old sine version would have holed the same way at this width.
+ *
+ * So the stroke is covered the way a rasteriser covers a shape: the segment is the quad
+ * between (inner[k], outer[k]) and (inner[k+1], outer[k+1]), and that quad is filled row
+ * by row. Consecutive segments share an edge, so there is no seam left to hole. */
+static void knob_arc_seg(int32_t cx, int32_t cy, int32_t k0, int32_t k1, uint16_t c)
+{
+    const int32_t ro = KNOB_ARC_R, ri = KNOB_ARC_R - KNOB_ARC_THICK + 1;
+    const int32_t ax = cx + knob_sy(ri, k0), ay = cy - knob_cx(ri, k0);   /* inner, k0 */
+    const int32_t bx = cx + knob_sy(ro, k0), by = cy - knob_cx(ro, k0);   /* outer, k0 */
+    const int32_t dx = cx + knob_sy(ro, k1), dy = cy - knob_cx(ro, k1);   /* outer, k1 */
+    const int32_t ex = cx + knob_sy(ri, k1), ey = cy - knob_cx(ri, k1);   /* inner, k1 */
+    int32_t y, y0 = ay, y1 = ay;
+
+    if (by < y0) y0 = by;
+    if (dy < y0) y0 = dy;
+    if (ey < y0) y0 = ey;
+    if (by > y1) y1 = by;
+    if (dy > y1) y1 = dy;
+    if (ey > y1) y1 = ey;
+
+    for (y = y0; y <= y1; y++) {
+        int32_t lo = 0x7fffffff, hi = -0x7fffffff, x;
+        /* the four edges, each one only where it actually spans this row */
+        /* CLOSED at both ends. The first version used the usual half-open interval
+         * (min <= y < max), which is right for a general polygon but wrong here: at the
+         * 12 o'clock vertex every edge of the quad is horizontal or ends exactly on that
+         * row, so no edge claimed it and the top of the ring kept a 1 px background dot
+         * at every value (measured: `FFFFFFFFFF.FFFFFFFFFF` on row 197 of the host shot).
+         * Painting a row twice costs one extra compare; painting it never is a hole. */
+        if (ay <= y && y <= ey) { x = knob_edge_x(ax, ay, ex, ey, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (ey <= y && y <= dy) { x = knob_edge_x(ex, ey, dx, dy, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (dy <= y && y <= by) { x = knob_edge_x(dx, dy, bx, by, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (by <= y && y <= ay) { x = knob_edge_x(bx, by, ax, ay, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        /* and the reversed windings, for the segments either side of 0 degrees */
+        if (ey <= y && y <= ay) { x = knob_edge_x(ex, ey, ax, ay, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (dy <= y && y <= ey) { x = knob_edge_x(dx, dy, ex, ey, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (by <= y && y <= dy) { x = knob_edge_x(bx, by, dx, dy, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (ay <= y && y <= by) { x = knob_edge_x(ax, ay, bx, by, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (lo <= hi)
+            cv_rect(lo, y, hi - lo + 1, 1, c);
     }
 }
 
-/* The knob itself: track, filled arc, pointer. `v` is 0..127, `c` the filled colour. */
 static void knob_arc(int32_t cx, int32_t cy, int32_t v, uint16_t c, uint16_t track)
 {
-    const float start = -0.5f * KNOB_ARC_SPAN;    /* lower left */
-    float frac = (float)(v < 0 ? 0 : v > 127 ? 127 : v) * (1.0f / 127.0f);
-    float swept = KNOB_ARC_SPAN * frac;
-    int32_t i;
+    /* Which segment the fill ends on, in table units: 0..KNOB_TRIG_N. Integer arithmetic
+     * all the way, because the answer only ever needs to pick a segment and a float
+     * comparison against a segment boundary is how the fill ended up 82, 83, 83, 83 in an
+     * earlier draft. */
+    const int32_t fill_end = (v < 0 ? 0 : v > 127 ? 127 : v) * KNOB_TRIG_N / 127;
+    int32_t k;
 
-    for (i = 0; i < KNOB_ARC_SEGS; i++) {
-        float a0 = start + KNOB_ARC_SPAN * (float)i / (float)KNOB_ARC_SEGS;
-        float a1 = start + KNOB_ARC_SPAN * (float)(i + 1) / (float)KNOB_ARC_SEGS;
-        knob_arc_seg(cx, cy, a0, a1, track);
-        if (KNOB_ARC_SPAN * (float)(i + 1) / (float)KNOB_ARC_SEGS <= swept)
-            knob_arc_seg(cx, cy, a0, a1, c);
+    for (k = 0; k < KNOB_TRIG_N; k++) {
+        knob_arc_seg(cx, cy, k, k + 1, track);
+        if (k < fill_end)
+            knob_arc_seg(cx, cy, k, k + 1, c);
     }
 
     /* The pointer: a short tick ACROSS the arc at the value's angle, not a hand from the
@@ -2271,17 +2409,14 @@ static void knob_arc(int32_t cx, int32_t cy, int32_t v, uint16_t c, uint16_t tra
      * range end" information lives. A tick outward from the arc keeps the gap empty at
      * every value, and it also survives a much smaller radius than a hand does.
      *
-     * It sits on the arc's own radius, one pixel proud of it, so the tick is the brightest
-     * thing on the control and reads as the position at a glance. */
+     * It straddles the stroke rather than sitting just outside it: at R = 23 a tick that
+     * only stuck out would be four pixels of a 145-pixel ring, and the pointer's job is to
+     * be findable before it is to be tidy. */
     {
-        float a = start + swept;
-        int32_t r0 = KNOB_ARC_R - KNOB_ARC_THICK + 1;
+        int32_t r0 = KNOB_ARC_R - KNOB_ARC_THICK;
         int32_t r1 = KNOB_ARC_R + 2;
-        int32_t x0 = cx + (int32_t)(0.5f + (float)r0 * fm_sinf(a));
-        int32_t y0 = cy - (int32_t)(0.5f + (float)r0 * fm_cosf(a));
-        int32_t x1 = cx + (int32_t)(0.5f + (float)r1 * fm_sinf(a));
-        int32_t y1 = cy - (int32_t)(0.5f + (float)r1 * fm_cosf(a));
-        cv_line(x0, y0, x1, y1, c);
+        cv_line(cx + knob_sy(r0, fill_end), cy - knob_cx(r0, fill_end),
+                cx + knob_sy(r1, fill_end), cy - knob_cx(r1, fill_end), c);
     }
 }
 
@@ -2291,14 +2426,19 @@ static void knob_c(int32_t x, int32_t y, int32_t w, const char *name, const char
     uint16_t c = hue ? hue : (lit ? sk.ink_hi : sk.ink);
     uint16_t cv = hue ? hue : (lit ? sk.acc : sk.ink);
     int32_t cx = x + w / 2;
-    int32_t cy = y + 34 + KNOB_ARC_BOX / 2 - 2;
+    int32_t cy = KNOB_ARC_TOP + KNOB_ARC_R;   /* 21 + 23 = 44 on the band */
 
+    /* the name on top, then the ring, then the value INSIDE the ring.
+     *
+     * The value used to sit under the name and above a bar, then under the name above a
+     * small arc. Inside the ring is the layout the 64 px band was always tall enough for:
+     * the ring gets 47 of the 64 px and the value needs no row of its own, so the ring is
+     * four times the area it had. It is centred in the hole, which is where a knob's number
+     * belongs -- at the knob's middle, not at its left edge, or four values of different
+     * lengths read as four left-aligned strings instead of four objects. */
     cv_text(x, y, &FONT_XS, name, c);
-    /* the value, centred under the name: a knob's number belongs to the knob's middle,
-     * not to its left edge, or four different-length values look like four left-aligned
-     * strings and the row stops reading as four objects. */
-    cv_text(cx - txt_w(val) / 2, y + 18, &FONT_XS, val, cv);
     knob_arc(cx, cy, v127, hue ? hue : (lit ? sk.ink_hi : sk.ink), dim(sk.ink, 1, 5));
+    cv_text(cx - txt_w(val) / 2, cy - FONT_XS.h / 2, &FONT_XS, val, cv);
 }
 
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
