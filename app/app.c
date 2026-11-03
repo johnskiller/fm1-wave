@@ -3568,7 +3568,13 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
         knob(120, KNOB_TOP, 54, "TYPE",   FTYPE_NAME[k_ftype],
              (int32_t)k_ftype * 127 / (WV_FTYPE_N - 1), 1);
-        knob(178, KNOB_TOP, 54, "KEY TRK", ktrack_text(k_ktrack), k_ktrack, 1);
+        /* The ring's argument is 0..127, and k_ktrack is PERCENT -- passing the percent
+         * straight in drew 100 % as 100/127 of the arc, a ring that never filled. The
+         * conversion is the page's, not the DSP's, because the DSP's unit is percent and
+         * the ring's unit is a knob position; the two scales meeting in one place is how
+         * they were allowed to disagree. */
+        knob(178, KNOB_TOP, 54, "KEY TRK", ktrack_text(k_ktrack),
+             (int32_t)k_ktrack * 127 / 100, 1);
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);

@@ -62,16 +62,23 @@ def ink_px(b, rgb, tol=6):
     return int(np.all(np.abs(b.astype(int) - np.array(rgb)) <= tol, axis=2).sum())
 
 
-def arc_fill(b, x0, w):
-    """How far round the ring is lit, as the furthest lit column from the left edge.
+def arc_fill(b, x0, w, fill_rgb, track_rgb, tol=4):
+    """The ring's fill and its dim track, counted by exact colour.
 
-    The ring is drawn with the source's ink at full strength above the fill and a dim
-    track below it. Counting lit pixels in the knob's own 54 px column is enough to tell
-    an empty arc from a full one without modelling the geometry again.
+    Measuring "anything bright" was the first attempt and it was wrong twice over: it
+    counted the value text in the hole and the anti-aliased edge, so a full ring read
+    HIGHER than the reference full ring in another column. The ring draws its track in
+    one known colour and its fill in another, and on the FX page the counted knob is lit
+    (ink_hi) while CUT is not (ink), so the two must be told apart by colour, not by
+    brightness.
+
+    Returns (fill_px, track_px). Their sum is constant for a given knob, which is what
+    makes "the fill grew" mean "the track shrank" rather than "something got brighter".
     """
-    col = b[:, x0:x0 + w, :]
-    lit = ((col[:, :, 0] > 60) | (col[:, :, 1] > 60) | (col[:, :, 2] > 60)).sum(axis=1)
-    return int(lit.sum())
+    reg = b[17:64, x0:x0 + w, :].astype(int)
+    fill = int(np.all(np.abs(reg - np.array(fill_rgb)) <= tol, axis=2).sum())
+    track = int(np.all(np.abs(reg - np.array(track_rgb)) <= tol, axis=2).sum())
+    return fill, track
 
 
 def main():
@@ -205,11 +212,24 @@ shot type_hp.png
         return p
     ks = [np.array(Image.open(last(x)).convert("RGB"))[176:240, :, :]
           for x in (f0, f25, f100)]
-    # the KEY TRK knob is the fourth: x 178..232
-    a0, a25, a100 = (arc_fill(k, 178, 54) for k in ks)
-    print(f"  KEY TRK ring lit px: 0%% {a0}, 25%% {a25}, 100%% {a100}")
-    ck(a0 < a25 < a100, "the KEY TRK ring fills with the setting, not with the detent")
-    ck(a100 > a0 * 1.5, "100 % is visibly more arc than 0 %")
+    # the KEY TRK knob is the fourth: x 178..232. On the FX page it is lit, so the fill
+    # is ink_hi and the unused part of the ring is the dim track.
+    INK_HI = (255, 186, 65)
+    TRACK = (41, 24, 0)
+    pairs = [arc_fill(k, 178, 54, INK_HI, TRACK) for k in ks]
+    (f0, t0), (f25, t25), (f100, t100) = pairs
+    print(f"  KEY TRK ring: 0%% fill {f0} track {t0}, 25%% fill {f25} track {t25}, "
+          f"100%% fill {f100} track {t100}")
+    ck(f0 < f25 < f100, "the KEY TRK ring fills with the setting, not with the detent")
+    # The bug this exists for: k_ktrack is PERCENT and the ring's argument is 0..127, so
+    # passing the percent straight through drew 100 % as 78 % of the arc and the ring
+    # never filled. "100 % leaves no track" is the assertion that catches it.
+    ck(t100 == 0, "100 % key tracking leaves no unfilled track")
+    ck(f100 > f0 * 10, "100 % is a full ring against 0 %'s empty one")
+    # NOT asserted: that fill + track is a constant. Measured 497 / 498 / 497, and the
+    # one-pixel wobble is the value text in the hole -- "100%" is wider than "0%" and
+    # clips a pixel of the ring's inner edge. An assertion with no margin for that would
+    # be a check on the font rather than on the ring.
 
     # ── the record carries both fields across a reboot ──────────────────────────
     # This is the check that fails when a field is added to save_rec and forgotten in
