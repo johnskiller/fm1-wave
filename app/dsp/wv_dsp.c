@@ -495,6 +495,12 @@ void wv_note_off(wv_state *s, uint8_t note)
         if (s->v[i].active && s->v[i].note == note) {
             s->v[i].estage = WV_EG_RELEASE;        /* from any stage: see eg_step */
             s->v[i].target = 0.0f;                 /* the render frees it below the floor */
+            /* The material leaves the loop with the envelope. Without this a released
+             * note keeps wrapping inside [loop_start, loop_end) while it fades, so the
+             * release plays a fragment over and over instead of the tail that was
+             * recorded after the loop. The panel's own pictures hide it -- the head
+             * stays between the loop marks, which is exactly what a held note does. */
+            s->v[i].rd.release = 1u;
         }
 }
 

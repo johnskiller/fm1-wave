@@ -479,6 +479,70 @@ key 12 up
     wraps = sum(1 for a, b2 in zip(heads, heads[1:]) if b2 < a - 20)
     ck(wraps >= 1, f"the head wraps inside the loop instead of running to END: {heads}")
 
+    print("release leaves the loop and rings on to END")
+    # A loop is a sustain. When the key comes up the note has an envelope to run out and
+    # the material should follow it out -- wrapping through the release fades a fragment
+    # of the sample over and over instead of letting the recorded tail ring.
+    def rel_scene(rel_ms, name):
+        return """wait 400
+press ENV
+wait 60
+release ENV
+wait 200
+turn K4 120
+wait 100
+press ENV
+wait 60
+release ENV
+wait 100
+press SEL
+wait 60
+release SEL
+wait 200
+press EDIT
+wait 60
+release EDIT
+wait 200
+turn PRESET 1
+wait 60
+turn K2 60
+wait 60
+turn K3 -80
+wait 60
+key 12 down
+wait 1300
+key 12 up
+wait %d
+shot %s.png
+""" % (rel_ms, name)
+    rel = []
+    for d in (20, 120, 320, 450):
+        run(rel_scene(d, "rl%d" % d), out)
+        rel.append(head_col(band_full(os.path.join(out, "rl%d.png" % d))))
+    ck(all(h is not None for h in rel), f"the head is still drawn through the release: {rel}")
+    ck(rel == sorted(rel) and rel[-1] > rel[0] + 20,
+       f"the head walks forward through the release: {rel}")
+    ck(rel[-1] > want_hi + 10,
+       f"and it passes LOOP E ({want_hi}) on its way to END: {rel}")
+
+    print("EDIT does nothing outside SMPL")
+    # EDIT used to switch the source to SMPL from anywhere, on the argument that a
+    # button doing nothing is a broken button. In use that was worse: EDIT sits beside
+    # the pages a player presses, and a stray press replaced the source and repainted
+    # the whole screen.
+    for from_src, presses in (("SYNTH", 0), ("GRAN", 2)):
+        o = run("""wait 400
+%s
+press EDIT
+wait 80
+release EDIT
+wait 150
+expect src %d
+expect edit 0
+""" % ("\n".join(["press SEL\nwait 80\nrelease SEL\nwait 150"] * presses),
+      0 if from_src == "SYNTH" else 2), out, allow_fail=True)
+        ck(expect_ok(o), f"EDIT in {from_src} leaves the source alone:\n{o.strip()[-200:]}")
+
     print("the four boundaries are four colours, and the playhead is not one of them")
     # Four identical green lines were the page's real defect: it worked and could not be
     # read. Each boundary now has its own hue and its own knob is printed in it, so this

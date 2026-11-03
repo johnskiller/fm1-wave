@@ -204,7 +204,13 @@ made `touch_poll` dead code.
 
 ---
 
-### `B_EDIT` — the SMPL edit page
+**`B_EDIT` — the SMPL edit page**
+
+EDIT does nothing outside SMPL. It used to switch the source to SMPL from SYNTH and
+GRAN, on the argument that a button which does nothing is a broken button — but EDIT sits
+beside the pages a player actually presses, and a stray press replaced the source and
+repainted the whole screen. A button that does nothing where it does not apply is quieter
+than one that changes what the instrument is.
 
 | | K1 | K2 | K3 | K4 | SELECT | ALGO | PRESET |
 |---|---|---|---|---|---|---|---|
@@ -223,6 +229,14 @@ edit. It is the fourth of the mutually exclusive pages.
 **Path A, one region and one loop.** The slot is not chopped into pieces. There is one
 `start`–`end` span that sounds, and inside it one `loop_s`–`loop_e` span that repeats
 when LOOP is on.
+
+**Release leaves the loop.** A loop is a sustain: while the key is held the reader wraps
+inside LOOP S..LOOP E forever. On note-off the loop retires and the reader walks on to
+END, so the release fades the tail that was recorded after the loop instead of a fragment
+of it over and over. A short release ends the note inside a few milliseconds and this is
+invisible; a long one is not, and neither is the picture — the head crosses LOOP E and
+keeps going. Measured from a loop at 59..152 px with a 1.2 s release: the head reads 132,
+142, 161, 174 at 20 / 120 / 320 / 450 ms after the key came up.
 
 **The region and the loop are two pairs, and the engine takes them separately.** A held
 note walks in from START and then repeats inside the loop — the intro-plus-sustain that

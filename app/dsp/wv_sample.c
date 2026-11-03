@@ -98,6 +98,7 @@ void wv_reader_start(wv_reader *r, const wv_sample *s, uint32_t offset, float in
     r->end = -1;
     r->loop_start = -1;
     r->loop_end = -1;
+    r->release = 0;
     r->done = 0;
 }
 
@@ -133,7 +134,16 @@ float wv_reader_next(wv_reader *r, const wv_sample *s, int *done)
     }
 
     if (r->dir > 0) {
-        if (r->loop_end > 0) {
+        /* A release leaves the loop.
+         *
+         * While the key is held the reader is a sustain: it wraps inside
+         * [loop_start, loop_end) forever, which is the whole point of a loop. When the
+         * key comes up the note has an envelope to run out, and the material should
+         * follow it out -- a loop that keeps wrapping through the release fades a
+         * fragment of the sample instead of letting it ring to its recorded end. So
+         * release retires the loop on the spot and the reader walks on to `end`. The
+         * position is already inside the loop, and from there forward is the tail. */
+        if (r->loop_end > 0 && !r->release) {
             /* wrapped into [loop_start, loop_end): the subtraction form, not a
              * modulo, because the overshoot is normally a fraction of a sample */
             if (r->pos >= (float)r->loop_end) {
@@ -148,7 +158,7 @@ float wv_reader_next(wv_reader *r, const wv_sample *s, int *done)
             return 0.0f;
         }
     } else {
-        if (r->loop_start >= 0) {
+        if (r->loop_start >= 0 && !r->release) {
             if (r->pos < (float)r->loop_start)
                 r->pos += (float)(r->loop_end - r->loop_start);
         } else if (r->pos < 0.0f) {

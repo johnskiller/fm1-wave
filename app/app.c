@@ -983,16 +983,21 @@ static void input(void)
     /* B_EDIT: the sample editor, and the fourth page. It replaced a one-press
      * re-chop: a button that re-analysed the slot and gave no way to see or change
      * what it found was a button that either worked or did not, and the panel has
-     * four knobs going spare in SMPL. EDIT is only meaningful in SMPL, so the button
-     * switches source there rather than doing nothing; in the other two sources it
-     * leaves the source alone. */
+     * four knobs going spare in SMPL. EDIT is only meaningful in SMPL. */
     if (btn_pressed(btn, B_EDIT)) {
-        if (src != SRC_SMPL)
-            src = SRC_SMPL;
-        else
+        /* Only SMPL has anything to edit, and the button does nothing anywhere else.
+         *
+         * It used to switch the source to SMPL from SYNTH and GRAN, on the argument
+         * that a button which does nothing is a broken button. That was wrong in use:
+         * EDIT sits next to the pages a player actually presses, and reaching for one
+         * of them landed on EDIT, which silently replaced the source and the whole
+         * screen's colour. A button that does nothing where it applies is quieter than
+         * one that changes what the instrument is. */
+        if (src == SRC_SMPL) {
             edit_page ^= 1u;
-        if (edit_page)
-            env_page = 0, lfo_page = 0, arp_page = 0;
+            if (edit_page)
+                env_page = 0, lfo_page = 0, arp_page = 0;
+        }
     }
 
     /* The LFO page takes K3 and K4, not K1 and K2.
@@ -3104,6 +3109,9 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "env"))        { *got = env_page; return 1; }
     if (!strcmp(what, "lfo"))        { *got = lfo_page; return 1; }
     if (!strcmp(what, "arp"))        { *got = arp_page; return 1; }
+    /* the fourth page: EDIT is only meaningful in SMPL, so its state is a separate
+     * fact from the source and a test has to be able to read it alone */
+    if (!strcmp(what, "edit"))       { *got = edit_page; return 1; }
     if (!strcmp(what, "arp_on"))     { *got = arp_on(); return 1; }
     if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }
     if (!strcmp(what, "arp_type"))   { *got = k_arp_type; return 1; }

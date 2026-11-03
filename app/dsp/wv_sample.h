@@ -65,6 +65,7 @@ typedef struct {
     int32_t end;                   /* one past the last sample this reader may read; -1: the slot's end */
     int32_t loop_start, loop_end;  /* -1: no loop (a slice plays once) */
     int8_t  dir;                   /* +1 forward; granular reverses grains with -1 */
+    uint8_t release;               /* note off: stop looping, walk on to `end` */
     uint8_t done;                  /* a one-shot reached the end: it stays silent */
 } wv_reader;
 
