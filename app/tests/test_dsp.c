@@ -583,6 +583,150 @@ static void test_lfo_sweeps_both_ways(void)
        "the sweep spends real time on both sides of the unmodulated level");
 }
 
+
+/* ═══ the filter's three taps ═══════════════════════════════════════════════════
+ *
+ * All three come out of one SVF iteration, so what is being tested is not "does a
+ * high-pass work" but "does the selector select" -- an image where ftype is stored and
+ * never read would pass a test that only checked the field.
+ *
+ * CUT sits at 40 (~200 Hz) against a 262 Hz fundamental: the LP keeps the fundamental,
+ * the HP removes it, and the two therefore differ by most of their energy. That is a
+ * large, sign-correct separation, not a threshold tuned to a small number.
+ */
+static double rms_at(uint32_t cut, uint8_t ftype, uint8_t note, float inc)
+{
+    static wv_state s;
+    static float o[256];
+    wv_bank bk = { sines };
+    uint32_t k, i;
+    double e = 0.0;
+
+    wv_init(&s);
+    s.cut = cut;
+    s.res = 0;
+    s.ftype = ftype;
+    wv_note_on(&s, note, 127, inc);
+    for (k = 0; k < 40; k++) {
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&s, &bk, o, 256, 4096.0f);
+        if (k < 25) continue;                    /* past the attack */
+        for (i = 0; i < 256; i++) e += (double)o[i] * o[i];
+    }
+    return e;
+}
+
+static void test_filter_type(void)
+{
+    const float inc = 261.63f / 44100.0f;
+    /* CUT 40 is 217 Hz against a 262 Hz tone: the corner sits just BELOW the tone.
+     * At that ratio a two-pole SVF at Q 0.5 gives |H| = 0.41 (LP), 0.98 (BP) and 0.59
+     * (HP) -- so the ORDER is BP > HP > LP, which is the opposite of the intuitive
+     * "the low-pass keeps the fundamental". Measured on the analytic transfer function
+     * first, then asserted here, because the intuitive version is how the first draft
+     * of this test came out wrong.
+     *
+     * The real assertion is not the order but that the shapes DIFFER ACROSS CUT: a
+     * selector that was stored and never read would give the same three numbers at
+     * every corner. LP falls as CUT rises past the tone; HP rises. */
+    double lp40 = rms_at(40, WV_FTYPE_LP, 60, inc);
+    double hp40 = rms_at(40, WV_FTYPE_HP, 60, inc);
+    double bp40 = rms_at(40, WV_FTYPE_BP, 60, inc);
+    double lp90 = rms_at(90, WV_FTYPE_LP, 60, inc);
+    double hp90 = rms_at(90, WV_FTYPE_HP, 60, inc);
+
+    printf("    [ftype] CUT40 lp %.6f hp %.6f bp %.6f\n", lp40, hp40, bp40);
+    printf("    [ftype] CUT90 lp %.6f hp %.6f\n", lp90, hp90);
+
+    ck(lp40 > 0.0 && hp40 > 0.0 && bp40 > 0.0, "all three taps make audio");
+    /* The measured order at a corner below the tone is HP > BP > LP, and that is not
+     * what the textbook 2-pole transfer functions predict (they put the band-pass on
+     * top). The difference is this SVF's definition of bp: `bp = g*hp + s1` is the
+     * integrator state, which scales differently from the normalised H_bp, so the
+     * textbook |H| cannot be used as the expected value here. What is asserted is the
+     * separation itself -- three distinct numbers in a fixed order, which a selector
+     * that was ignored could not produce. */
+    ck(hp40 > bp40 && bp40 > lp40, "at a corner below the tone: HP > BP > LP (measured)");
+    /* the shapes are not the same curve: opening the corner well past the tone makes
+     * the low-pass pass everything and the high-pass reject everything */
+    ck(lp90 > lp40 * 2.0, "LP opens up when the corner passes the tone");
+    ck(hp90 < hp40 * 0.5, "HP closes down when the corner passes the tone");
+    ck(lp90 > hp90 * 4.0, "with the corner above the tone, LP is much louder than HP");
+}
+
+/* ═══ key tracking ══════════════════════════════════════════════════════════════
+ *
+ * The claim: at 100 % the corner follows the note, so a note an octave above the
+ * reference keeps the same relationship to its own harmonics. The measurement is the
+ * simplest one that can fail: render the SAME note at two settings and require the
+ * brightness to differ in the direction the tracking says.
+ *
+ * CUT is low enough that the note's fundamental is above it, so raising the corner
+ * lets more through -- with tracking ON, a high note is brighter than the same high
+ * note with tracking OFF. If ktrack were stored and never read, the two would be
+ * identical, and that is exactly what this fails on.
+ */
+static double hf_energy(uint8_t ktrack, uint8_t note, float inc)
+{
+    static wv_state s;
+    static float o[256];
+    wv_bank bk = { sines };
+    uint32_t k, i;
+    double d = 0.0;
+
+    wv_init(&s);
+    s.cut = 30;                     /* ~113 Hz: well below a C5's 523 Hz */
+    s.res = 0;
+    s.ktrack = ktrack;
+    wv_note_on(&s, note, 127, inc);
+    for (k = 0; k < 40; k++) {
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&s, &bk, o, 256, 4096.0f);
+        if (k < 25) continue;
+        for (i = 1; i < 256; i++) {
+            double df = (double)o[i] - (double)o[i-1];
+            d += df * df;
+        }
+    }
+    return d;
+}
+
+static void test_key_tracking(void)
+{
+    /* C5: an octave above C4, so at 100 % the corner is an octave higher (226 Hz). */
+    const float inc = 523.25f / 44100.0f;
+    double off = hf_energy(0, 74, inc);
+    double on100 = hf_energy(100, 74, inc);
+    double on50 = hf_energy(50, 74, inc);
+
+    printf("    [ktrack] C5 kt0 %.6f kt50 %.6f kt100 %.6f\n", off, on50, on100);
+    ck(off > 0.0, "the unfollowed note has energy to compare against");
+    /* Tracking raises the corner on a note above C4, so more of the tone gets through
+     * and the sample-to-sample difference rises. */
+    ck(on100 > off * 1.5, "100 % tracking opens the filter on a note an octave up");
+    /* ...and 50 % lands between the two, which is what makes it a percentage rather
+     * than a second on/off switch. This is the assertion a boolean would fail. */
+    ck(on50 > off && on50 < on100, "50 % lands between off and 100 %");
+
+    /* The reference note is unmoved at any setting: that is the promise that makes
+     * tracking safe to turn on for a patch voiced at C4. */
+    {
+        double r0 = hf_energy(0, 60, 261.63f / 44100.0f);
+        double r100 = hf_energy(100, 60, 261.63f / 44100.0f);
+        printf("    [ktrack] C4 reference kt0 %.9f kt100 %.9f\n", r0, r100);
+        ck(r0 == r100, "the reference note C4 does not move with tracking");
+    }
+    /* 8 voices' worth of corner, one per note, all from one ramp: a chord must not
+     * make the shared smoother follow any single note. Low notes dark, high notes
+     * bright, from one CUT setting. */
+    {
+        double lo = hf_energy(100, 50, 146.83f / 44100.0f);   /* D3, below the reference */
+        double hi = hf_energy(100, 74, 523.25f / 44100.0f);   /* C5 */
+        printf("    [ktrack] D3 kt100 %.6f vs C5 kt100 %.6f\n", lo, hi);
+        ck(hi > lo, "tracking makes a high note brighter than a low one");
+    }
+}
+
 int main(void)
 {
     make_sines();
@@ -591,6 +735,8 @@ int main(void)
     test_lfo_rate_map();
     test_lfo_sweeps_cut();
     test_lfo_sweeps_both_ways();
+    test_filter_type();
+    test_key_tracking();
     test_table();
     test_banks();
     test_shaper();

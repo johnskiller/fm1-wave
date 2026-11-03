@@ -49,9 +49,9 @@ flashing one replaces the other.
 
 ```
                     ┌── wavetable osc ──┐
-keys ─► allocation ─┤                   ├─► shaper ─► SVF low-pass ─► VCA ─► mix ─► scope
-       (8 voices)   └── granular ───────┘   (shape,     (cut, res)    (env)
-                     per voice, one of         amount)
+keys ─► allocation ─┤                   ├─► shaper ─► SVF ─► VCA ─► mix ─► scope
+       (8 voices)   └── granular ───────┘   (shape,   (cut,res, (env)
+                     per voice, one of         amount)  type,ktrack)
 ```
 
 One oscillator per voice, and **the oscillator is one of two sources**: a
@@ -389,6 +389,43 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
   = 32 reads per sample, against SYNTH's 8.
 - `WV_GRAINS` is the whole granular budget knob. Lowering it to 2 makes the cloud
   exactly the tiling pair and nothing more.
+
+### 5c2. The filter's tap, and key tracking
+
+Both live on the **FX page** (`B_FX`), which is the panel's spare button doing what
+`panel-map.md` had already pencilled in for it.
+
+**TYPE (K3): LP / HP / BP.** Zavalishin's topology-preserving SVF computes `lp`, `bp`
+and `hp` every sample as intermediate results of one iteration; the voice read `lp`
+and discarded the other two. So the selector is a move out of registers that are live
+anyway — no second filter, no extra arithmetic. Measured at CUT 40 (217 Hz) against a
+262 Hz tone, the three taps give distinctly different output, and the **order is
+HP > BP > LP**, not the textbook BP > HP > LP: this SVF's `bp` is the integrator state
+(`bp = g*hp + s1`), which scales differently from the normalised `H_bp`. The tests
+assert the measured order and the fact that the curves cross as CUT moves (LP rises
+past the tone, HP falls), which is what a selector that was stored and never read
+could not produce.
+
+**KEY TRK (K4): 0 / 25 / 50 / 75 / 100 %.** How far the corner follows the note, in
+percent of one octave of corner per octave played, from **C4 (60)**. At 100 % a note an
+octave up has its corner an octave up; at 0 % every note has the corner the CUT knob
+says. Five settings rather than a 0..127 sweep on purpose: a knob that can land on 37 %
+makes two patches that should match not match.
+
+The ratio is applied as a **multiplier on the shared `cut_z` ramp**, not as a per-voice
+smoother and not as a per-voice frequency. The ratio between two notes is exact either
+way, but only this way keeps one ramp for eight voices — a per-voice smoother would make
+the knob glide at whatever rate the last note set, and re-deriving `g` from a scaled
+frequency would add a `tan()` per voice per sample for the same picture.
+
+Cost: one `fm_exp2f` per voice per block (8 per block, against 2048 voice-samples), and
+one multiply per voice per sample when the setting is on. The chip's FPU divides in
+hardware — `pi32v2 -mcpu=r3 -mfprev1` compiles `a/b` to one instruction and the image
+holds 34 such divides, none calling a helper — so the division this page's arithmetic
+could have added was never the constraint. Only `double` falls back to `__divdf3`.
+
+The reference note is C4, so turning tracking on never moves the note a patch was voiced
+on. Measured: C4's output is bit-identical at 0 % and 100 %.
 
 ### 5d. EDIT — what a deeper edit can actually reach
 

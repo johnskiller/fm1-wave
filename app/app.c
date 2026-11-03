@@ -130,6 +130,19 @@ static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
  * before the LFO existed must sound the same after it. */
 static uint8_t k_lfo_rate = 0, k_lfo_depth = 0;
 static uint8_t lfo_page;
+/* The FX page's two controls: the filter's tap and key tracking.
+ *
+ * TYPE starts at LP and KEY TRK at 0, which is exactly what the voice did before either
+ * existed -- so a patch saved by an older build, and the instrument's own default, both
+ * sound the same after this page appeared. That is the same rule the LFO page followed. */
+static uint8_t k_ftype = WV_FTYPE_LP;
+static uint8_t k_ktrack = 0;          /* 0, 25, 50, 75, 100 */
+static uint8_t fx_page;
+/* key tracking's five settings, in the panel's order. One list, so the panel's detents
+ * and the values save_load accepts can never drift apart. */
+static const uint8_t KT_VALUES[5] = { 0, 25, 50, 75, 100 };
+#define KT_STEPS 5
+static uint8_t kt_index(uint8_t pct); /* the detent for a setting, defined with the table */
 static uint8_t k_morph = 0;
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
  * encoder) so that every other knob stays where it is in every mode. */
@@ -450,6 +463,8 @@ static void ui_apply(void)
     dsp.sh_amount = k_amount;
     dsp.lfo_rate = k_lfo_rate;
     dsp.lfo_depth = k_lfo_depth;
+    dsp.ftype = k_ftype;
+    dsp.ktrack = k_ktrack;
     dsp.morph = k_morph;
     dsp.grain_size = k_grain;
     dsp.spray = k_spray;
@@ -1003,19 +1018,36 @@ static void input(void)
     if (btn_pressed(btn, B_ENV)) {
         env_page ^= 1u;
         if (env_page)
-            lfo_page = 0, arp_page = 0, edit_page = 0;   /* two pages cannot be up at once */
+            lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;   /* two pages cannot be up at once */
+    }
+    /* B_FX: the filter's own page, and the second of the two buttons the panel had
+     * spare (panel-map.md listed it as free, with "filter type" already pencilled in).
+     *
+     * It exists because the filter gained two settings that are not knobs a player turns
+     * while playing: which tap the VCA reads, and how far the corner follows the note.
+     * Both are set once for a patch, which is what a page is for -- and the page is the
+     * only place a Hz figure can honestly be shown, because with key tracking on, the
+     * corner is a different frequency for every note held.
+     *
+     * CUT and RES stay on K1 and K2: the page is about the filter, and a filter page
+     * that moved the two knobs the filter is made of would be the one thing the panel
+     * must not do (the same rule the LFO page follows). */
+    if (btn_pressed(btn, B_FX)) {
+        fx_page ^= 1u;
+        if (fx_page)
+            env_page = 0, lfo_page = 0, arp_page = 0, edit_page = 0;
     }
     if (btn_pressed(btn, B_LFO)) {
         lfo_page ^= 1u;
         if (lfo_page)
-            env_page = 0, arp_page = 0, edit_page = 0;
+            env_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;
     }
     /* B_ARP: the same page mechanism. The panel has had the button since the
      * beginning (plat.h's B_ARP) and nothing used it. */
     if (btn_pressed(btn, B_ARP)) {
         arp_page ^= 1u;
         if (arp_page)
-            env_page = 0, lfo_page = 0, edit_page = 0;
+            env_page = 0, lfo_page = 0, edit_page = 0, fx_page = 0;
     }
     /* B_EDIT: the sample editor, and the fourth page. It replaced a one-press
      * re-chop: a button that re-analysed the slot and gave no way to see or change
@@ -1033,7 +1065,7 @@ static void input(void)
         if (src == SRC_SMPL) {
             edit_page ^= 1u;
             if (edit_page)
-                env_page = 0, lfo_page = 0, arp_page = 0;
+                env_page = 0, lfo_page = 0, arp_page = 0, fx_page = 0;
         }
     }
 
@@ -1082,6 +1114,7 @@ static void input(void)
         }
         else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
         else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else if (fx_page) k_ftype = (uint8_t)((k_ftype + (e > 0 ? 1 : WV_FTYPE_N - 1)) % WV_FTYPE_N);
         else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
@@ -1095,6 +1128,14 @@ static void input(void)
         }
         else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
         else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        /* KEY TRK: five detents, wrapping, not a 0..127 sweep. The setting is a choice
+         * out of five and the DSP test asserts the five values; a continuous knob here
+         * would let the panel produce a 37 % that save_load then refuses to load. */
+        else if (fx_page) {
+            uint8_t i = kt_index(k_ktrack);
+            i = (uint8_t)((i + (e > 0 ? 1 : KT_STEPS - 1)) % KT_STEPS);
+            k_ktrack = KT_VALUES[i];
+        }
         else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
@@ -1434,6 +1475,40 @@ static char *arp_oct_text(uint8_t v)
     b[0] = (char)('0' + (v < 1u ? 1u : v > 4u ? 4u : v));
     b[1] = 'x';
     b[2] = 0;
+    return b;
+}
+
+/* The FX page's two identifiers.
+ *
+ * KEY TRK is stored as 0/25/50/75/100 rather than an index, so the record reads as the
+ * setting a player asked for and save_load can reject anything else. The table is what
+ * turns a detent into the setting, and kt_index() is the way back -- one list, so the
+ * five can never drift apart from the five the DSP validates. */
+static uint8_t kt_index(uint8_t pct)
+{
+    uint8_t i;
+    for (i = 0; i < KT_STEPS; i++)
+        if (KT_VALUES[i] == pct)
+            return i;
+    return 0;                          /* an impossible value reads as off */
+}
+
+static const char *const FTYPE_NAME[WV_FTYPE_N] = { "LP", "HP", "BP" };
+
+/* KEY TRK as the setting itself. Three digits and a sign is the widest string this page
+ * can print ("100%"), which measures inside the ring's 34.9 px chord. */
+static char *ktrack_text(uint8_t pct)
+{
+    static char ring[2][6];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    if (pct >= 100u) {
+        b[0] = '1'; b[1] = '0'; b[2] = '0'; b[3] = '%'; b[4] = 0;
+    } else if (pct >= 10u) {
+        b[0] = (char)('0' + pct / 10u); b[1] = (char)('0' + pct % 10u); b[2] = '%'; b[3] = 0;
+    } else {
+        b[0] = '0'; b[1] = '%'; b[2] = 0;
+    }
     return b;
 }
 
@@ -3476,6 +3551,24 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "RES",   pct(k_res), k_res, 0);
         knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(k_lfo_rate), k_lfo_rate, 1);
         knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
+    } else if (fx_page) {
+        /* The FX page: the filter's own. CUT and RES stay on K1 and K2 because they ARE
+         * the filter, exactly as on the LFO page -- and because a page that moved them
+         * would make the two pages disagree about where the filter lives.
+         *
+         * TYPE's ring fills 1/3 then 2/3 then 3/3, which is the only thing a three-state
+         * ring can say; the name in the hole says which. KEY TRK's ring shows the actual
+         * percentage, so 25 % is a quarter of the way round and not a detent count.
+         *
+         * Neither value is a Hz figure, and that is deliberate: with key tracking on, the
+         * corner is a different frequency per note, so a single number here would be a
+         * number that is true for one note and false for the chord. The ring is the knob
+         * position, which is the thing the knob actually controls. */
+        knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
+        knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
+        knob(120, KNOB_TOP, 54, "TYPE",   FTYPE_NAME[k_ftype],
+             (int32_t)k_ftype * 127 / (WV_FTYPE_N - 1), 1);
+        knob(178, KNOB_TOP, 54, "KEY TRK", ktrack_text(k_ktrack), k_ktrack, 1);
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
@@ -3643,6 +3736,9 @@ int app_expect(const char *what, int *got)
         *got = (int)n;
         return 1;
     }
+    if (!strcmp(what, "ftype"))       { *got = k_ftype;  return 1; }
+    if (!strcmp(what, "ktrack"))      { *got = k_ktrack; return 1; }
+    if (!strcmp(what, "fx_page"))     { *got = fx_page;  return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
@@ -3891,6 +3987,8 @@ static void save_snapshot(save_rec *r)
     r->eg_r = k_eg_r;
     r->lfo_rate = k_lfo_rate;
     r->lfo_depth = k_lfo_depth;
+    r->ftype = k_ftype;
+    r->ktrack = k_ktrack;
     r->arp_rate = k_arp_rate;
     r->arp_type = k_arp_type;
     r->arp_oct = k_arp_oct;
@@ -3927,6 +4025,8 @@ static void save_apply(const save_rec *r)
     k_eg_r = r->eg_r;
     k_lfo_rate = r->lfo_rate;
     k_lfo_depth = r->lfo_depth;
+    k_ftype = r->ftype;
+    k_ktrack = r->ktrack;
     k_arp_rate = r->arp_rate;
     k_arp_type = r->arp_type;
     k_arp_oct = r->arp_oct;

@@ -38,10 +38,15 @@ From the directory that contains `platform/` and `app/`:
 
 Tests:
 
-    sh app/tests/run_dsp.sh                           # the DSP, plain cc: 242 checks
-    python3 app/tests/test_screen.py                  # the three bands, by pixel: 32 checks
-    python3 app/tests/test_grainmap.py                # GRAN's material: 71 checks
-    python3 app/tests/test_slot.py                    # slot selection: 8 checks
+    sh app/tests/run_dsp.sh                           # the DSP, plain cc: 278 checks
+    python3 app/tests/test_screen.py                  # the three bands, by pixel: 54 checks
+    python3 app/tests/test_arp.py                     # the arpeggiator: 29 checks
+    python3 app/tests/test_edit.py                    # the SMPL EDIT page: 45 checks
+    python3 app/tests/test_fx.py                      # the FX page: 23 checks
+    python3 app/tests/test_knob.py                    # the ring's geometry: 25 checks
+    python3 app/tests/test_save.py                    # B_SAVE and the record: 55 checks
+    python3 app/tests/test_grainmap.py                # GRAN's material (SKIPs without the demo pool)
+    python3 app/tests/test_slot.py                    # slot selection (SKIPs without the demo pool)
 
     app/build/host/wave_host app/tests/play.txt  app/build/host
     app/build/host/wave_host app/tests/smpl.txt  app/build/host

@@ -31,6 +31,10 @@ typedef struct {
     uint8_t  grain, spray;
     uint8_t  eg_a, eg_d, eg_s, eg_r;
     uint8_t  lfo_rate, lfo_depth;
+    /* the filter's tap and how far its corner follows the note. Both live in the
+     * single-byte parameter run, so save_changes() counts each as one group without
+     * being told. */
+    uint8_t  ftype, ktrack;
     uint8_t  arp_rate, arp_type, arp_oct, arp_gate;
 
     /* the selectors: which bank, which slot, and which source a key plays */

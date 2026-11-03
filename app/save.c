@@ -97,6 +97,9 @@ int save_load(void)
     if (n == (int)sizeof rec && rec.magic == SAVE_MAGIC && rec.version == (uint16_t)SAVE_VERSION
         && rec.bytes == (uint16_t)sizeof rec
         && rec.src < 3u && rec.shape < WV_SHAPE_N && rec.bank_i < WV_BANK_COUNT
+        && rec.ftype < WV_FTYPE_N
+        && (rec.ktrack == 0u || rec.ktrack == 25u || rec.ktrack == 50u
+            || rec.ktrack == 75u || rec.ktrack == 100u)
         && rec.arp_type < 4u && rec.arp_oct >= 1u && rec.arp_oct <= 4u) {
         loaded = 1;
     } else {

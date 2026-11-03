@@ -367,7 +367,7 @@ of SYNTH's waveform in the brightest part of the picture.
 | `B_SEL` | SEL | **SOURCE** cycles SYNTH → SMPL → GRAN | app | app.c:47 |
 | `B_ENV` | ENV | **ENV page** toggle (A/D/S/R on K1–K4) | app | app.c:47 |
 | `B_EDIT` | EDIT | **SMPL EDIT page** toggle (START/END/LOOP S/LOOP E on K1–K4, LOOP on PRESETS, ZOOM on ALGORITHM); dead in SYNTH and GRAN | app | app.c |
-| `B_FX` | FX | nothing | **free** | — |
+| `B_FX` | FX | **FX page** toggle: the filter's tap and key tracking (CUT/RES stay on K1–K2, TYPE on K3, KEY TRK on K4) | app | app.c |
 | `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
 | `B_SAVE` | SAVE | **write the panel state to `OBJ_SETTINGS`** | app | `app/save.c` |
@@ -987,7 +987,7 @@ there are more free buttons than pending functions.
 | `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
 | `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
-| `B_FX` | **filter type** (LP / BP / HP) | the SVF already computes all three every sample and only `lp` is used, so the switch is free of arithmetic — see `spec.md` §5d |
+| ~~`B_FX`~~ | ~~filter type~~ | **taken** — it became the FX page (filter tap + key tracking). See the table above. |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
