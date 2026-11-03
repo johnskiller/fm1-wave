@@ -3668,11 +3668,12 @@ void app_frame(void)
              * more thing on the screen that means nothing. */
         }
     }
-    /* One blit for the whole band. There used to be five of these in a row, left over
-     * from when the band was drawn in layers; lcd_data() syncs (waits for the previous
-     * transfer) before it starts, so four of them were four full 240x92 transfers of
-     * the same pixels, sent and waited out one after another. Nothing on screen ever
-     * depended on it: the last blit wins, and it is the same buffer every time. */
+    /* One transfer for this band. There used to be five in a row -- and the row sits
+     * after cv_begin(240, MAT_H, ...), so all five were sending the MATERIAL band to
+     * the screen, four of them redundantly. lcd_data() syncs (waits out the previous
+     * DMA) before it starts, so those four were four full 240x92 transfers of pixels
+     * already on the glass, ~8 ms each at the measured ~44 MHz. The last one wins and
+     * it is the same buffer every time, so nothing on screen depended on the rest. */
     cv_blit(0, SCOPE_H);
     frame_blits++;
 

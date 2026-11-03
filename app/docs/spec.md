@@ -591,6 +591,18 @@ Three bands, heights derived from what each has to draw, with a compile-time
 `#error` if they do not sum to 240. No mode word, no label for a value that is not
 on screen.
 
+**One transfer per band, and that is not a style choice.** `lcd_data()` calls `lcd_sync()`
+first — it waits for the previous DMA to finish before starting the next — and the panel
+runs at 60 MHz, ~44 MHz effective measured, so a 240 × 92 band is about **8 ms** of wall
+time. The material band had **five** `cv_blit(0, SCOPE_H)` calls in a row (the `SCOPE_H`
+argument is where the band is sent, no longer what it holds), left over from when
+that band was drawn in layers: four of them re-sent the same pixels, one transfer after another,
+≈ **32 ms of every frame** spent waiting to send a picture that was already on the glass.
+The last blit is the one that wins, so nothing on screen ever depended on the other four.
+One per band now — scope, material, knobs — and `frame_blits` in `app.c` is a probe on the
+count, so `test_screen.py` fails if a second transfer appears (injected: 4 per frame, 2
+checks fail).
+
 ```
 ┌────────────────────────────────────────┐  y 0
 │  real-time scope  84 px, fixed scale   │
