@@ -247,10 +247,20 @@ Starting eight (the five from WT, three more to be named):
 
 1. SAW→PULSE · 2. RESO · 3. HOLLOW · 4. VOX · 5. DIGI · 6–8. *(open)*
 
-**Aliasing: accepted in v1.** Linear interpolation between points removes
-staircase error, not harmonics that were above Nyquist when the table was
-built. Mip-mapped band-limiting is the real fix, costs 4× the flash and an
-index per voice, and is a **named future change**.
+**[`wavetables.md`](wavetables.md) is the reference for these**: every frame of every
+bank drawn, what each bank's spectrum actually is, the measured statistics (crest, level,
+centroid per frame), where each of the eight came from, and — importantly — what is
+*not* true about them. Two of the five that share WT's names are a different sound;
+SAW SQR and HOLLOW are near-duplicates of each other.
+
+**Aliasing: no bank reaches it on this keybed.** Linear interpolation between points
+removes staircase error, not harmonics that were above Nyquist when the table was built.
+Measured at the highest key, G5 = 440 Hz, the worst partial in any frame of any bank is
+DIGI's 24th at 10,560 Hz against 22,050 Hz of Nyquist — 10.5 kHz of headroom, so nothing
+folds anywhere on the instrument (F3..G5). This is a property of the 27-key keybed, not
+of the tables: more partials, or a keyboard extended upward, would reach it. Mip-mapped
+band-limiting is then the real fix, costs 4× the flash and an index per voice, and is a
+**named future change**. Per-bank numbers: [`wavetables.md`](wavetables.md).
 
 ### 5b. Samples as wavetables — the second feature WT does not have
 
