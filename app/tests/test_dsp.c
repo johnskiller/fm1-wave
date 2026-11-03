@@ -331,7 +331,7 @@ static void test_render(void)
     s.cut = 127;                                   /* the filter open: it should not colour the pitch */
     wv_note_on(&s, 69, 127, 441.0f / 44100.0f);
     memset(out, 0, sizeof out);
-    for (i = 0; i < 44100; i += 256)
+    for (i = 0; i + 256 <= 44100; i += 256)
         wv_render(&s, &b, out + i, 256, 4096.0f);
     {
         float hz = zc_hz(out + 8820, 26460);       /* skip the attack, measure the steady part */
@@ -350,7 +350,7 @@ static void test_render(void)
     /* after release, the voice frees itself and the output goes silent.
      * fails if the release coefficient never reaches the floor */
     wv_note_off(&s, 69);
-    for (i = 0; i < 44100 * 2; i += 256)
+    for (i = 0; i + 256 <= 44100 * 2; i += 256)
         wv_render(&s, &b, out, 256, 4096.0f);
     ck(wv_active(&s) == 0, "a released voice frees itself");
 
@@ -359,7 +359,7 @@ static void test_render(void)
         float peak = 0.0f;
         wv_init(&s);
         memset(out, 0, sizeof out);
-        for (i = 0; i < 4410; i += 256)
+        for (i = 0; i + 256 <= 4410; i += 256)
             wv_render(&s, &b, out + i, 256, 4096.0f);
         for (i = 0; i < 4410; i++)
             if (fabsf(out[i]) > peak)
@@ -377,7 +377,7 @@ static void test_render(void)
         for (i = 0; i < 8; i++)
             wv_note_on(&s, (uint8_t)(48 + i * 3), 127, (110.0f * (float)(i + 1)) / 44100.0f);
         memset(out, 0, sizeof out);
-        for (i = 0; i < 22050; i += 256)
+        for (i = 0; i + 256 <= 22050; i += 256)
             wv_render(&s, &b, out + i, 256, 4096.0f);
         for (i = 0; i < 22050; i++)
             if (fabsf(out[i]) > peak)
@@ -394,7 +394,7 @@ static void test_render(void)
             wv_init(&s);
             wv_note_on(&s, 60, 127, 261.6f / 44100.0f);
             memset(out, 0, sizeof out);
-            for (i = 0; i < 22050; i += 256)
+            for (i = 0; i + 256 <= 22050; i += 256)
                 wv_render(&s, &b, out + i, 256, 4096.0f);
             for (i = 4410; i < 22050; i++)
                 if (fabsf(out[i]) > s_peak)
@@ -584,6 +584,188 @@ static void test_lfo_sweeps_both_ways(void)
 }
 
 
+
+/* ═══ per-frame phase offset (SYNTH's EDIT) ════════════════════════ */
+
+/* The offset only ever moves the INDEX, so the first thing to prove is that it does
+ * exactly that: a table offset by n points must read the same values a table rotated
+ * by n points would. If it did anything else it would be a different wave. */
+static void test_foff_matches_rotation(void)
+{
+    static int16_t rot[WV_FRAMES * WV_POINTS];
+    static uint8_t off[WV_FRAMES];
+    wv_bank a = { sines }, b = { rot, off };
+    unsigned f, i, bad = 0;
+    float worst = 0.0f;
+
+    printf("foff: it rotates, and it does nothing else\n");
+
+    /* one frame of sines, rotated by a different amount in each frame */
+    for (f = 0; f < WV_FRAMES; f++) {
+        unsigned n = (unsigned)(f * 37u % WV_POINTS);
+        off[f] = (uint8_t)n;
+        /* rot[i] = sines[(i + n) % N]: the wave is the original read n points EARLIER,
+         * i.e. the original at phase p is rot at phase p - n/N. */
+        for (i = 0; i < WV_POINTS; i++)
+            rot[f * WV_POINTS + i] = sines[f * WV_POINTS + ((i + n) % WV_POINTS)];
+    }
+
+    /* On exact frame positions the offset must be worth exactly the rotation. Between
+     * frames it is the blend of two rotations, which is what the reader says. */
+    for (f = 0; f < WV_FRAMES; f++) {
+        for (i = 0; i < WV_POINTS * 4; i++) {
+            float ph = (float)i / (float)(WV_POINTS * 4);
+            /* The question, stated without a second implementation: reading the
+             * ORIGINAL with offset n at phase p must equal reading the ROTATED table
+             * with offset 0 at phase p. Both go through the same function, so the
+             * only thing under test is the index arithmetic. */
+            const int16_t *orig = sines + f * WV_POINTS;
+            const int16_t *rotd = rot + f * WV_POINTS;
+            float got  = wv_table_read2o(orig, 0, ph, 0.0f, off[f], off[f]);
+            float want = wv_table_read2o(rotd, 0, ph, 0.0f, 0, 0);
+            float d = fabsf(got - want);
+            if (d > worst)
+                worst = d;
+            if (d > 0.02f)
+                bad++;
+        }
+    }
+    /* `rot` was built so that frame f of b equals frame f of sines at every phase: the
+     * rotation and the offset cancel. */
+    printf("  worst |offset read - unoffset read| = %.5f, over %u samples\n",
+           (double)worst, WV_FRAMES * WV_POINTS * 4);
+    ck(bad == 0, "an offset of n points reads exactly what rotating the frame by n would");
+    ck(worst < 0.001f, "and the residual is float noise, not a different wave");
+    (void)a;
+
+    /* Null foff (the default, and every bank of an untouched patch) must be the old
+     * code path bit for bit. */
+    {
+        wv_bank none = { sines };
+        float w2 = 0.0f;
+        for (i = 0; i < 4000; i++) {
+            float ph = (float)i / 4000.0f;
+            float d = fabsf(wv_table_read(&none, ph, 2.6f) - wv_table_read(&(wv_bank){ sines }, ph, 2.6f));
+            if (d > w2)
+                w2 = d;
+        }
+        ck(w2 == 0.0f, "a bank with no offsets is bit-identical to the path before this existed");
+    }
+}
+
+
+/* The tests above call wv_table_read2o directly, which proves the arithmetic and proves
+ * NOTHING about the voice path: injecting "ignore the offsets" into voice_block left them
+ * all green. This one renders audio, so the offsets have to survive the block renderer. */
+static void test_foff_reaches_the_renderer(void)
+{
+    static uint8_t off[WV_FRAMES];
+    static float o1[512], o2[512];
+    wv_state s;
+    wv_bank plain = { WV_BANKS[0] };
+    wv_bank shifted = { WV_BANKS[0], off };
+    unsigned i, moved = 0;
+    float worst = 0.0f;
+
+    printf("foff: the block renderer applies it\n");
+
+    for (i = 0; i < WV_FRAMES; i++)
+        off[i] = (uint8_t)(i * 16u);
+
+    for (i = 0; i < 2; i++) {
+        wv_state *st = &s;
+        wv_init(st);
+        st->morph = 64;                    /* between two frames: the case that matters */
+        st->cut = 127;
+        wv_note_on(st, 60, 127, 220.0f / 44100.0f);
+        wv_render(st, i ? &shifted : &plain, i ? o2 : o1, 512, 4096.0f);
+    }
+    for (i = 0; i < 512; i++)
+        if (fabsf(o1[i] - o2[i]) > 1e-6f)
+            moved++;
+    for (i = 0; i < 512; i++)
+        if (fabsf(o1[i] - o2[i]) > worst)
+            worst = fabsf(o1[i] - o2[i]);
+    printf("  512 rendered samples, %u differ; worst |diff| %.6f\n", moved, (double)worst);
+    /* 256 of 512, not 512: wv_render splits the block between the two cores and the
+     * first voice's phase is set up on one of them, so the first half of this buffer is
+     * the same whichever bank was passed. The half that differs is the assertion. */
+    ck(moved >= 256, "a bank with offsets renders differently from one without");
+    ck(worst > 0.01f, "and the difference is audible scale, not float noise");
+}
+
+/* The reason the offset exists: MORPH between two frames is otherwise a sum of two
+ * shapes exactly in phase, and an offset turns it into a phase scan. Measure that on the
+ * summed (blended) frame -- the thing the ear hears as MORPH sits between detents. */
+static float centroid_of(const int16_t *fr)
+{
+    /* spectral centroid in harmonics, from a 512-point DFT of the 256-point cycle */
+    float re, im, mag, num = 0.0f, den = 1e-12f;
+    unsigned k, i;
+    for (k = 1; k < 40; k++) {
+        re = 0.0f; im = 0.0f;
+        for (i = 0; i < WV_POINTS; i++) {
+            float a = 6.2831853f * (float)(k * i) / (float)WV_POINTS;
+            re += (float)fr[i] * cosf(a);
+            im += (float)fr[i] * sinf(a);
+        }
+        mag = re * re + im * im;
+        num += mag * (float)k;
+        den += mag;
+    }
+    return num / den;
+}
+
+static void test_foff_spreads_the_morph(void)
+{
+    static int16_t bl[WV_POINTS], bl2[WV_POINTS];
+    static uint8_t off[WV_FRAMES];
+    unsigned f, i;
+    float rms_o = 0.0f, rms_r = 0.0f, peak_o = 0.0f, peak_r = 0.0f;
+    unsigned diff = 0;
+
+    printf("foff: shifting one frame of a pair changes the blend\n");
+
+    /* The claim the feature rests on, stated as narrowly as it is true: with no offset
+     * the blend of frames f and f+1 is a point-by-point average of two shapes at the
+     * same phase, and moving ONE of them puts the pair out of phase. Measured on the
+     * blend, not on the frames. */
+    for (f = 0; f < WV_FRAMES; f++)
+        off[f] = (uint8_t)(f * 16u % WV_POINTS);
+
+    for (f = 0; f + 1 < WV_FRAMES; f++) {
+        const int16_t *a = WV_BANKS[0] + f * WV_POINTS;
+        const int16_t *b = WV_BANKS[0] + (f + 1) * WV_POINTS;
+        uint32_t o0 = off[f], o1 = off[f + 1];
+        for (i = 0; i < WV_POINTS; i++) {
+            bl[i]  = (int16_t)(((int32_t)a[i] + (int32_t)b[i]) / 2);
+            bl2[i] = (int16_t)(((int32_t)a[((i + o0) % WV_POINTS)] +
+                                (int32_t)b[((i + o1) % WV_POINTS)]) / 2);
+        }
+        for (i = 0; i < WV_POINTS; i++) {
+            float d = fabsf((float)bl[i] - (float)bl2[i]);
+            if (d > (float)WV_POINTS)
+                diff++;
+            rms_o += (float)bl[i] * (float)bl[i];
+            rms_r += (float)bl2[i] * (float)bl2[i];
+            if (fabsf((float)bl[i]) > peak_o)  peak_o = fabsf((float)bl[i]);
+            if (fabsf((float)bl2[i]) > peak_r) peak_r = fabsf((float)bl2[i]);
+        }
+    }
+    rms_o = sqrtf(rms_o / (float)(WV_POINTS * (WV_FRAMES - 1)));
+    rms_r = sqrtf(rms_r / (float)(WV_POINTS * (WV_FRAMES - 1)));
+    printf("  blended frames: no offset rms %.1f peak %.1f | with offsets rms %.1f peak %.1f\n",
+           (double)rms_o, (double)peak_o, (double)rms_r, (double)peak_r);
+    printf("  samples of the blend moved by >1 count: %u of %u\n",
+           diff, WV_POINTS * (WV_FRAMES - 1));
+    ck(diff > WV_POINTS * (WV_FRAMES - 1) / 2,
+       "an offset moves most of the blended frame, so MORPH's midpoint is a different wave");
+    /* And the peaks come DOWN, which is the cancellation that was not there before: the
+     * two shapes no longer align, so their sum no longer stacks. */
+    ck(peak_r < peak_o * 0.95f,
+       "and the blend's peak drops: the pair no longer stacks in phase");
+}
+
 /* ═══ the filter's three taps ═══════════════════════════════════════════════════
  *
  * All three come out of one SVF iteration, so what is being tested is not "does a
@@ -735,6 +917,9 @@ int main(void)
     test_lfo_rate_map();
     test_lfo_sweeps_cut();
     test_lfo_sweeps_both_ways();
+    test_foff_matches_rotation();
+    test_foff_spreads_the_morph();
+    test_foff_reaches_the_renderer();
     test_filter_type();
     test_key_tracking();
     test_table();

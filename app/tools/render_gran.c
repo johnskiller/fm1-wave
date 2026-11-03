@@ -103,7 +103,7 @@ int main(int argc, char **argv)
     wv_sample smp[8];
     uint32_t nslot, i;
     wv_state st;
-    wv_bank bk;
+    wv_bank bk = { 0 };
     const wv_sample *tone;
     int at = 0;
 

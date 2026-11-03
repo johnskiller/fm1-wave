@@ -211,12 +211,29 @@ plays, and its meaning is a number. A page is for structure — a boundary, a fr
 direction — where the value is not something a hand sweeps but a decision about what the
 material is.
 
-EDIT is only implemented for SMPL, and the button does nothing in SYNTH and GRAN. What
-those two could carry is specified in `docs/spec.md` §5d with the measurements behind it
-(flash and store limits for a bank, the per-sample cost of a frame phase, the four grain
-axes and which one is a call site).
+EDIT is implemented for **two** sources and still does nothing in GRAN. The button means
+"edit this source's structure", not "open the SMPL editor" — that is the model `docs/spec.md`
+§5d argues for, and the one a second oscillator extends instead of replacing. GRAN's page
+(its cloud region) is specified there too, with the measurements behind it.
 
-**What this page does today** — the whole of it:
+**SYNTH's page, built** (§5d-i for what it does to the sound):
+
+| | |
+|---|---|
+| K1 | `FRAME` — which of the eight frames the other knobs act on |
+| K2 | `OFFSET` — that frame's phase, 0..255 points of 256; one detent is one point |
+| K3 | `SPREAD` — rewrites all eight as a ramp, points per frame (2 per detent, 0..254) |
+| K4 | `SHAPE` — `LIN` / `ALT` / `RAND`, the shape of that ramp |
+| PRESETS | zeroes every offset and SPREAD with them |
+| ring | `OFFSET`'s ring is the offset as a position in the cycle: one turn = one full cycle |
+| text | `OFFSET` prints quarters where they land exactly (`1/4`, `3/4`) and a percentage between |
+| stored | the 8×8 table plus SPREAD and SHAPE; not which frame is selected |
+
+`SPREAD` is the knob to reach for first: one turn and all eight frames fan out, which is
+the change the A/B is about. `K2` desynchronises one frame from that ramp, which is what
+you do when you are listening to that frame.
+
+**SMPL's page, the whole of it:**
 
 | | |
 |---|---|

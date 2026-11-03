@@ -100,7 +100,8 @@ int save_load(void)
         && rec.ftype < WV_FTYPE_N
         && (rec.ktrack == 0u || rec.ktrack == 25u || rec.ktrack == 50u
             || rec.ktrack == 75u || rec.ktrack == 100u)
-        && rec.arp_type < 4u && rec.arp_oct >= 1u && rec.arp_oct <= 4u) {
+        && rec.arp_type < 4u && rec.arp_oct >= 1u && rec.arp_oct <= 4u
+        && rec.foff_spread <= 127u && rec.foff_shape < 3u) {
         loaded = 1;
     } else {
         memset(&rec, 0, sizeof rec);
@@ -140,6 +141,14 @@ int save_changes(const save_rec *live)
             || x->loop_e != y->loop_e || x->on != y->on)
             n++;
     }
+    /* SYNTH's per-frame offsets: ONE group, not sixty-four. They are one page's worth of
+     * edits on one bank, and counting each byte would make a single frame's offset light
+     * up eight segments of the save line. A whole bank's table counts as one change for
+     * the same reason a slot's five region numbers do. */
+    if (memcmp(rec_written.foff, live->foff, sizeof rec_written.foff)
+        || rec_written.foff_spread != live->foff_spread
+        || rec_written.foff_shape != live->foff_shape)
+        n++;
     return n;
 }
 

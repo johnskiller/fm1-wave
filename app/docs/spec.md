@@ -469,7 +469,7 @@ edit" is answered by SELECT, not by a list.
 **What an edit is, though, is not "draw the wave".** 256 points across 240 px with no zoom
 is a guessing game, and a cursor is a UI this panel does not have. The axis that fits both
 the panel and the storage is the **per-frame phase offset** (0..255 points, one byte per
-frame, 8 bytes total, in `OBJ_SETTINGS`).
+frame, 8 bytes total, in `OBJ_SETTINGS`). **Built** — see §5d-i below.
 
 Why it is not a shortcut: `wv_table_read2(fa, fb, phase, t)` reads both frames at the
 *same* phase, so MORPH between two frames is a sample-by-sample sum of two shapes exactly
@@ -477,10 +477,51 @@ in phase. Giving each frame its own offset makes MORPH a phase scan of the table
 idea a wavetable synth uses per frame, and it is audible well below anything that sounds
 broken.
 
-The cost is honest and **unmeasured**: the offset lands in the per-sample hot path — an
-add and a wrap per frame read, per voice, at 44.1 kHz. That is measured before it is
-promised, not estimated, and the measurement is cheap: the split renderer already reports
-per-core CPU.
+#### 5d-i. Built: the per-frame phase offset, and what it actually does
+
+**Storage: 8 bytes of table + 2 bytes of setting, in `OBJ_SETTINGS`.** No flash, no RAM
+copy: the tables stay `static const` in flash and the offset is applied at read time.
+
+**The read.** `wv_table_read2o(fa, fb, ph, t, o0, o1)` is the offset form of
+`wv_table_read2`. The fractional part of the phase is *shared*: an offset of n whole points
+moves `i0` and `i1` by n and leaves `ff` alone, so a per-frame offset costs **one add and
+one mask per frame read per sample** — not a second phase wrap and not a second float
+multiply. The two frames' offsets are resolved **once per block** in `voice_block`, next to
+the frame pair, because MORPH does not move inside a block. When every offset is zero the
+per-sample test `(o0 | o1)` takes the old path, so an untouched bank runs the code it
+always ran — asserted bit for bit, not by ear.
+
+**What it sounds like, measured.** Same note, same MORPH position, same shaper; the only
+difference is the offsets. `app/tools/render_foff.sh` writes one WAV per pair — the note
+with offsets off, then the same note with them on, back to back:
+
+| pair | rms | spectral centroid |
+|---|---|---|
+| SAW SQR, 32 pt/frame | 0.1695 → 0.1522 (−10.3 %) | 1908 → 1359 Hz (−28.8 %) |
+| SAW SQR, 8 pt/frame | 0.1695 → 0.1682 (−0.8 %) | 1908 → 1476 Hz (−22.6 %) |
+| SAW SQR, 64 pt/frame | 0.1695 → 0.1302 (−23.2 %) | 1908 → 1446 Hz (−24.2 %) |
+| OPEN2, 32 pt/frame | 0.1786 → 0.1793 (+0.4 %) | 1966 → 1644 Hz (−16.4 %) |
+| VOX, 32 pt/frame | 0.1530 → 0.1707 (+11.6 %) | 6381 → 5990 Hz (−6.1 %) |
+
+The direction is **down** in every case: two frames in phase sum to a wave with sharper
+features, and turning them against each other softens the sum before the shaper. The
+level does not move by a fixed amount — it is a timbre change that on SAW SQR also loses
+1 dB — which is the honest description: this is not a volume trim, it is a different
+waveform.
+
+**The renderer has to clear its buffer, and that is a real trap.** `wv_render` *adds* into
+`out` (wv_dsp.h: "added to what is there: the caller may mix several parts"); the platform
+gets away with it because its buffer is the DMA bank it just handed back. A file renderer
+that reuses one buffer must clear per block. Measured the wrong way: five identical takes
+of one note gave rms **0.17, 0.33, 0.46, 0.56, 0.62** — a rising staircase that looks like
+the offset "building up" and is nothing of the kind. Every number in the table above was
+taken after that was found and fixed, and the fixed renderer is deterministic: plain
+0.169523 twice, offset 0.152147 twice.
+
+**The page.** SYNTH's `B_EDIT` (§9f-bis) — K1 picks a frame, K2 turns it, K3 fans all
+eight out, K4 picks the shape of the fan. `B_EDIT` used to mean SMPL's region editor and
+nothing else; it now means "edit this source's structure", which is the model §5d asks for
+and the one a second oscillator would extend rather than replace.
 
 **Frame operations** — copy frame *n* onto *m*, rotate a frame by *n* points — reach
 material that was never curated, and are the other half of the same page. They are the
@@ -1009,6 +1050,39 @@ What is checked, and the measurement behind each:
 - **the region cannot invert** — START and END driven past each other, both directions.
 - **EDIT does nothing outside SMPL** — from SYNTH and from GRAN, `src` and `edit` both
   unchanged afterwards. Injected: the old "switch the source there" behaviour fails both.
+
+### 9f-bis. Built: SYNTH's EDIT page, the phase ramp (`app/tests/test_synth_edit.py`)
+
+31 checks. The page is the first whose four knobs are **not four independent values**: K3
+(SPREAD) rewrites all eight frames at once, so the page has a ramp the eight values are
+derived from, and K2 pulls one frame off it. That is why the checks are mostly about
+*relationships* between frames rather than about one number.
+
+- **the table is the sum of its parts** — `foff_sum` is a probe on purpose. LIN at 8
+  points a frame is 8 × (0+1+…+7) = **224**, and that number cannot be reached by an
+  implementation that stores the knob position and forgets to multiply. Injected: K3
+  storing SPREAD without calling `foff_ramp()` fails three checks.
+- **one frame is not the ramp** — after K2 moves frame 0, frame 1 stays where the ramp put
+  it. Injected: an edit path that rebuilds the ramp on every knob fails here.
+- **ALT is not half of LIN** — ALT puts the odd frames at the full step and the even ones
+  at zero, so its sum is 4 × 8 = **32**, not 112. The first version of this check asserted
+  "half" and was wrong about its own arithmetic; the number now comes from the formula.
+- **EN_PRESET clears all eight, and SPREAD with them** — `foff_sum` 0 *and* `foff_spread`
+  0. Injected: clearing only the selected frame leaves 224 of table behind while the page
+  would read zero.
+- **the offsets are saved but the frame index is not** — the table and the two ramp
+  settings round-trip through `reboot`; `edit_frame` deliberately does not, because which
+  frame the page points at is a view, like which page is open, and saving it would open a
+  page on power-up. There is no check on the absent field: an assertion about a field that
+  is not in the record is a check that cannot fail. Its absence is visible where it belongs,
+  in `save_rec`'s definition.
+- **the reboot is not trusted to clear statics** — `plat_host.c` calls `app_host_reboot()`
+  under `#ifdef APP_HOST_REBOOT`, which this app never defines, so a simulated reboot keeps
+  every static. A record that is written and never read back therefore passes a naive
+  round-trip. The script turns the value *off* between the save and the reboot; a restore
+  that does nothing then reads 0 and the check fails. Injected: dropping the restore fails
+  one check.
+- **SMPL's page is still SMPL's** — after `B_SEL` to SMPL, `B_EDIT` opens `edit_src == 1`.
 
 ### 9h. Built: persistence and the save line (`app/tests/test_save.py`)
 

@@ -415,7 +415,7 @@ static void test_slice_rate(void)
     int16_t data[200];
     wv_sample s;
     wv_state st;
-    wv_bank bk;
+    wv_bank bk = { 0 };
     float blk[256];
     int n, fill = 0;
     uint32_t vi;

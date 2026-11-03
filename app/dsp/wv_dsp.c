@@ -140,10 +140,56 @@ float wv_table_read2(const int16_t *fa, const int16_t *fb, float ph, float t)
     return a * (1.0f / 32768.0f);
 }
 
+/* The offset read. The point of doing it here rather than by rotating `ph` is that the
+ * fractional part of the phase is SHARED: an offset of n whole points moves i0 and i1 by
+ * n and leaves ff alone, so a per-frame offset costs one add and one mask per frame per
+ * sample, not a second phase wrap and not a second float multiply.
+ *
+ * o0/o1 are in points and already wrapped to 0..WV_POINTS-1 by the caller (which is what
+ * lets the mask below be the only wrap in the hot path). */
+float wv_table_read2o(const int16_t *fa, const int16_t *fb, float ph, float t,
+                      uint32_t o0, uint32_t o1)
+{
+    float x, ff, a;
+    int32_t i0;
+    uint32_t m = WV_POINTS - 1u;
+
+    ph = ph - fm_floorf(ph);
+    x = ph * (float)WV_POINTS;
+    i0 = (int32_t)x;
+    if (i0 >= (int32_t)WV_POINTS)
+        i0 = (int32_t)WV_POINTS - 1;
+    ff = x - (float)i0;
+
+    a = (float)fa[((uint32_t)i0 + o0) & m];
+    a += ((float)fa[((uint32_t)i0 + 1u + o0) & m] - a) * ff;
+    if (fb) {
+        float c = (float)fb[((uint32_t)i0 + o1) & m];
+        c += ((float)fb[((uint32_t)i0 + 1u + o1) & m] - c) * ff;
+        a += (c - a) * t;
+    }
+    return a * (1.0f / 32768.0f);
+}
+
 float wv_table_read(const wv_bank *b, float ph, float mf)
 {
     const int16_t *fa, *fb;
     float t;
+    int32_t f0;
+    if (b->foff) {
+        /* The two frames' offsets differ, so the frame index has to come out here --
+         * wv_frames_at does not report it. Clamping matches wv_frames_at exactly. */
+        if (mf < 0.0f)
+            mf = 0.0f;
+        else if (mf >= (float)(WV_FRAMES - 1u))
+            mf = (float)(WV_FRAMES - 1u);
+        f0 = (int32_t)mf;
+        t = mf - (float)f0;
+        fa = b->frames + f0 * (int32_t)WV_POINTS;
+        fb = (f0 + 1 < (int32_t)WV_FRAMES) ? b->frames + (f0 + 1) * (int32_t)WV_POINTS : 0;
+        return wv_table_read2o(fa, fb, ph, t, b->foff[f0],
+                               fb ? b->foff[f0 + 1] : b->foff[f0]);
+    }
     wv_frames_at(b, mf, &fa, &fb, &t);
     return wv_table_read2(fa, fb, ph, t);
 }
@@ -634,6 +680,17 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
     const int16_t *fa = 0, *fb = 0;
     float ft = 0.0f;
     wv_frames_at(b, mf, &fa, &fb, &ft);
+    /* The two frames' phase offsets, resolved once per block for the same reason the
+     * frame pair is: MORPH does not move inside a block, so neither do these. When the
+     * page has set nothing they are both zero and the loop below takes the old path --
+     * one uint32 compare per voice, hoisted out of the sample loop entirely. */
+    uint32_t o0 = 0, o1 = 0;
+    if (b->foff) {
+        int32_t f0 = (int32_t)(mf < 0.0f ? 0.0f : (mf >= (float)(WV_FRAMES - 1u)
+                        ? (float)(WV_FRAMES - 1u) : mf));
+        o0 = (uint32_t)b->foff[f0] & (WV_POINTS - 1u);
+        o1 = (!fb ? o0 : ((uint32_t)b->foff[f0 + 1] & (WV_POINTS - 1u)));
+    }
     /* CUT, swept by the LFO. The scale multiplies Hz, so the depth is symmetric in
      * octaves -- see lfo_cut_scale. Read, not advanced: this function runs twice a
      * block (once per core).
@@ -708,7 +765,8 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
              * shared, which is the whole reason a sample voice is a voice and not a
              * second engine. */
             if (v->src == WV_SRC_TABLE) {
-                osel = wv_table_read2(fa, fb, v->phase, ft);
+                osel = (o0 | o1) ? wv_table_read2o(fa, fb, v->phase, ft, o0, o1)
+                                 : wv_table_read2(fa, fb, v->phase, ft);
                 v->phase += v->inc;
                 if (v->phase >= 1.0f)
                     v->phase -= 1.0f;

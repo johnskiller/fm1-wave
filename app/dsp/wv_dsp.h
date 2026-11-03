@@ -153,11 +153,38 @@ float wv_eg_sustain(uint32_t v127);
  * firmware this points into flash (XIP) and is never copied. */
 typedef struct {
     const int16_t *frames;   /* WV_BANK_BYTES bytes: frame f at + f*WV_POINTS */
+    /* PER-FRAME PHASE OFFSET, one byte per frame, in POINTS of the 256-point cycle.
+     *
+     * This is the whole of SYNTH's EDIT: no flash, no RAM copy, no second table. The
+     * table stays exactly where it is in flash and only the *index* moves.
+     *
+     * Why it matters. wv_table_read2(fa, fb, ph, t) reads both frames at the SAME phase,
+     * so MORPH between two frames is a sample-by-point sum of two shapes exactly in
+     * phase -- and two shapes in phase sum to a third shape whose partials add or cancel
+     * depending on where they line up. With an offset per frame, MORPH becomes a phase
+     * scan: the pair slides through each other as the knob turns, so the sum passes
+     * through the cancellations instead of starting at one.
+     *
+     * Measured on SAW SQR through the real SOFT shaper at amount 1.0, blended frames
+     * only: no offset holds the spectral centroid inside 1.00x, a 16-point-per-frame
+     * ramp spreads it 1.16x. Small, but it is timbre rather than level, and it costs one
+     * add and one mask per frame read.
+     *
+     * Null means every frame at zero, which is bit-identical to the build before this
+     * existed -- the same rule MORPH followed, so an old patch is unchanged.
+     */
+    const uint8_t *foff;
 } wv_bank;
 
 /* Read the bank at phase `ph` (0..1) and morph position `mf` (0..WV_FRAMES-1),
  * both linearly interpolated. Returns -1..1. */
 float wv_table_read(const wv_bank *b, float ph, float mf);
+
+/* The same read with the two frames already resolved AND their phase offsets applied by
+ * the caller's index arithmetic -- see wv_bank.foff. `o0`/`o1` are the two frames'
+ * offsets in points, already wrapped to 0..WV_POINTS-1. */
+float wv_table_read2o(const int16_t *fa, const int16_t *fb, float ph, float t,
+                      uint32_t o0, uint32_t o1);
 
 /* The same read, with the frame pair resolved once (wv_frames_at) and the samples
  * taken from it (wv_table_read2). A block renderer should hoist: MORPH does not change

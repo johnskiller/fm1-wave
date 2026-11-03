@@ -28,7 +28,34 @@
 
 static wv_state dsp;
 static uint8_t  cpu2;            /* the second core took the job (app_init's plat_cpu2_set) */
-static wv_bank  bank = { WV_BANKS[0] };
+/* SYNTH's EDIT: a phase offset per frame, in points of the 256-point cycle.
+ *
+ * WHY THIS EXISTS: MORPH reads two frames at the same phase and crossfades them. Two
+ * waves at the same phase ADD, so where the frames are alike they reinforce and where
+ * they are not they cancel -- a comb. Turning one frame n points against its neighbour
+ * moves the cancellation, which is audible as the morph opening up.
+ *
+ * Doubt it? app/tools/render_foff.sh renders the A/B as a WAV: the same note, same
+ * morph, offsets off then on.
+ *
+ * WHY A TABLE AND NOT A KNOB ON `off[frame]` ALONE: eight frames turned independently is
+ * eight numbers, and the setting that matters most is not eight numbers but the SHAPE of
+ * the ramp across them. A ramp is one number (points per frame) plus one shape.
+ */
+static uint8_t foff_tab[WV_BANK_COUNT][WV_FRAMES];
+
+/* The offset in RAM is a ramp, not a per-frame value: SPREAD and SHAPE describe all
+ * eight at once, and OFFSET edits the frame the page is pointed at, which desynchronises
+ * that one frame from the ramp (that is the point -- it is the frame you are listening
+ * to). Turning SPREAD rewrites the whole table, discarding those edits, so the page shows
+ * the ramp whenever it is moved. */
+enum { FOFF_LIN, FOFF_ALT, FOFF_RAND, FOFF_SHAPE_N };
+static uint8_t foff_spread;     /* points per frame, 0..127 */
+static uint8_t foff_shape;      /* FOFF_* */
+
+static uint8_t foff_cur(void);
+static void foff_ramp(void);
+static wv_bank  bank = { WV_BANKS[0], 0 };   /* foff is armed by foff_ramp() */
 
 /* The sample pool, as the platform handed it over. `pool` points into the resource
  * blob, not a copy: the blob is 276 KB of flash and there is no RAM for a copy. */
@@ -138,6 +165,14 @@ static uint8_t lfo_page;
 static uint8_t k_ftype = WV_FTYPE_LP;
 static uint8_t k_ktrack = 0;          /* 0, 25, 50, 75, 100 */
 static uint8_t fx_page;
+/* SYNTH's EDIT page: which of the eight frames the offset knobs act on. K4 picks it.
+ * The page owns this rather than K1 because K1-K3 are the value's three digits -- 0..255
+ * does not fit one knob's detents usefully, and a frame picker has to be visible while
+ * the digits are being turned. */
+static uint8_t edit_frame;
+/* Which source opened the page currently up, so a source switch closes it instead of
+ * handing SMPL's editor to SYNTH. */
+static uint8_t edit_src;
 /* key tracking's five settings, in the panel's order. One list, so the panel's detents
  * and the values save_load accepts can never drift apart. */
 static const uint8_t KT_VALUES[5] = { 0, 25, 50, 75, 100 };
@@ -1062,10 +1097,12 @@ static void input(void)
          * of them landed on EDIT, which silently replaced the source and the whole
          * screen's colour. A button that does nothing where it applies is quieter than
          * one that changes what the instrument is. */
-        if (src == SRC_SMPL) {
+        if (src == SRC_SMPL || src == SRC_SYNTH) {
             edit_page ^= 1u;
-            if (edit_page)
+            if (edit_page) {
                 env_page = 0, lfo_page = 0, arp_page = 0, fx_page = 0;
+                edit_src = src;
+            }
         }
     }
 
@@ -1081,7 +1118,13 @@ static void input(void)
      * that stays useful while the arp is off -- a page where every knob does nothing
      * until one of them has been turned is a page you cannot see the state of. */
     if ((e = plat_enc(EN_K1)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* The frame the offset knobs act on. It wraps: a frame is a place in a
+             * cycle, not a value with ends. */
+            int32_t f = ((int32_t)edit_frame + (int32_t)e) % (int32_t)WV_FRAMES;
+            edit_frame = (uint8_t)(f < 0 ? f + (int32_t)WV_FRAMES : f);
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 0;
             d = region_step(&region[smp_i].start, e, region_step_samples(&smp[smp_i]),
@@ -1093,7 +1136,13 @@ static void input(void)
         else               k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K2)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* One detent is one point of 256 -- the resolution of the table itself, and
+             * the finest step the waveform above the knob can draw. */
+            int32_t v = (int32_t)foff_cur() + (int32_t)e;
+            foff_tab[bank_i][edit_frame] = (uint8_t)(((v % 256) + 256) % 256);
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 2;
             d = region_step(&region[smp_i].loop_s, e, region_step_samples(&smp[smp_i]),
@@ -1105,7 +1154,13 @@ static void input(void)
         else               k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K3)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* The whole ramp at once: this is the knob to reach for first, because one
+             * turn fans all eight frames out and that is what the A/B is about. */
+            foff_spread = (uint8_t)clamp((int32_t)foff_spread + (int32_t)e, 0, 127);
+            foff_ramp();
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 3;
             d = region_step(&region[smp_i].loop_e, e, region_step_samples(&smp[smp_i]),
@@ -1119,7 +1174,11 @@ static void input(void)
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
     if ((e = plat_enc(EN_K4)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            foff_shape = (uint8_t)((uint32_t)(foff_shape + (e > 0 ? 1u : FOFF_SHAPE_N - 1u)) % FOFF_SHAPE_N);
+            foff_ramp();
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 1;
             d = region_step(&region[smp_i].end, e, region_step_samples(&smp[smp_i]),
@@ -1188,7 +1247,13 @@ static void input(void)
          * button that does nothing where it does not apply is quieter than one that
          * changes the instrument). This is the other half of that rule -- the page cannot
          * outlive the source that owns it. */
-        if (src != SRC_SMPL)
+        if (src != SRC_SMPL && src != SRC_SYNTH)
+            edit_page = 0;
+        /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
+         * rather than reinterpreting the same flag as the other source's page. The flag
+         * means "this source's material editor", and the two editors edit different
+         * things with different knobs. */
+        if (edit_src != src)
             edit_page = 0;
     }
 
@@ -1233,6 +1298,8 @@ static void input(void)
         if (src == SRC_SYNTH) {
             bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
             bank.frames = WV_BANKS[bank_i];
+        bank.foff = foff_tab[bank_i];
+            bank.foff = foff_tab[bank_i];
         } else if (smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
             region_fix(smp_i);   /* the region lives per slot, so nothing to redo */
@@ -1245,6 +1312,17 @@ static void input(void)
          * SELECT and this knob is free. */
         if ((e = plat_enc(EN_PRESET)) != 0)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
+    } else if (edit_page && src == SRC_SYNTH) {
+        /* ZERO on EN_PRESET: turn it either way and the whole ramp goes back to nothing.
+         *
+         * A one-way setting with no way back is one people stop touching, and unlike a
+         * knob this value has no middle to return to by ear. The knob is free in SYNTH.
+         * All eight frames, not just the selected one: what it undoes is the ramp, and
+         * leaving seven offsets behind while the page says "zero" would be a lie. */
+        if ((e = plat_enc(EN_PRESET)) != 0) {
+            foff_spread = 0;
+            foff_ramp();
+        }
     } else if (edit_page) {
         /* LOOP on EN_PRESET: two states, right is on and left is off, so the knob can
          * be turned without looking at the screen -- the same two-state rule the GLOBAL
@@ -1497,6 +1575,96 @@ static const char *const FTYPE_NAME[WV_FTYPE_N] = { "LP", "HP", "BP" };
 
 /* KEY TRK as the setting itself. Three digits and a sign is the widest string this page
  * can print ("100%"), which measures inside the ring's 34.9 px chord. */
+/* ─── SYNTH's EDIT page: the phase ramp ────────────────────────────────────
+ *
+ * K1 picks a frame, K2 turns that frame, K3 rewrites all eight as a ramp, K4 picks the
+ * ramp's shape. The value is 0..255 points of the 256-point cycle, printed as a fraction
+ * of the cycle because "46 pts" means nothing and "1/4 cycle" does.
+ */
+static uint8_t foff_cur(void)
+{
+    return foff_tab[bank_i][edit_frame];
+}
+
+static void foff_ramp(void)
+{
+    uint32_t f, v = 0, step = (uint32_t)foff_spread * 2u;   /* 0..254 points per frame */
+
+    for (f = 0; f < WV_FRAMES; f++) {
+        switch (foff_shape) {
+        case FOFF_ALT:  v = (f & 1u) ? step : 0u; break;
+        case FOFF_RAND: v = (f * 73u + 19u) & 0xFFu; v = v * step / 255u; break;
+        default:        v = f * step; break;
+        }
+        foff_tab[bank_i][f] = (uint8_t)v;
+    }
+    bank.foff = foff_tab[bank_i];
+}
+
+/* "1/4" -- the offset as a fraction of the cycle, because 0..255 is what the ring is for
+ * and the text should say what the number DOES. Quarters come out exact; anything else
+ * prints as a percentage. */
+static char *foff_text(void)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    uint32_t v = foff_cur();
+
+    if (!v) {
+        b[0] = '0'; b[1] = 0; b[2] = 0;
+    } else if (v % 64u == 0u) {
+        b[0] = (char)('0' + v / 64u); b[1] = '/'; b[2] = '4'; b[3] = 0;
+    } else {
+        uint32_t p = v * 100u / 256u;
+        if (p < 10u) {
+            b[0] = (char)('0' + p); b[1] = '%'; b[2] = 0;
+        } else if (p < 100u) {
+            b[0] = (char)('0' + p / 10u); b[1] = (char)('0' + p % 10u); b[2] = '%'; b[3] = 0;
+        } else {
+            b[0] = '1'; b[1] = '0'; b[2] = '0'; b[3] = '%'; b[4] = 0;
+        }
+    }
+    return b;
+}
+
+/* The ring shows the offset as a position in the cycle: one full turn of the ring is one
+ * full cycle of phase, which is the only mapping where the ring means the same thing as
+ * the waveform above it. */
+static int32_t foff_mark(void)
+{
+    return (int32_t)((uint32_t)foff_cur() * 127u / 256u);
+}
+
+static const char *const FOFF_SHAPE_NAME[FOFF_SHAPE_N] = { "LIN", "ALT", "RAND" };
+
+static char *frame_text(void)
+{
+    static char b[6];
+
+    b[0] = (char)('0' + (int)edit_frame);
+    b[1] = '/';
+    b[2] = (char)('0' + (int)(WV_FRAMES - 1u));
+    b[3] = 0;
+    return b;
+}
+
+static char *spread_text(void)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    uint32_t v = (uint32_t)foff_spread * 2u;    /* points per frame */
+
+    b[0] = (char)('0' + v / 100u);
+    b[1] = (char)('0' + v / 10u % 10u);
+    b[2] = (char)('0' + v % 10u);
+    b[3] = 0;
+    if (v < 100u) { b[0] = (char)('0' + v / 10u); b[1] = (char)('0' + v % 10u); b[2] = 0; }
+    if (v < 10u) { b[0] = (char)('0' + v); b[1] = 0; }
+    return b;
+}
+
 static char *ktrack_text(uint8_t pct)
 {
     static char ring[2][6];
@@ -3520,6 +3688,19 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "TYPE",  ARP_NAME[k_arp_type], k_arp_type * 42, 1);
         knob(120, KNOB_TOP, 54, "OCT",   arp_oct_text(k_arp_oct), k_arp_oct, 1);
         knob(178, KNOB_TOP, 54, "GATE",  pct(k_arp_gate), k_arp_gate, 1);
+    } else if (edit_page && src == SRC_SYNTH) {
+        /* SYNTH's EDIT page: the phase ramp.
+         *
+         * K1 picks a frame, K2 turns that frame, K3 fans all eight out, K4 picks the
+         * shape of the fan. The page cannot show the wave being edited -- 256 points
+         * across 240 px with no cursor is a guessing game, and the offset is a value you
+         * hear rather than see. The frame prints as a number because frames have no
+         * names and "3" is what the MORPH knob's position corresponds to. */
+        knob(4,   KNOB_TOP, 54, "FRAME",  frame_text(),  edit_frame * 127 / (WV_FRAMES - 1), 1);
+        knob(62,  KNOB_TOP, 54, "OFFSET", foff_text(),   foff_mark(),  1);
+        knob(120, KNOB_TOP, 54, "SPREAD", spread_text(), (int32_t)foff_spread, 1);
+        knob(178, KNOB_TOP, 54, "SHAPE",  (char *)FOFF_SHAPE_NAME[foff_shape],
+             (int32_t)foff_shape * 127 / (FOFF_SHAPE_N - 1), 1);
     } else if (edit_page) {
         /* The EDIT page: the four boundaries, in the order they appear on the picture,
          * so K1 is the leftmost marker and K4 the rightmost. START and END are the
@@ -3745,6 +3926,45 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "ftype"))       { *got = k_ftype;  return 1; }
     if (!strcmp(what, "ktrack"))      { *got = k_ktrack; return 1; }
     if (!strcmp(what, "fx_page"))     { *got = fx_page;  return 1; }
+    /* SYNTH's EDIT page. `foff` is the offset of the frame K4 has selected -- the value
+     * the three digit knobs are turning -- and `edit_frame` is which one that is. A test
+     * that only checked one of them could not tell "the knob did nothing" from "the knob
+     * edited the wrong frame". */
+    if (!strcmp(what, "foff"))        { *got = foff_tab[bank_i][edit_frame]; return 1; }
+    if (!strcmp(what, "foff_spread")) { *got = foff_spread; return 1; }
+    if (!strcmp(what, "foff_shape"))  { *got = foff_shape; return 1; }
+    if (!strcmp(what, "foff_sum"))    {                       /* the whole table, summed */
+        int32_t i, j, t = 0;
+        for (i = 0; i < WV_BANK_COUNT; i++)
+            for (j = 0; j < WV_FRAMES; j++)
+                t += (int32_t)foff_tab[i][j];
+        *got = t; return 1;
+    }
+    if (!strcmp(what, "edit_frame"))  { *got = edit_frame; return 1; }
+    if (!strcmp(what, "edit_src"))    { *got = edit_src; return 1; }
+    /* The whole table, as a sum: 8 banks x 8 frames packed one byte each would overflow
+     * the int, so this is the sum of products with a position weight. A single byte
+     * moving changes it, and a byte moving to the WRONG frame changes it differently --
+     * which is the injection the per-frame probe could not see, because a probe that
+     * reads the frame the page says it is on agrees with a page that always writes
+     * frame 0 whenever it is looking at frame 0. */
+    if (!strcmp(what, "foff_hash")) {
+        uint8_t b, f; int32_t h = 0;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                h += (int32_t)foff_tab[b][f] * (1 + (int32_t)f);
+        *got = h;
+        return 1;
+    }
+    if (!strcmp(what, "foff_at"))     { *got = foff_tab[0][0]; return 1; }
+    if (!strcmp(what, "foff_max")) {
+        uint8_t b, f; int32_t mx = 0;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                if ((int32_t)foff_tab[b][f] > mx) mx = foff_tab[b][f];
+        *got = mx;
+        return 1;
+    }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
@@ -3900,6 +4120,7 @@ void app_init(void)
     ui_apply();
     bank_i = 0;
     bank.frames = WV_BANKS[0];
+    bank.foff = foff_tab[0];
     held_prev = 0;
     btn_prev = 0;
     wf_idx = 0;
@@ -4009,6 +4230,15 @@ static void save_snapshot(save_rec *r)
         r->region[i].loop_e = region[i].loop_e;
         r->region[i].on = region[i].on;
     }
+    {
+        uint8_t b, f;
+        for (b = 0; b < SAVE_BANKS; b++)
+            for (f = 0; f < 8; f++)
+                r->foff[b][f] = (b < WV_BANK_COUNT && f < WV_FRAMES)
+                                ? foff_tab[b][f] : 0u;
+        r->foff_spread = foff_spread;
+        r->foff_shape = foff_shape;
+    }
 }
 
 /* the record -> app.c's statics. The inverse of save_snapshot, and it has to stay one:
@@ -4046,6 +4276,14 @@ static void save_apply(const save_rec *r)
         region[i].loop_s = r->region[i].loop_s;
         region[i].loop_e = r->region[i].loop_e;
         region[i].on = r->region[i].on;
+    }
+    {
+        uint8_t b, f;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                foff_tab[b][f] = (b < SAVE_BANKS && f < 8) ? r->foff[b][f] : 0u;
+        foff_spread = r->foff_spread > 127u ? 0u : r->foff_spread;
+        foff_shape = r->foff_shape < FOFF_SHAPE_N ? r->foff_shape : 0u;
     }
 }
 

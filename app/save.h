@@ -42,6 +42,15 @@ typedef struct {
     uint8_t  smp_i;
     uint8_t  src;
 
+    /* SYNTH's EDIT page: the phase offsets, 8 banks x 8 frames, plus the ramp's own two
+     * settings. The table is saved rather than rebuilt from SPREAD and SHAPE because K2
+     * can pull one frame off the ramp, and that edit is a value like any other. SPREAD and
+     * SHAPE are saved too, so the page opens showing the numbers that produced the table
+     * instead of showing zero over a table that has offsets in it. */
+    uint8_t  foff[SAVE_BANKS][8];
+    uint8_t  foff_spread;
+    uint8_t  foff_shape;
+
     save_region region[SAVE_SLOTS];
 } save_rec;
 
