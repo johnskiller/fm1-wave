@@ -61,6 +61,27 @@ static float lfo_cut_scale(const wv_state *s)
     return fm_exp2f(fm_sin_pi(s->lfo_ph * FM_TWO_PI) * lfo_oct(s->lfo_depth));
 }
 
+/* KEY TRACKING: the corner's multiplier for one note.
+ *
+ * One multiply and one exp2 per voice per block -- the same exp2 the LFO already pays
+ * once per block, and 8 of them against a block that renders 2048 voice-samples. This
+ * is as close to free as a feature gets, which is why it went first.
+ *
+ * The reference is C4 (MIDI 60): a note at 60 gets 1.0 whatever the setting, so turning
+ * KEY TRACK up never moves the note the patch was voiced on. Above 60 the corner rises,
+ * below it falls -- at 100 % the filter tracks the keyboard exactly, which is what makes
+ * a low note dark and a high note bright with one CUT setting.
+ */
+float wv_ktrack_scale(uint32_t note, uint32_t pct)
+{
+    float semis;
+    if (pct == 0u)
+        return 1.0f;
+    /* signed without a signed type: note is a MIDI number and 60 is the reference */
+    semis = (note >= 60u) ? (float)(note - 60u) : -(float)(60u - note);
+    return fm_exp2f(semis * (1.0f / 12.0f) * ((float)pct * 0.01f));
+}
+
 static float svf_g(float hz)
 {
     float w = FM_PI * hz * (1.0f / 44100.0f);
@@ -315,6 +336,11 @@ void wv_init(wv_state *s)
     s->lfo_rate = 0;
     s->lfo_depth = 0;
     s->lfo_ph = 0.0f;
+    /* Filter type LP and no key tracking: a patch made before either existed sounds the
+     * same after them. Both defaults are the "off" state -- LP is what the voice always
+     * read, and 0 % tracking is the corner the CUT knob always meant. */
+    s->ftype = WV_FTYPE_LP;
+    s->ktrack = 0;
 }
 
 /* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
@@ -610,11 +636,32 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
     wv_frames_at(b, mf, &fa, &fb, &ft);
     /* CUT, swept by the LFO. The scale multiplies Hz, so the depth is symmetric in
      * octaves -- see lfo_cut_scale. Read, not advanced: this function runs twice a
-     * block (once per core). */
+     * block (once per core).
+     *
+     * This is the corner BEFORE key tracking, and it is what the smoother is shared on:
+     * cut_z is one ramp for every voice, because the knob is one knob. Key tracking
+     * multiplies it per voice, after the ramp, so a held chord keeps eight proportional
+     * corners and the smoother still has a single target -- the alternative (a smoother
+     * per voice) would cost 8 floats of state and make the knob glide at whatever rate
+     * the last note happened to set. */
     float cut_t = cut_hz(s->cut) * lfo_cut_scale(s);
     /* past Nyquist the SVF's tan() blows up: 16 kHz * 2^4 is 256 kHz */
     if (cut_t > 18000.0f)
         cut_t = 18000.0f;
+    /* per-voice key tracking, resolved once per block: the note does not move inside a
+     * block, and 8 exp2 per block is nothing. fa/fb are hoisted for the same reason.
+     *
+     * kt is a MULTIPLIER on the same cut_z ramp, so the smoother stays single and its
+     * target stays the knob's own value. What it costs inside the sample loop is one
+     * multiply per voice when the setting is on, and a branch when it is off -- this
+     * chip's FPU divides in hardware (the image contains no float divide helper at all,
+     * only integer udivdi3), so svf_g's division per voice would have been affordable
+     * too, but a multiply on a value already in a register is still cheaper. */
+    const int kt_on = (s->ktrack != 0u);
+    float kt_scale[WV_VOICES];
+    uint32_t kti;
+    for (kti = 0; kti < WV_VOICES; kti++)
+        kt_scale[kti] = kt_on ? wv_ktrack_scale(s->v[kti].note, s->ktrack) : 1.0f;
     float amt_t = u7_to_f(s->sh_amount);
     /* the SVF's damping: RES 0 is a plain low-pass, RES 127 rings hard */
     float damp = 2.0f - 1.85f * u7_to_f(s->res);
@@ -639,10 +686,21 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
 
         for (i = from; i < to; i++) {
             wv_voice *v = &s->v[i];
-            float osel, s1, s2, lp, hp, bp;
+            float osel, s1, s2, lp, hp, bp, gi, out_s;
 
             if (!v->active)
                 continue;
+
+            /* KEY TRACKING: the corner, per voice, as the shared g scaled by the note's
+             * ratio. One multiply, and 1.0 at ktrack 0 -- so a filter with tracking off
+             * runs the identical arithmetic it always did.
+             *
+             * Scaling g rather than cut_z is the cheap way round: g = tan(pi*f/fs) is
+             * proportional to f for small angles, and the whole point of the tracking is
+             * that the ratio between two notes is exact -- multiplying the ratio into g
+             * keeps it exact, while re-deriving g from a scaled frequency would add a
+             * tan() per voice per sample for the same picture. */
+            gi = kt_on ? g * kt_scale[i] : g;
 
             eg_step(s, v);
 
@@ -678,14 +736,21 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
              * coefficient that blows up when the corner goes near Nyquist */
             s1 = v->lpf_s1;
             s2 = v->lpf_s2;
-            hp = (sh - (damp + g) * s1 - s2) / (1.0f + g * (g + damp));
-            bp = g * hp + s1;
-            lp = g * bp + s2;
-            v->lpf_s1 = g * hp + bp;
-            v->lpf_s2 = g * bp + lp;
+            hp = (sh - (damp + gi) * s1 - s2) / (1.0f + gi * (gi + damp));
+            bp = gi * hp + s1;
+            lp = gi * bp + s2;
+            v->lpf_s1 = gi * hp + bp;
+            v->lpf_s2 = gi * bp + lp;
+
+            /* Which tap the VCA reads. All three are already computed -- they are
+             * intermediate results of one iteration -- so this switch is a move, not a
+             * filter. LP is the default and what every patch before this heard. */
+            out_s = (s->ftype == WV_FTYPE_HP) ? hp
+                  : (s->ftype == WV_FTYPE_BP) ? bp
+                  : lp;
 
             env = v->level;
-            amp = lp * env * WV_VOICE_GAIN * master * (1.0f / 4096.0f);
+            amp = out_s * env * WV_VOICE_GAIN * master * (1.0f / 4096.0f);
             out[k] += amp;
         }
 
@@ -758,6 +823,10 @@ static void smooth_step(wv_state *s, uint32_t n)
      * ran 501..811 Hz instead of 415..709 Hz -- the right shape, shifted up by about
      * 0.27 of an octave, which is the modulation being partly cancelled rather than
      * applied. */
+    /* The smoother's target EXCLUDES key tracking on purpose: cut_z is one ramp shared by
+     * every voice, and the tracking ratio is applied per voice after it (voice_block). If
+     * the target carried a single voice's tracking, a chord would drag the whole filter
+     * toward whichever note was rendered last. */
     float cut_t = cut_hz(s->cut) * lfo_cut_scale(s);
     if (cut_t > 18000.0f)
         cut_t = 18000.0f;                    /* same clamp voice_block applies */

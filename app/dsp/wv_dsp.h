@@ -100,7 +100,23 @@ typedef struct {
      * which is also what a player expects from a filter LFO. */
     uint8_t  lfo_rate;     /* 0..127; 0 turns the LFO off (and is the default) */
     uint8_t  lfo_depth;    /* 0..127: 0..4 octaves either side of CUT */
-    uint8_t  lpad;
+    /* The filter's output: which of the SVF's three taps the VCA reads.
+     *
+     * This costs nothing to offer. Zavalishin's topology-preserving SVF computes lp, bp
+     * and hp every sample already -- the three are intermediate results of one iteration
+     * -- and the voice was reading `lp` and discarding the other two. Selecting a tap is
+     * a pointer written once per block, not a second filter.
+     */
+    uint8_t  ftype;        /* WV_FTYPE_* */
+    /* KEY TRACKING: how far the corner follows the note, in percent of one octave per
+     * octave played, from C4 (60).
+     *
+     * Stored as 0, 25, 50, 75, 100 rather than 0..127, because the setting is a choice
+     * out of five and not a fine control: a knob that can land on 37 % key tracking is
+     * a knob that makes two patches that should match not match. The panel offers the
+     * five; the DSP just multiplies.
+     */
+    uint8_t  ktrack;       /* 0, 25, 50, 75, 100 */
     float    lfo_ph;       /* 0..1 */
 } wv_state;
 
@@ -226,6 +242,17 @@ uint32_t wv_active(const wv_state *s);
 /* The LFO's rate in Hz for a panel value 0..127 (0 = off). Exposed so the panel can
  * print the rate instead of a percentage: "0.4 Hz" is a rate, "37" is not. */
 float wv_lfo_hz(uint32_t v127);
+
+/* The filter's tap. LP is the default and the only one this app had; HP and BP are the
+ * two the SVF was already computing and throwing away. */
+enum { WV_FTYPE_LP, WV_FTYPE_HP, WV_FTYPE_BP, WV_FTYPE_N };
+
+/* KEY TRACKING, as the corner's multiplier for one note: 2^((note-60)/12 * pct/100).
+ * At 100 % a note an octave up has its corner an octave higher; at 0 % this is 1.0 and
+ * every note has the corner the CUT knob says. 50 % is half an octave per octave, which
+ * is the setting that keeps a filter sounding even across the keyboard rather than
+ * opening up as you climb. */
+float wv_ktrack_scale(uint32_t note, uint32_t pct);
 
 /* ─── the render ──────────────────────────────────────────────────────────── */
 
