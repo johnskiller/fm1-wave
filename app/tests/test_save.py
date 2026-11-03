@@ -265,54 +265,154 @@ expect cut 3
 ok(probe(out, "saved") == 1, "a record of THIS version is accepted (the gate is not just paranoia)")
 ok(probe(out, "cut") == 3, "and its values are what boot")
 
-# ── 10. the "not saved" mark is drawn, and it is the panel's only warning ──────
-# This is the whole safety of the manual model: an edit in RAM that flash does not have.
-# It cannot be heard, so it has to be seen. Measured at 3/5 ink (148,109,32 on SYNTH's
-# amber background) in the top-left of the material band, one row under the slot name.
-def ink_in(path, rgb, y0, y1, x0, x1):
+# ── 10. the save line: length is how much, colour is how long ──────────────────
+#
+# The mark used to be the words "NOT SAVED" in the top-left of the material band. It was
+# condemned by measurement, not by taste: in its own 13 x 62 box it erased 443 px of
+# SYNTH's waveform (403 px of SMPL's and GRAN's), in the brightest part of the picture.
+#
+# It is now two rows in the padding the band already had, directly under the scope's
+# 0 dBFS line, and it carries two numbers with two axes: LENGTH = the count of groups
+# that differ from flash, COLOUR = how long they have been left that way.
+#
+# What this can and cannot see, measured rather than assumed:
+#
+#   wrong row            -> FAIL on the row check. The band's padding is 6 rows above the
+#                           picture and the wave reaches y 90, so the line must stay in 84..85.
+#   ink_hi for the colour -> FAIL: ink_hi is (255,186,65), the same colour a knob arc fills
+#                           with, and a save line in it reads as a fifth control.
+#   length not clearing   -> FAIL: "gone once saved" compares the two screenshots.
+#
+# The brightness ramp is asserted through the probe (save_ink, 0..3), not through pixels:
+# the ramp is 5 minutes long and a screenshot taken mid-ramp would pin an arbitrary step.
+def band_px(path, bg, y0, y1, x0=0, x1=240):
     b = np.array(Image.open(path).convert("RGB"))
     sub = b[y0:y1, x0:x1]
-    return int(((sub[:, :, 0] == rgb[0]) & (sub[:, :, 1] == rgb[1]) & (sub[:, :, 2] == rgb[2])).sum())
+    m = np.any(sub != np.array(bg, dtype=np.uint8), axis=2)
+    return int(m.sum())
+
+
+def line_extent(path, bg, y):
+    b = np.array(Image.open(path).convert("RGB"))
+    m = np.any(b[y] != np.array(bg, dtype=np.uint8), axis=1)
+    xs = np.where(m)[0]
+    return (int(xs.min()), int(xs.max())) if len(xs) else None
 
 
 out = run("""
-turn K1 -8
+expect save_line 0
+turn K1 -4
+master 3000
+expect save_line 30
 shot dirty.png
 tap SAVE
+master 3000
+expect save_line 0
 shot saved.png
-""", "mark")
-MARK = (148, 109, 32)          # dim(sk.ink_hi, 3, 5) quantised to RGB565 on SYNTH
-d = ink_in(os.path.join(OUT, "dirty.png"), MARK, 84, 120, 0, 80)
-v = ink_in(os.path.join(OUT, "saved.png"), MARK, 84, 120, 0, 80)
-ok(d >= 60, "the NOT SAVED mark is drawn while there are unsaved edits", f"{d} px")
-ok(v < d // 3, "and it is gone once saved", f"dirty {d} px, saved {v} px")
+""", "line")
+# One group is 240/8 = 30 px: a single edit has to move the line visibly, or it reads broken.
+sl = probes(out, "save_line")
+ok(sl[0] == 0 and sl[1] == 30 and sl[2] == 0,
+   "the line is 0 px, then 30 px for one changed group, then 0 again after the save")
 
-# The mark must stay out of SYNTH's label column. That column is the picture's neighbour,
-# and a 42 px string anchored to its right edge reached back to x 192 and closed the 12 px
-# gap the geometry promises between the picture (ends at 175) and the labels (start at 189)
-# -- which test_screen.py caught as a broken gap.
+SYNTH_BG = (41, 28, 8)
+d = band_px(os.path.join(OUT, "dirty.png"), SYNTH_BG, 87, 89)
+v = band_px(os.path.join(OUT, "saved.png"), SYNTH_BG, 87, 89)
+ok(d == 60, "the line is drawn on both of its rows while unsaved", f"{d} px")
+ok(v == 0, "and nothing at all is drawn once saved", f"{v} px")
+
+# It must not touch the picture. The wave's highest ink is y 90 and the band's picture
+# starts at MAT_PAD = 6, so rows 86..89 are the air that keeps a growing line from
+# becoming a lid on the waveform.
+# The line sits at band rows 3..4 (screen 87..88) for a measured reason: at rows 0..1 it
+# was one row under the scope's full-width 0 dBFS graticule with no air between them, and
+# two 240 px bars on consecutive rows read as one crowded block.
+ok(band_px(os.path.join(OUT, "dirty.png"), SYNTH_BG, 84, 87) == 0,
+   "the three rows directly under the scope stay empty (the line is not crowding it)")
+ok(band_px(os.path.join(OUT, "dirty.png"), SYNTH_BG, 89, 91) == 0,
+   "and one row of air is left between the line and the wave")
+
+# Colour, not length, carries the age -- and it must top out at `ink`, never `ink_hi`.
+# dim(ink, 5, 5) is ink itself: (238,137,24) on SYNTH, quantised.
+INK = (238, 137, 24)
+out = run("""
+turn K1 -4
+master 3000
+""" + "master 3000\nwait 1000\n" * 300 + """
+expect save_ink 3
+shot old.png
+""", "ramp")
+ok(probe(out, "save_ink") == 3, "an edit left unsaved for 5 minutes is at full brightness")
+b = np.array(Image.open(os.path.join(OUT, "old.png")).convert("RGB"))
+row = b[87]
+xs = np.where(np.any(row != np.array(SYNTH_BG, dtype=np.uint8), axis=1))[0]
+cols = set(tuple(int(c) for c in row[x]) for x in xs) if len(xs) else set()
+ok(INK in cols, "and it reaches exactly `ink`, the knob arc's colour", f"{sorted(cols)}")
+ok((255, 186, 65) not in cols, "never `ink_hi`: a save line at ink_hi reads as a fifth control")
+
+# ── 11. B_SAVE's lamp says the same thing, on the button you would press ────────
 #
-# Asserting the gap from THIS file does not work, and that was measured: a clean-columns
-# test over the whole band passes with the mark back in the column, because the labels
-# themselves already ink those columns. The check has to be about the mark's own extent,
-# so it is measured from the two screenshots: everything the mark added, on the row it is
-# drawn on, must end left of the picture's edge.
-def mark_columns(dirty, saved, y0, y1):
-    """Columns where the mark's ink appears in `dirty` and not in `saved`."""
-    b = np.array(Image.open(dirty).convert("RGB")).astype(int)
-    v = np.array(Image.open(saved).convert("RGB")).astype(int)
-    d = np.abs(b - v).sum(axis=2)
-    cols = set()
-    for y in range(y0, y1):
-        for x in range(0, 240):
-            if d[y, x] > 8:
-                cols.add(x)
-    return sorted(cols)
+# Three levels, because that is what the matrix can show: lit, mid (felucca-bsp's steady
+# ~12 % level), and the glow every unlit button already has. The top level is tied to
+# SAVE_LINE_FULL_MS rather than a threshold of its own, so "the line is full" and "the
+# button is fully lit" are one event said twice and cannot drift apart.
+# The two boundaries, not just the ends: a lamp on its own clock would pass a check that
+# only looked at t=0 and t=310 s. Measured against the line's own numbers -- mid below the
+# top step, lit at it -- 299 s and 301 s straddle SAVE_LINE_FULL_MS (300 s).
+out = run("""
+wait 200
+expect save_led 0
+turn K1 -4
+wait 200
+expect save_led 1
+""" + "wait 1000\n" * 298 + """
+expect save_led 1
+""" + "wait 1000\n" * 4 + """
+expect save_led 2
+tap SAVE
+wait 200
+expect save_led 0
+""", "lamp")
+led = probes(out, "save_led")
+ok(led == [0, 1, 1, 2, 0],
+   "the lamp is dark when saved, mid while an edit waits (still mid a second before the "
+   "line fills), lit at the line's own threshold, dark again after the save", f"{led}")
 
+# The flag is not the light. The platform is told through two different calls -- lit comes
+# via plat_leds, mid via plat_lights_mid -- and a flag that is set while the wrong call is
+# made would pass the check above and leave the button dark on the device.
+# WHAT THIS CANNOT SEE, measured rather than assumed: plat_lights_mid's button argument.
+# plat_host.c's plat_lights_mid takes (b, k) and does `(void)b; mid_keys = k & ~lit_keys` --
+# mid is only recorded for KEYS, so the simulator cannot show a mid BUTTON at all. Injecting
+# "delete the plat_lights_mid call" leaves this file at 55/55 green, which is the honest
+# state of it: the app's own state machine is covered, the lamp's mid path is not, and a
+# B_SAVE that sits at glow while an edit waits would be caught by eye on the device and by
+# nothing here. Fixing that means teaching the host to record mid buttons, which is a change
+# to platform/ and out of bounds for this repo.
+out = run("""
+turn K1 -4
+wait 200
+leds
+""", "lamp_mid")
+ok("SAVE" not in out.split("leds:")[1],
+   "an unsaved edit does not put SAVE in the lit set (it is mid, not lit)")
 
-mc = mark_columns(os.path.join(OUT, "dirty.png"), os.path.join(OUT, "saved.png"), 100, 116)
-ok(mc and max(mc) < 176, "the mark stays left of SYNTH's picture edge",
-   f"mark spans x {mc[0] if mc else '-'}..{max(mc) if mc else '-'}")
+out = run("""
+turn K1 -4
+""" + "wait 1000\n" * 310 + """
+leds
+""", "lamp_lit")
+ok("SAVE" in out.split("leds:")[1], "and it does reach the lit set once the line is full")
+
+# The line takes the source's own colour, so it belongs to whichever skin is up.
+for name, pre, bg in (("smpl", "tap SEL\n", (8, 40, 16)),
+                      ("gran", "tap SEL\ntap SEL\n", (8, 36, 49))):
+    out = run(pre + "turn K1 -4\nmaster 3000\nshot " + name + ".png\n", name)
+    ext = line_extent(os.path.join(OUT, name + ".png"), bg, 87)
+    # 60 px, not 30: switching SOURCE is itself a saved field, so this is two groups --
+    # `src` and the one region the knob moved. Length counts groups, not knobs.
+    ok(ext is not None and ext[1] - ext[0] + 1 == 60, f"the line is drawn in {name.upper()} too",
+       f"{ext}")
 
 print(f"\n{checks} checks, {failed} failed")
 sys.exit(1 if failed else 0)

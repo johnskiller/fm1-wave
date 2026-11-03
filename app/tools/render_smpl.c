@@ -76,7 +76,7 @@ int main(int argc, char **argv)
     wv_slice sl[WV_SLICE_MAX];
     uint32_t nslot, ns, i;
     wv_state st;
-    wv_bank bk;
+    wv_bank bk = { 0 };
     int at = 0;
 
     pool = read_all(poolp, &pool_len);

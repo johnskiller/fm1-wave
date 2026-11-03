@@ -76,6 +76,8 @@ static void setup(wv_state *s, wv_bank *b)
     s->res = 0;
     s->sh_amount = 0;
     b->frames = sines;
+    b->foff = 0;               /* no per-frame offsets: the path every bank took before
+                                * wv_bank had the member at all */
 }
 
 /* ── 1. the time curves are the ranges the header claims ──────────────────── */

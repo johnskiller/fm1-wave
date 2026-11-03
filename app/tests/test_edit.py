@@ -525,12 +525,17 @@ shot %s.png
     ck(rel[-1] > want_hi + 10,
        f"and it passes LOOP E ({want_hi}) on its way to END: {rel}")
 
-    print("EDIT does nothing outside SMPL")
+    print("EDIT never changes the source")
     # EDIT used to switch the source to SMPL from anywhere, on the argument that a
     # button doing nothing is a broken button. In use that was worse: EDIT sits beside
     # the pages a player presses, and a stray press replaced the source and repainted
     # the whole screen.
-    for from_src, presses in (("SYNTH", 0), ("GRAN", 2)):
+    #
+    # SYNTH now HAS an edit page (the per-frame phase offset), so "EDIT leaves nothing
+    # open" is no longer true there -- but the rule this test exists for is that EDIT
+    # does not change the SOURCE, and that is still what it checks. GRAN has no page at
+    # all, so there both halves still hold.
+    for from_src, presses, want_edit in (("SYNTH", 0, 1), ("GRAN", 2, 0)):
         o = run("""wait 400
 %s
 press EDIT
@@ -538,10 +543,73 @@ wait 80
 release EDIT
 wait 150
 expect src %d
-expect edit 0
+expect edit %d
 """ % ("\n".join(["press SEL\nwait 80\nrelease SEL\nwait 150"] * presses),
-      0 if from_src == "SYNTH" else 2), out, allow_fail=True)
+      0 if from_src == "SYNTH" else 2, want_edit), out, allow_fail=True)
         ck(expect_ok(o), f"EDIT in {from_src} leaves the source alone:\n{o.strip()[-200:]}")
+
+    print("leaving SMPL leaves the EDIT page behind")
+    # The other half of the rule above, and a defect the first half could not see: B_SEL
+    # changed the source and left `edit_page` set, so a page that only SMPL can show
+    # stayed up on sources that have no such page. The flag is read all over the screen,
+    # so this was not a stray label -- on GRAN the bottom-right corner printed ZOOM
+    # instead of GRAIN and the four knobs below became START / LOOP S / LOOP E / END
+    # instead of CUT / RES / SHAPE / AMOUNT, and the material band drew region
+    # boundaries over a cloud that has none.
+    #
+    # Measured before the fix: `expect edit` read 1 through GRAN and back to SYNTH.
+    def sel(n=1):
+        return "\n".join(["press SEL\nwait 60\nrelease SEL\nwait 140"] * n)
+
+    o = run("""wait 400
+%s
+press EDIT
+wait 60
+release EDIT
+wait 200
+expect edit 1
+%s
+expect src 2
+expect edit 0
+%s
+expect src 0
+expect edit 0
+%s
+expect src 1
+expect edit 0
+""" % (sel(), sel(), sel(), "press SEL\nwait 60\nrelease SEL\nwait 140"), out, allow_fail=True)
+    ck(expect_ok(o), f"EDIT closes when the source leaves SMPL, and stays closed on return:\n{o.strip()[-260:]}")
+
+    # And the knobs go back with it, which is what makes the flag matter: the leaked page
+    # renames all four knobs below the picture (START / LOOP S / LOOP E / END instead of
+    # CUT / RES / SHAPE / AMOUNT) and swaps GRAIN for ZOOM in the corner. So the test is a
+    # pixel comparison against a GRAN that never opened EDIT. Identical bands mean the
+    # leaked page left no mark on the render; anything else means the flag still reaches
+    # the painters.
+    o = run("""wait 400
+%s
+expect src 2
+shot clean.png
+""" % sel(2), out, allow_fail=True)
+    ck(expect_ok(o), "GRAN reached without touching EDIT:\n" + o.strip()[-200:])
+
+    o = run("""wait 400
+%s
+press EDIT
+wait 60
+release EDIT
+wait 200
+%s
+expect src 2
+expect edit 0
+shot after.png
+""" % (sel(), sel()), out, allow_fail=True)
+    ck(expect_ok(o), "GRAN after leaving EDIT:\n" + o.strip()[-200:])
+
+    clean = np.array(Image.open(os.path.join(out, "clean.png")).convert("RGB"))[176:240]
+    after = np.array(Image.open(os.path.join(out, "after.png")).convert("RGB"))[176:240]
+    diff = int((np.abs(clean.astype(int) - after.astype(int)).sum(axis=2) > 8).sum())
+    ck(diff == 0, f"and the knob band is identical to a GRAN that never opened EDIT: {diff} px differ")
 
     print("the four boundaries are four colours, and the playhead is not one of them")
     # Four identical green lines were the page's real defect: it worked and could not be

@@ -100,7 +100,23 @@ typedef struct {
      * which is also what a player expects from a filter LFO. */
     uint8_t  lfo_rate;     /* 0..127; 0 turns the LFO off (and is the default) */
     uint8_t  lfo_depth;    /* 0..127: 0..4 octaves either side of CUT */
-    uint8_t  lpad;
+    /* The filter's output: which of the SVF's three taps the VCA reads.
+     *
+     * This costs nothing to offer. Zavalishin's topology-preserving SVF computes lp, bp
+     * and hp every sample already -- the three are intermediate results of one iteration
+     * -- and the voice was reading `lp` and discarding the other two. Selecting a tap is
+     * a pointer written once per block, not a second filter.
+     */
+    uint8_t  ftype;        /* WV_FTYPE_* */
+    /* KEY TRACKING: how far the corner follows the note, in percent of one octave per
+     * octave played, from C4 (60).
+     *
+     * Stored as 0, 25, 50, 75, 100 rather than 0..127, because the setting is a choice
+     * out of five and not a fine control: a knob that can land on 37 % key tracking is
+     * a knob that makes two patches that should match not match. The panel offers the
+     * five; the DSP just multiplies.
+     */
+    uint8_t  ktrack;       /* 0, 25, 50, 75, 100 */
     float    lfo_ph;       /* 0..1 */
 } wv_state;
 
@@ -137,11 +153,38 @@ float wv_eg_sustain(uint32_t v127);
  * firmware this points into flash (XIP) and is never copied. */
 typedef struct {
     const int16_t *frames;   /* WV_BANK_BYTES bytes: frame f at + f*WV_POINTS */
+    /* PER-FRAME PHASE OFFSET, one byte per frame, in POINTS of the 256-point cycle.
+     *
+     * This is the whole of SYNTH's EDIT: no flash, no RAM copy, no second table. The
+     * table stays exactly where it is in flash and only the *index* moves.
+     *
+     * Why it matters. wv_table_read2(fa, fb, ph, t) reads both frames at the SAME phase,
+     * so MORPH between two frames is a sample-by-point sum of two shapes exactly in
+     * phase -- and two shapes in phase sum to a third shape whose partials add or cancel
+     * depending on where they line up. With an offset per frame, MORPH becomes a phase
+     * scan: the pair slides through each other as the knob turns, so the sum passes
+     * through the cancellations instead of starting at one.
+     *
+     * Measured on SAW SQR through the real SOFT shaper at amount 1.0, blended frames
+     * only: no offset holds the spectral centroid inside 1.00x, a 16-point-per-frame
+     * ramp spreads it 1.16x. Small, but it is timbre rather than level, and it costs one
+     * add and one mask per frame read.
+     *
+     * Null means every frame at zero, which is bit-identical to the build before this
+     * existed -- the same rule MORPH followed, so an old patch is unchanged.
+     */
+    const uint8_t *foff;
 } wv_bank;
 
 /* Read the bank at phase `ph` (0..1) and morph position `mf` (0..WV_FRAMES-1),
  * both linearly interpolated. Returns -1..1. */
 float wv_table_read(const wv_bank *b, float ph, float mf);
+
+/* The same read with the two frames already resolved AND their phase offsets applied by
+ * the caller's index arithmetic -- see wv_bank.foff. `o0`/`o1` are the two frames'
+ * offsets in points, already wrapped to 0..WV_POINTS-1. */
+float wv_table_read2o(const int16_t *fa, const int16_t *fb, float ph, float t,
+                      uint32_t o0, uint32_t o1);
 
 /* The same read, with the frame pair resolved once (wv_frames_at) and the samples
  * taken from it (wv_table_read2). A block renderer should hoist: MORPH does not change
@@ -226,6 +269,17 @@ uint32_t wv_active(const wv_state *s);
 /* The LFO's rate in Hz for a panel value 0..127 (0 = off). Exposed so the panel can
  * print the rate instead of a percentage: "0.4 Hz" is a rate, "37" is not. */
 float wv_lfo_hz(uint32_t v127);
+
+/* The filter's tap. LP is the default and the only one this app had; HP and BP are the
+ * two the SVF was already computing and throwing away. */
+enum { WV_FTYPE_LP, WV_FTYPE_HP, WV_FTYPE_BP, WV_FTYPE_N };
+
+/* KEY TRACKING, as the corner's multiplier for one note: 2^((note-60)/12 * pct/100).
+ * At 100 % a note an octave up has its corner an octave higher; at 0 % this is 1.0 and
+ * every note has the corner the CUT knob says. 50 % is half an octave per octave, which
+ * is the setting that keeps a filter sounding even across the keyboard rather than
+ * opening up as you climb. */
+float wv_ktrack_scale(uint32_t note, uint32_t pct);
 
 /* ─── the render ──────────────────────────────────────────────────────────── */
 

@@ -28,7 +28,34 @@
 
 static wv_state dsp;
 static uint8_t  cpu2;            /* the second core took the job (app_init's plat_cpu2_set) */
-static wv_bank  bank = { WV_BANKS[0] };
+/* SYNTH's EDIT: a phase offset per frame, in points of the 256-point cycle.
+ *
+ * WHY THIS EXISTS: MORPH reads two frames at the same phase and crossfades them. Two
+ * waves at the same phase ADD, so where the frames are alike they reinforce and where
+ * they are not they cancel -- a comb. Turning one frame n points against its neighbour
+ * moves the cancellation, which is audible as the morph opening up.
+ *
+ * Doubt it? app/tools/render_foff.sh renders the A/B as a WAV: the same note, same
+ * morph, offsets off then on.
+ *
+ * WHY A TABLE AND NOT A KNOB ON `off[frame]` ALONE: eight frames turned independently is
+ * eight numbers, and the setting that matters most is not eight numbers but the SHAPE of
+ * the ramp across them. A ramp is one number (points per frame) plus one shape.
+ */
+static uint8_t foff_tab[WV_BANK_COUNT][WV_FRAMES];
+
+/* The offset in RAM is a ramp, not a per-frame value: SPREAD and SHAPE describe all
+ * eight at once, and OFFSET edits the frame the page is pointed at, which desynchronises
+ * that one frame from the ramp (that is the point -- it is the frame you are listening
+ * to). Turning SPREAD rewrites the whole table, discarding those edits, so the page shows
+ * the ramp whenever it is moved. */
+enum { FOFF_LIN, FOFF_ALT, FOFF_RAND, FOFF_SHAPE_N };
+static uint8_t foff_spread;     /* points per frame, 0..127 */
+static uint8_t foff_shape;      /* FOFF_* */
+
+static uint8_t foff_cur(void);
+static void foff_ramp(void);
+static wv_bank  bank = { WV_BANKS[0], 0 };   /* foff is armed by foff_ramp() */
 
 /* The sample pool, as the platform handed it over. `pool` points into the resource
  * blob, not a copy: the blob is 276 KB of flash and there is no RAM for a copy. */
@@ -130,6 +157,27 @@ static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
  * before the LFO existed must sound the same after it. */
 static uint8_t k_lfo_rate = 0, k_lfo_depth = 0;
 static uint8_t lfo_page;
+/* The FX page's two controls: the filter's tap and key tracking.
+ *
+ * TYPE starts at LP and KEY TRK at 0, which is exactly what the voice did before either
+ * existed -- so a patch saved by an older build, and the instrument's own default, both
+ * sound the same after this page appeared. That is the same rule the LFO page followed. */
+static uint8_t k_ftype = WV_FTYPE_LP;
+static uint8_t k_ktrack = 0;          /* 0, 25, 50, 75, 100 */
+static uint8_t fx_page;
+/* SYNTH's EDIT page: which of the eight frames the offset knobs act on. K4 picks it.
+ * The page owns this rather than K1 because K1-K3 are the value's three digits -- 0..255
+ * does not fit one knob's detents usefully, and a frame picker has to be visible while
+ * the digits are being turned. */
+static uint8_t edit_frame;
+/* Which source opened the page currently up, so a source switch closes it instead of
+ * handing SMPL's editor to SYNTH. */
+static uint8_t edit_src;
+/* key tracking's five settings, in the panel's order. One list, so the panel's detents
+ * and the values save_load accepts can never drift apart. */
+static const uint8_t KT_VALUES[5] = { 0, 25, 50, 75, 100 };
+#define KT_STEPS 5
+static uint8_t kt_index(uint8_t pct); /* the detent for a setting, defined with the table */
 static uint8_t k_morph = 0;
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
  * encoder) so that every other knob stays where it is in every mode. */
@@ -246,10 +294,35 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  *
  * So: content first, height second, and the sum is checked by an assertion below.
  */
-#define KNOB_TOP   4                                  /* knob(): where its ink starts */
+/* The name starts at the band's own first row. It used to start 4 px down, which was
+ * affordable while the value had two rows under it; with the ring taking 47 of the 64 px,
+ * those 4 px are exactly what pushed the ring's bottom edge past the band (measured:
+ * cy + 23 = 67 against a 64 px band, so the last four rows of every ring were clipped). */
+#define KNOB_TOP   0                                  /* knob(): where its ink starts */
 #define KNOB_INK   (KNOB_TOP + 34 + 8)                /* label, value, bar = 46 px */
-#define KNOB_H     64                                 /* 18 px spare: the round knob art
-                                                       * that replaces the bar is not written yet */
+#define KNOB_H     64                                 /* the 46 px of text plus a 26 px arc
+                                                       * box: the bar is gone, see knob_arc() */
+
+/* The save line: two rows of MAT_PAD, in the air below the scope's baseline.
+ *
+ * LENGTH covers SAVE_LINE_FULL_CHANGES groups; beyond that the line is simply full, because
+ * saying "a lot" is all a 232 px bar can say about a record with 28 changeable groups. 8 was
+ * chosen against how the instrument is actually used -- a hand turns two or three knobs, not
+ * twenty -- so that those two or three show clearly. COLOUR reaches full ink at
+ * SAVE_LINE_FULL_MS. Both numbers are first guesses and both are in this one place;
+ * SAVE_LINE_ROW is where the line sits. */
+#define SAVE_LINE_FULL_CHANGES 8
+#define SAVE_LINE_FULL_MS      300000u                /* 5 minutes */
+
+/* Which rows of MAT_PAD the line occupies, and why not the top two.
+ *
+ * It started at MAT_PAD + 0..1, which is the row directly under the scope's 0 dBFS
+ * graticule -- one row below a full-width 240 px grey line, with no air between them.
+ * Measured: that graticule is (98,97,106) and a full-brightness line is (238,137,24); two
+ * full-width bars stacked on consecutive rows read as one crowded block, and the player
+ * said so ("离scope的下线太近"). Down here the gap is three rows, and the wave's first ink
+ * is y 91, so there is still a row of air below the line at its heaviest. */
+#define SAVE_LINE_ROW          3                      /* 0..2 stay empty under the scope */
 
 #define MAT_PAD    6                                  /* above and below the picture */
 #define MAT_WAVE   80                                 /* the picture's own height */
@@ -297,6 +370,42 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  * 60 px column sits at x 176..235 with a 4 px gap after the picture and 4 px at the
  * screen edge. The widest string is 54 px, leaving 6 px of slack. */
 #define SYN_W      172                                /* SYNTH's picture, x 4..175 */
+
+/* The stack's shear, in px per frame, chosen by eye off six rendered variants.
+ *
+ * Eight frames on one 172 x 80 picture: each is pushed STK_DX right and STK_DY up from
+ * the one behind it, so the eight read as one object with depth rather than eight traces
+ * on top of each other. No perspective: a frame's width does not shrink with depth,
+ * because a narrower far frame would say the far frame holds less TIME, and every frame
+ * is 256 points.
+ *
+ * STK_DY >= STK_DX is the part that matters. Equal steps (5/5) packed the frames as
+ * tightly vertically as horizontally and the eight curves tangled. Vertically apart is
+ * what lets the eye separate them, because a frame's own height is only 2 * amp.
+ *
+ * THE BUDGET, which is the whole argument here. The picture is 80 px tall and it has to
+ * hold seven steps, the lift, and two amplitudes:
+ *
+ *     2 * amp + 7 * STK_DY + RACK_LIFT <= 80 - 2      =>  amp <= (78 - 7*DY - LIFT)/2
+ *
+ *     DY 8, lift 8  ->  amp  7 px   (the first version; the player said "振幅太小")
+ *     DY 6, lift 8  ->  amp 14 px   <- this one, twice the height, 3 px between planes
+ *     DY 5, lift 8  ->  amp 16 px   2 px between planes, the zero lines start to merge
+ *
+ * 14 px is where a frame's own waveform is readable at all: the SAW SQR bank's frames
+ * span peak to peak over that height, and at 7 px the curve was a nearly flat line with
+ * the shape squeezed out of it. The frames are allowed to touch -- they are planes of one
+ * object, and the depth comes from brightness, not from air between them.
+ *
+ * Width is untouched: frame width = 172 - 7 * 6 = 130 px.
+ *
+ * The far frames are DIMMED rather than outlined. This band has two colours by design
+ * (ground and ink); a card border would be a third, and eight borders on 16-px-tall
+ * frames would be more ink than the curves. Brightness is the depth cue instead: f0 at
+ * half ink, f7 at full. */
+#define STK_DX     6              /* px right per frame */
+#define STK_DY     3              /* px up per frame */
+#define RACK_LIFT  6              /* how far the edited frame rises */
 #define SYN_COL_W  60                                 /* the labels' column */
 #define SYN_COL_R  (240 - 4)                          /* its right edge: x 235 */
 #define SYN_COL_X  (SYN_COL_R - SYN_COL_W)            /* 175 */
@@ -425,6 +534,8 @@ static void ui_apply(void)
     dsp.sh_amount = k_amount;
     dsp.lfo_rate = k_lfo_rate;
     dsp.lfo_depth = k_lfo_depth;
+    dsp.ftype = k_ftype;
+    dsp.ktrack = k_ktrack;
     dsp.morph = k_morph;
     dsp.grain_size = k_grain;
     dsp.spray = k_spray;
@@ -978,26 +1089,51 @@ static void input(void)
     if (btn_pressed(btn, B_ENV)) {
         env_page ^= 1u;
         if (env_page)
-            lfo_page = 0, arp_page = 0, edit_page = 0;   /* two pages cannot be up at once */
+            lfo_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;   /* two pages cannot be up at once */
+    }
+    /* B_FX: the filter's own page, and the second of the two buttons the panel had
+     * spare (panel-map.md listed it as free, with "filter type" already pencilled in).
+     *
+     * It exists because the filter gained two settings that are not knobs a player turns
+     * while playing: which tap the VCA reads, and how far the corner follows the note.
+     * Both are set once for a patch, which is what a page is for -- and the page is the
+     * only place a Hz figure can honestly be shown, because with key tracking on, the
+     * corner is a different frequency for every note held.
+     *
+     * CUT and RES stay on K1 and K2: the page is about the filter, and a filter page
+     * that moved the two knobs the filter is made of would be the one thing the panel
+     * must not do (the same rule the LFO page follows). */
+    if (btn_pressed(btn, B_FX)) {
+        fx_page ^= 1u;
+        if (fx_page)
+            env_page = 0, lfo_page = 0, arp_page = 0, edit_page = 0;
     }
     if (btn_pressed(btn, B_LFO)) {
         lfo_page ^= 1u;
         if (lfo_page)
-            env_page = 0, arp_page = 0, edit_page = 0;
+            env_page = 0, arp_page = 0, edit_page = 0, fx_page = 0;
     }
     /* B_ARP: the same page mechanism. The panel has had the button since the
      * beginning (plat.h's B_ARP) and nothing used it. */
     if (btn_pressed(btn, B_ARP)) {
         arp_page ^= 1u;
         if (arp_page)
-            env_page = 0, lfo_page = 0, edit_page = 0;
+            env_page = 0, lfo_page = 0, edit_page = 0, fx_page = 0;
     }
-    /* B_EDIT: the sample editor, and the fourth page. It replaced a one-press
-     * re-chop: a button that re-analysed the slot and gave no way to see or change
-     * what it found was a button that either worked or did not, and the panel has
-     * four knobs going spare in SMPL. EDIT is only meaningful in SMPL. */
+    /* B_EDIT: edit THE CURRENT SOURCE's structure -- SMPL's region, SYNTH's frame rack,
+     * and GRAN's grain controls when they exist. It replaced a one-press re-chop: a
+     * button that re-analysed the slot and gave no way to see or change what it found
+     * was a button that either worked or did not, and the panel has four knobs going
+     * spare in every source.
+     *
+     * The rule is "a source's own structure", which is why this button never has to
+     * compete with the two oscillators of one patch: choosing a VCO is a property of the
+     * voice, not of the material, and that is planned for B_HOME instead (spec.md §5d).
+     * So adding GRAN's page here takes nothing from SMPL's or SYNTH's. */
     if (btn_pressed(btn, B_EDIT)) {
-        /* Only SMPL has anything to edit, and the button does nothing anywhere else.
+        /* Today that is SMPL and SYNTH. GRAN has no page yet, and the button does
+         * nothing there rather than guessing one -- see the GRAN order in spec.md §5d
+         * (cloud region first, it is already a call site).
          *
          * It used to switch the source to SMPL from SYNTH and GRAN, on the argument
          * that a button which does nothing is a broken button. That was wrong in use:
@@ -1005,10 +1141,12 @@ static void input(void)
          * of them landed on EDIT, which silently replaced the source and the whole
          * screen's colour. A button that does nothing where it applies is quieter than
          * one that changes what the instrument is. */
-        if (src == SRC_SMPL) {
+        if (src == SRC_SMPL || src == SRC_SYNTH) {
             edit_page ^= 1u;
-            if (edit_page)
-                env_page = 0, lfo_page = 0, arp_page = 0;
+            if (edit_page) {
+                env_page = 0, lfo_page = 0, arp_page = 0, fx_page = 0;
+                edit_src = src;
+            }
         }
     }
 
@@ -1024,7 +1162,13 @@ static void input(void)
      * that stays useful while the arp is off -- a page where every knob does nothing
      * until one of them has been turned is a page you cannot see the state of. */
     if ((e = plat_enc(EN_K1)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* The frame the offset knobs act on. It wraps: a frame is a place in a
+             * cycle, not a value with ends. */
+            int32_t f = ((int32_t)edit_frame + (int32_t)e) % (int32_t)WV_FRAMES;
+            edit_frame = (uint8_t)(f < 0 ? f + (int32_t)WV_FRAMES : f);
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 0;
             d = region_step(&region[smp_i].start, e, region_step_samples(&smp[smp_i]),
@@ -1036,7 +1180,13 @@ static void input(void)
         else               k_cut  = (uint8_t)clamp((int32_t)k_cut  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K2)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* One detent is one point of 256 -- the resolution of the table itself, and
+             * the finest step the waveform above the knob can draw. */
+            int32_t v = (int32_t)foff_cur() + (int32_t)e;
+            foff_tab[bank_i][edit_frame] = (uint8_t)(((v % 256) + 256) % 256);
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 2;
             d = region_step(&region[smp_i].loop_s, e, region_step_samples(&smp[smp_i]),
@@ -1048,7 +1198,13 @@ static void input(void)
         else               k_res  = (uint8_t)clamp((int32_t)k_res  + e * 4, 0, 127);
     }
     if ((e = plat_enc(EN_K3)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            /* The whole ramp at once: this is the knob to reach for first, because one
+             * turn fans all eight frames out and that is what the A/B is about. */
+            foff_spread = (uint8_t)clamp((int32_t)foff_spread + (int32_t)e, 0, 127);
+            foff_ramp();
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 3;
             d = region_step(&region[smp_i].loop_e, e, region_step_samples(&smp[smp_i]),
@@ -1057,11 +1213,16 @@ static void input(void)
         }
         else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
         else if (lfo_page) k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else if (fx_page) k_ftype = (uint8_t)((k_ftype + (e > 0 ? 1 : WV_FTYPE_N - 1)) % WV_FTYPE_N);
         else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
     }
     if ((e = plat_enc(EN_K4)) != 0) {
-        if (edit_page) {
+        if (edit_page && src == SRC_SYNTH) {
+            foff_shape = (uint8_t)((uint32_t)(foff_shape + (e > 0 ? 1u : FOFF_SHAPE_N - 1u)) % FOFF_SHAPE_N);
+            foff_ramp();
+        }
+        else if (edit_page) {
             int32_t d;
             edit_live = 1;
             d = region_step(&region[smp_i].end, e, region_step_samples(&smp[smp_i]),
@@ -1070,6 +1231,14 @@ static void input(void)
         }
         else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
         else if (lfo_page) k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        /* KEY TRK: five detents, wrapping, not a 0..127 sweep. The setting is a choice
+         * out of five and the DSP test asserts the five values; a continuous knob here
+         * would let the panel produce a 37 % that save_load then refuses to load. */
+        else if (fx_page) {
+            uint8_t i = kt_index(k_ktrack);
+            i = (uint8_t)((i + (e > 0 ? 1 : KT_STEPS - 1)) % KT_STEPS);
+            k_ktrack = KT_VALUES[i];
+        }
         else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
@@ -1080,7 +1249,7 @@ static void input(void)
      * knob. GRAN needs seven controls for seven encoders, and this is the seventh.
      * In SMPL it stays MORPH and is dead, as it always was. */
     if ((e = plat_enc(EN_ALGO)) != 0) {
-        if (edit_page) {
+        if (edit_page && src != SRC_SYNTH) {
             /* ZOOM: left is out, right is in, one step per detent, clamped at both
              * ends. The window is a power of two of the slot, 1/2^zoom, so eight
              * steps reach one sample in 256 -- enough to see the waveform's shape
@@ -1104,8 +1273,33 @@ static void input(void)
      * indicator uses one button, while a detented encoder for the same thing spends
      * a knob that GRAN needs for SPRAY. The screen, not the button's lamp, says which
      * source is live; a lamp can only say on or off, and there are three. */
-    if (btn_pressed(btn, B_SEL))
+    if (btn_pressed(btn, B_SEL)) {
         src = (uint8_t)((src + 1u) % 3u);
+        /* Leaving SMPL leaves EDIT. THE PAGE BELONGS TO THE SOURCE, not to the panel.
+         *
+         * Without this, opening EDIT in SMPL and then switching SOURCE left `edit_page`
+         * set on a source that has no EDIT page at all, and the flag is read all over the
+         * screen: on GRAN the bottom-right corner printed ZOOM instead of GRAIN, the four
+         * knobs below became START / LOOP S / LOOP E / END instead of CUT / RES / SHAPE /
+         * AMOUNT, and the material band drew SMPL's region boundaries over a granular
+         * cloud that has none. On SYNTH it was the same with LOOP and MORPH replaced.
+         *
+         * Measured on the host: SMPL + EDIT, then `tap SEL` twice, `expect edit` stayed 1
+         * through GRAN and back to SYNTH.
+         *
+         * B_EDIT itself already refuses to act outside SMPL (see the comment there: a
+         * button that does nothing where it does not apply is quieter than one that
+         * changes the instrument). This is the other half of that rule -- the page cannot
+         * outlive the source that owns it. */
+        if (src != SRC_SMPL && src != SRC_SYNTH)
+            edit_page = 0;
+        /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
+         * rather than reinterpreting the same flag as the other source's page. The flag
+         * means "this source's material editor", and the two editors edit different
+         * things with different knobs. */
+        if (edit_src != src)
+            edit_page = 0;
+    }
 
     /* B_SAVE: write the whole panel state to flash, now.
      *
@@ -1148,6 +1342,7 @@ static void input(void)
         if (src == SRC_SYNTH) {
             bank_i = (uint8_t)((bank_i + (e > 0 ? 1 : WV_BANK_COUNT - 1)) % WV_BANK_COUNT);
             bank.frames = WV_BANKS[bank_i];
+            bank.foff = foff_tab[bank_i];
         } else if (smp_count) {
             smp_i = (uint8_t)((smp_i + (e > 0 ? 1 : smp_count - 1)) % smp_count);
             region_fix(smp_i);   /* the region lives per slot, so nothing to redo */
@@ -1160,6 +1355,17 @@ static void input(void)
          * SELECT and this knob is free. */
         if ((e = plat_enc(EN_PRESET)) != 0)
             k_spray = (uint8_t)clamp((int32_t)k_spray + e * 4, 0, 127);
+    } else if (edit_page && src == SRC_SYNTH) {
+        /* ZERO on EN_PRESET: turn it either way and the whole ramp goes back to nothing.
+         *
+         * A one-way setting with no way back is one people stop touching, and unlike a
+         * knob this value has no middle to return to by ear. The knob is free in SYNTH.
+         * All eight frames, not just the selected one: what it undoes is the ramp, and
+         * leaving seven offsets behind while the page says "zero" would be a lie. */
+        if ((e = plat_enc(EN_PRESET)) != 0) {
+            foff_spread = 0;
+            foff_ramp();
+        }
     } else if (edit_page) {
         /* LOOP on EN_PRESET: two states, right is on and left is off, so the knob can
          * be turned without looking at the screen -- the same two-state rule the GLOBAL
@@ -1243,15 +1449,38 @@ static char *pos_text(uint8_t slot, uint32_t at)
     static uint8_t turn;
     char *b = ring[turn++ % 4];
     uint32_t rate = smp[slot].rate ? smp[slot].rate : 44100u;
-    uint32_t ms = (uint32_t)((uint64_t)at * 1000u / rate);
-    int n = 0, i = 0;
-    char t[10];
+    /* SECONDS with three decimals, not milliseconds.
+     *
+     * A boundary is a place in the material, and this is that place in the unit a sampler
+     * puts it in. It was `52369ms`, five digits plus the unit, which measured 50 px and no
+     * longer fits anywhere: the value moved INSIDE the knob's ring, and the hole is 37 px
+     * wide at the text's own height (a chord at +-7.5 of a 20 px inner radius, not the
+     * inner diameter -- that is the arithmetic this had to be checked against). Seconds
+     * are 33 px at the widest the slots can be, and read as a time rather than a count.
+     *
+     * The divisor is the slot's own rate, so 22.05 kHz material and 44.1 kHz material both
+     * print the wall-clock length you hear.
+     *
+     * Longest case: 12.810 s (a 44.1 kHz slot at the 3.2 s limit is 3.200, and 12.810 is
+     * the 11.025 kHz one). The three decimals are kept because at 128x zoom the window is
+     * 8 samples and a two-decimal millisecond figure would show the same number for
+     * different positions -- a boundary control whose number does not move is broken. */
+    {
+        uint64_t us = (uint64_t)at * 1000000u / rate;
+        uint32_t ip = (uint32_t)(us / 1000000u);
+        uint32_t fp = (uint32_t)(us % 1000000u) / 1000u;   /* milliseconds 0..999 */
+        int n = 0, i2 = 0;
+        char t[10];
 
-    do { t[i++] = (char)('0' + ms % 10); ms /= 10; } while (ms);
-    while (i) b[n++] = t[--i];
-    b[n++] = 'm';
-    b[n++] = 's';
-    b[n] = 0;
+        do { t[i2++] = (char)('0' + ip % 10u); ip /= 10u; } while (ip);
+        while (i2) b[n++] = t[--i2];
+        b[n++] = '.';
+        b[n++] = (char)('0' + fp / 100u);
+        b[n++] = (char)('0' + (fp / 10u) % 10u);
+        b[n++] = (char)('0' + fp % 10u);
+        b[n++] = 's';
+        b[n] = 0;
+    }
     return b;
 }
 
@@ -1370,6 +1599,130 @@ static char *arp_oct_text(uint8_t v)
     return b;
 }
 
+/* The FX page's two identifiers.
+ *
+ * KEY TRK is stored as 0/25/50/75/100 rather than an index, so the record reads as the
+ * setting a player asked for and save_load can reject anything else. The table is what
+ * turns a detent into the setting, and kt_index() is the way back -- one list, so the
+ * five can never drift apart from the five the DSP validates. */
+static uint8_t kt_index(uint8_t pct)
+{
+    uint8_t i;
+    for (i = 0; i < KT_STEPS; i++)
+        if (KT_VALUES[i] == pct)
+            return i;
+    return 0;                          /* an impossible value reads as off */
+}
+
+static const char *const FTYPE_NAME[WV_FTYPE_N] = { "LP", "HP", "BP" };
+
+/* KEY TRK as the setting itself. Three digits and a sign is the widest string this page
+ * can print ("100%"), which measures inside the ring's 34.9 px chord. */
+/* ─── SYNTH's EDIT page: the phase ramp ────────────────────────────────────
+ *
+ * K1 picks a frame, K2 turns that frame, K3 rewrites all eight as a ramp, K4 picks the
+ * ramp's shape. The value is 0..255 points of the 256-point cycle, printed as a fraction
+ * of the cycle because "46 pts" means nothing and "1/4 cycle" does.
+ */
+static uint8_t foff_cur(void)
+{
+    return foff_tab[bank_i][edit_frame];
+}
+
+static void foff_ramp(void)
+{
+    uint32_t f, v = 0, step = (uint32_t)foff_spread * 2u;   /* 0..254 points per frame */
+
+    for (f = 0; f < WV_FRAMES; f++) {
+        switch (foff_shape) {
+        case FOFF_ALT:  v = (f & 1u) ? step : 0u; break;
+        case FOFF_RAND: v = (f * 73u + 19u) & 0xFFu; v = v * step / 255u; break;
+        default:        v = f * step; break;
+        }
+        foff_tab[bank_i][f] = (uint8_t)v;
+    }
+    bank.foff = foff_tab[bank_i];
+}
+
+/* "1/4" -- the offset as a fraction of the cycle, because 0..255 is what the ring is for
+ * and the text should say what the number DOES. Quarters come out exact; anything else
+ * prints as a percentage. */
+static char *foff_text(void)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    uint32_t v = foff_cur();
+
+    if (!v) {
+        b[0] = '0'; b[1] = 0; b[2] = 0;
+    } else if (v % 64u == 0u) {
+        b[0] = (char)('0' + v / 64u); b[1] = '/'; b[2] = '4'; b[3] = 0;
+    } else {
+        uint32_t p = v * 100u / 256u;
+        if (p < 10u) {
+            b[0] = (char)('0' + p); b[1] = '%'; b[2] = 0;
+        } else if (p < 100u) {
+            b[0] = (char)('0' + p / 10u); b[1] = (char)('0' + p % 10u); b[2] = '%'; b[3] = 0;
+        } else {
+            b[0] = '1'; b[1] = '0'; b[2] = '0'; b[3] = '%'; b[4] = 0;
+        }
+    }
+    return b;
+}
+
+/* The ring shows the offset as a position in the cycle: one full turn of the ring is one
+ * full cycle of phase, which is the only mapping where the ring means the same thing as
+ * the waveform above it. */
+static int32_t foff_mark(void)
+{
+    return (int32_t)((uint32_t)foff_cur() * 127u / 256u);
+}
+
+static const char *const FOFF_SHAPE_NAME[FOFF_SHAPE_N] = { "LIN", "ALT", "RAND" };
+
+static char *frame_text(void)
+{
+    static char b[6];
+
+    b[0] = (char)('0' + (int)edit_frame);
+    b[1] = '/';
+    b[2] = (char)('0' + (int)(WV_FRAMES - 1u));
+    b[3] = 0;
+    return b;
+}
+
+static char *spread_text(void)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    uint32_t v = (uint32_t)foff_spread * 2u;    /* points per frame */
+
+    b[0] = (char)('0' + v / 100u);
+    b[1] = (char)('0' + v / 10u % 10u);
+    b[2] = (char)('0' + v % 10u);
+    b[3] = 0;
+    if (v < 100u) { b[0] = (char)('0' + v / 10u); b[1] = (char)('0' + v % 10u); b[2] = 0; }
+    if (v < 10u) { b[0] = (char)('0' + v); b[1] = 0; }
+    return b;
+}
+
+static char *ktrack_text(uint8_t pct)
+{
+    static char ring[2][6];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    if (pct >= 100u) {
+        b[0] = '1'; b[1] = '0'; b[2] = '0'; b[3] = '%'; b[4] = 0;
+    } else if (pct >= 10u) {
+        b[0] = (char)('0' + pct / 10u); b[1] = (char)('0' + pct % 10u); b[2] = '%'; b[3] = 0;
+    } else {
+        b[0] = '0'; b[1] = '%'; b[2] = 0;
+    }
+    return b;
+}
+
 static char *lfo_depth_text(uint8_t v)
 {
     static char ring[2][8];
@@ -1479,6 +1832,33 @@ typedef struct {
 
 static src_skin_t sk;   /* set once per frame from src_skin(), read by the painters */
 
+/* How long the current unsaved run has been open, for the save line.
+ *
+ * The line under the scope is the only place on screen that says "this is not saved", and it
+ * says two things at once: LENGTH is how many groups differ (save_change_count), COLOUR is
+ * how long they have been that way. Time is the second axis because the two questions are
+ * different -- "did I change much?" and "have I been sitting on it?" -- and a single bar
+ * cannot answer both.
+ *
+ * The clock starts when the count first rises from zero, not at boot, so a fresh unit with
+ * nothing changed shows no elapsed time. It keeps running while the player keeps editing:
+ * the point is how long THIS batch of edits has been unsaved, not how long ago the first
+ * one happened.
+ *
+ * `unsaved_at` is plat_ms() and wraps after 49.7 days. `now - unsaved_at` is unsigned, so
+ * the subtraction is correct across the wrap -- no special case needed. */
+static uint32_t unsaved_at;     /* plat_ms() when the count rose from zero; 0 = not dirty */
+static int32_t  save_line_len;  /* what the save line drew last frame, px */
+static int32_t  save_line_step; /* its brightness step, 0..3 (dim(x, step+2, 5)) */
+static uint32_t save_line_age;  /* ms since the first unsaved edit */
+static int32_t  save_led;       /* B_SAVE's lamp: 0 saved, 1 mid, 2 lit */
+/* How many band transfers the last frame sent. Three is the whole screen: scope,
+ * material, knobs. The count is here because a transfer is not free -- lcd_data()
+ * waits for the previous one, so an extra blit is an extra 8 ms of the frame spent
+ * sending pixels that are already on the glass. A probe, not a setting. */
+static int32_t  frame_blits;
+static int      unsaved_live;   /* unsaved_at holds a start time */
+
 static src_skin_t src_skin(void)
 {
     src_skin_t k;
@@ -1527,7 +1907,13 @@ static src_skin_t src_skin(void)
         k.track  = RGB(30, 20, 5);
         k.ink    = RGB(232, 136, 30);
         k.ink_hi = RGB(255, 184, 70);
-        k.acc    = C_WHITE;
+        /* White, pulled two thirds of the way toward this skin's own hue. Pure white on
+         * an amber ground reads as a different material -- a paper cut-out laid on the
+         * picture -- and the player asked for it to sit in the family. (246,232,214) is
+         * white by any measure (all three channels high, no saturated cast) and it still
+         * carries a warm bias a few points off the ink's hue, so K1's frame reads as
+         * "lit up" rather than "cut out". */
+        k.acc    = RGB(246, 232, 214);
     }
     return k;
 }
@@ -1656,7 +2042,7 @@ static void src_icon(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * two sources disagreed about how loud their own background was. Both now call this with
  * dim(ink, 2, 5), so they cannot drift apart again.
  */
-static uint16_t dim6(uint16_t c, int32_t num, int32_t den);
+static uint16_t dim(uint16_t c, int32_t num, int32_t den);
 
 static void env_line(const wv_sample *s, int32_t x0, int32_t y0, int32_t w, int32_t h,
                      uint32_t from, uint32_t to, uint16_t colour)
@@ -2182,6 +2568,119 @@ static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, in
     }
 }
 
+static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h);
+
+/* ── the eight frames, stacked ───────────────────────────────────────────────
+ *
+ * The SYNTH picture has always drawn the one frame MORPH is on. That answers "what does
+ * this sound like now" and nothing about the bank: the eight frames are the material the
+ * MORPH knob travels through, and this page's whole job is turning them against each
+ * other -- which is invisible if only the current one is drawn.
+ *
+ * So on this page the picture becomes the RACK: all eight frames on a sheared axis.
+ *
+ * TWO FRAMES LIGHT, NOT ONE. MORPH does not choose a frame, it crossfades two: at
+ * mf = 3.4 the voice adds frame 3 and frame 4 at 60/40. So the rack lights exactly the
+ * pair that is sounding, at brightnesses in that ratio -- a single bright frame would be
+ * a lie about what the reader is doing, and the pair is also the answer to the question
+ * this page exists for ("which two waves am I turning against each other").
+ *
+ * It is a STATIC highlight: morph is one number shared by all voices (wv_dsp.h:81, and
+ * app.c is its only writer), not a modulation target, so the lit pair changes when the
+ * MORPH knob moves and at no other time. Drawing it per voice would draw the same pair
+ * every frame. When morph becomes modulatable this is where a per-voice marker goes.
+ *
+ * The frame being EDITED (edit_frame) is a separate mark and must stay legible next to
+ * the pair: it keeps the lift plus a bright index, and if it is one of the two sounding
+ * frames it simply gets the louder of the two brightnesses.
+ *
+ * COST, stated: 8 polylines instead of 1 -- about 6x the drawing on this band, at 60 fps.
+ * It only runs on this page, which is the page you are on to look rather than to play.
+ */
+static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
+{
+    const int32_t fw   = w - 7 * STK_DX;                          /* the near frame is widest */
+    const int32_t amp  = (h - 2 - 7 * STK_DY - RACK_LIFT) / 2;    /* 14 px at 172 x 80 */
+    const int32_t base0 = y0 + h - 1 - amp;                       /* f0's zero line */
+
+    /* the pair the voices are mixing right now -- the same arithmetic wv_frames_at
+     * does, so the picture and the reader cannot disagree */
+    float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+    int32_t m0, m1;
+    if (mf < 0.0f) mf = 0.0f;
+    if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
+    m0 = (int32_t)mf;
+    m1 = (m0 + 1 < (int32_t)WV_FRAMES) ? m0 + 1 : m0;
+
+    int32_t pass, px, py;
+
+    /* Far frame first, so nearer ones overlap it -- that is the order. The edited frame is
+     * drawn LAST whatever its position, or a nearer frame paints over the lift and the
+     * highlight becomes a broken rectangle. (Measured before the fix: 116 px of a 664 px
+     * border, i.e. the bottom two thirds of the raised card were covered.) */
+    for (pass = 0; pass <= (int32_t)WV_FRAMES; pass++) {
+        const int32_t sel = (pass == (int32_t)WV_FRAMES);
+        const int32_t f   = sel ? (int32_t)edit_frame : pass;
+        int32_t x, base, lit;
+        uint16_t ink;
+
+        if (!sel && pass == (int32_t)edit_frame)
+            continue;                                  /* it gets the last pass */
+
+        x    = x0 + f * STK_DX;
+        base = base0 - f * STK_DY - (sel ? RACK_LIFT : 0);
+
+        /* Is this frame one of the two the voices are mixing? `lit` is 0 for "not
+         * sounding", else 1 or 2 for the near/far member of the pair. */
+        /* 2 = the louder member of the pair (which is m0 while a crossfade is in
+         * progress, and both of them when MORPH sits exactly on a frame), 0 = silent. */
+        lit = (f == m0) ? 2 : ((f == m1) ? 1 : 0);
+
+        /* ── TWO DIFFERENT QUESTIONS, TWO DIFFERENT MARKS ────────────────────────
+         *
+         * MORPH's pair answers "what am I hearing" and lives in the amber family: the
+         * louder member at ink_hi, the other at 8/12. K1's frame answers "what am I
+         * pointing at" and is WHITE (k->acc), with the lift on top of it.
+         *
+         * Colour is the right axis for this and brightness is not. Brightness is already
+         * spoken for twice -- it carries depth ((4+f)/16, far frames darker) and it
+         * carries "this one is sounding" -- so a third meaning in the same channel would
+         * be three levels of the same colour and the player would have to count them.
+         * White is the platform's own accent for exactly this: "what is being touched /
+         * where we are" (gfx.c:29), and it is already the colour the panel uses for a
+         * knob under the hand. Nothing else in this band is white.
+         *
+         * The two can coincide: when K1's frame is one of the pair, the frame is white
+         * and lifted, and its own index label carries the state.
+         */
+        if (lit == 2)
+            ink = k->ink_hi;
+        else if (lit == 1)
+            ink = dim(k->ink_hi, 8, 12);
+        else
+            ink = dim(k->ink, 4 + f, 16);
+
+        if (sel)
+            ink = k->acc;                   /* K1's frame: white, whatever MORPH says */
+
+        py = 0;
+        for (px = 0; px < fw; px++) {
+            /* through the same reader the voices use, at morph = this frame, so what is
+             * drawn IS what sounds, offsets and all */
+            float v = wv_table_read(&bank, (float)px / (float)fw, (float)f);
+            int32_t y = base - (int32_t)(v * (float)amp);
+            if (y < y0) y = y0;
+            if (y > y0 + h - 1) y = y0 + h - 1;
+            if (px == 0)
+                cv_rect(x, y, 2, 2, ink);
+            else
+                cv_line(x + px - 1, py, x + px, y, ink);
+            py = y;
+        }
+
+    }
+}
+
 /* A knob in the theme's own ink, which is what every page but EDIT wants. */
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
                  int32_t v127, int lit);
@@ -2189,20 +2688,229 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
 /* The same, in a chosen colour. Only the EDIT page uses it: there the four boundary
  * knobs are the four lines in the picture, and a knob printed in its line's hue is how
  * the panel says which line it moves. `hue` 0 means "the theme's ink". */
+/* -------------------------------------------------------------- knob art --- */
+
+/* A knob is an ARC and a pointer, not a bar, and the reason is the panel's own problem:
+ * four knobs under a screen are read from a metre away, and a bar answers "how much" but
+ * not "how far round". An arc with a pointer reads the way the encoder under the hand
+ * turns -- the pointer's angle IS the value -- so a glance at the row says where each
+ * knob sits in its range without reading a single number.
+ *
+ * Geometry, all of it fixed so the four knobs are one instrument and not four widgets:
+ *
+ *   the arc spans 270 degrees, from 135 deg below-left round the top to 135 deg
+ *   below-right, so the gap sits at the bottom where the value's text is. A full circle
+ *   was the first attempt: it hides WHERE zero is, and the bottom gap is what makes the
+ *   ends of the range readable as ends.
+ *
+ *   the sweep starts at the lower left and runs CLOCKWISE, which is the direction the
+ *   hardware encoder turns for more (measured: turn K1 +1 moves a value up). A knob that
+ *   fills anticlockwise would be a second convention in the same panel.
+ *
+ *   the track is drawn at 1/5 ink and the filled part at full ink or the page's hue, the
+ *   same two brightnesses the bar used, so "off" still reads as a scale and not as empty
+ *   space.
+ *
+ * Radius 11 inside a 26 px box: the box is what the four columns can afford (54 px wide,
+ * 18 px tall under the value) and 11 leaves a 3 px margin either side so two adjacent
+ * arcs never touch. The knob is 22 px across and the pointer is 3 px, which is the
+ * smallest pointer that survives one pixel of RGB565 rounding at both ends.
+ *
+ * Drawn with cv_line segments rather than a real arc primitive (platform/ has none, and
+ * this file may not add one): 32 segments over 270 deg is 8.4 deg each, and at r=11 that
+ * is a 1.6 px step, so the arc reads smooth at this size. */
+/* The band was 64 px tall for a reason, and the small arc was not using it. The value goes
+ * INSIDE the ring now, which frees the two text rows under the name and lets the ring have
+ * the rest of the band: R = 23 instead of 11, four times the area.
+ *
+ *      name                     y + 0    (FONT_XS, 15 px tall)
+ *      ring                     y + 17 .. y + 63
+ *      value, centred inside    the ring's middle row
+ *
+ * R = 23 is the measured maximum, not a round choice: the band is 64, the name takes 15,
+ * two pixels of air make 17, and 64 - 17 = 47 gives (47 - 1) / 2 = 23 so the ring's stroke
+ * lands on rows 17..63 exactly. A 23 px radius inside a 54 px column leaves 4 px either
+ * side, so two adjacent rings never touch.
+ *
+ * The value has to fit the hole, and the hole is not the inner diameter: FONT_XS is 15 px
+ * tall, so text is a chord at +-7.5 from the middle, where the ring is narrower. With
+ * R - 3 inner radius that chord is 39 px, against the widest value string in the app at
+ * 32 px ("0.001s"). Measured, not eyeballed, because "-Dw" is the one thing this layout
+ * cannot do. */
+#define KNOB_ARC_R     23
+#define KNOB_ARC_BOX   (2 * KNOB_ARC_R + 1)       /* 47: ring plus its own stroke */
+#define KNOB_ARC_TOP   (KNOB_TOP + 17)            /* 21 on the band, 197 on screen */
+#define KNOB_ARC_SEGS  32
+/* FIVE pixels of stroke. It was two, which at R=23 read as a thin hairline: the ring is
+ * 145 px of circumference and 2 px of it is 1.4 % of the visible arc, so the value was
+ * carried almost entirely by the tick. Three was tried on paper and five was asked for.
+ *
+ * The cost is the hole, and the hole is measured against the widest value string rather
+ * than guessed: stroke 5 puts the innermost lit radius at 19, the hole's clear radius at
+ * 18, and FONT_XS's glyphs occupy 9 rows (measured: ink on y = -4..+4 around the middle,
+ * not the font's full 15 px cell). The chord at +-4.5 is 34.9 px, against 33 px for the
+ * widest string the app can print ("12.810s"). Four pixels of margin, and thickness 6
+ * would be 32.8 -- one pixel short of the text. This is the thickest stroke that fits. */
+#define KNOB_ARC_THICK 5                          /* px: radii 23, 22, 21, 20, 19 */
+#define KNOB_ARC_SPAN  (0.75f * FM_TWO_PI)        /* 270 deg: three quarters of a turn */
+
+/* ── the ring's trigonometry is a table ──────────────────────────────────────
+ *
+ * The arc's angles are compile-time constants: 32 segments of a fixed 270 degrees at a
+ * fixed radius, drawn every frame on a page that redraws at the UI rate. Computing that
+ * with fm_sinf/fm_cosf cost 260 calls a frame for four knobs (32 segments x 2 radii x 2
+ * ends x 2 functions, plus the pointer), which is 4 x 13 multiply-adds of a degree-13
+ * minimax polynomial to produce the same coordinates forever.
+ *
+ * 129 entries of int8 sin and cos, quarter of a pixel at R = 23 (measured worst error
+ * 0.086 px), 258 B of flash. The table is indexed by SEGMENT, not by angle: segment k
+ * starts at table[k] and ends at table[k+1], so the compiler can fold the two adjacent
+ * segments' shared point into one lookup and no interpolation is needed anywhere.
+ *
+ * fm_tanf is unaffected -- it is sin(x)/sin(pi/2-|x|), not a series, and it is used by
+ * the filter, where a table would have to interpolate to stay quiet. */
+#define KNOB_TRIG_N    128
+static const int8_t knob_sin[KNOB_TRIG_N + 1] = {
+     -90,  -93,  -96,  -99, -102, -105, -107, -110, -112, -114, -116, -118, -120, -121, -122, -124,
+    -125, -125, -126, -127, -127, -127, -127, -127, -126, -126, -125, -124, -123, -122, -121, -119,
+    -117, -115, -113, -111, -109, -106, -104, -101,  -98,  -95,  -92,  -89,  -85,  -82,  -78,  -74,
+     -71,  -67,  -63,  -58,  -54,  -50,  -46,  -41,  -37,  -32,  -28,  -23,  -19,  -14,   -9,   -5,
+       0,    5,    9,   14,   19,   23,   28,   32,   37,   41,   46,   50,   54,   58,   63,   67,
+      71,   74,   78,   82,   85,   89,   92,   95,   98,  101,  104,  106,  109,  111,  113,  115,
+     117,  119,  121,  122,  123,  124,  125,  126,  126,  127,  127,  127,  127,  127,  126,  125,
+     125,  124,  122,  121,  120,  118,  116,  114,  112,  110,  107,  105,  102,   99,   96,   93,
+      90,
+};
+
+static const int8_t knob_cos[KNOB_TRIG_N + 1] = {
+     -90,  -86,  -83,  -79,  -76,  -72,  -68,  -64,  -60,  -56,  -51,  -47,  -43,  -38,  -34,  -29,
+     -25,  -20,  -16,  -11,   -6,   -2,    3,    8,   12,   17,   22,   26,   31,   35,   40,   44,
+      49,   53,   57,   61,   65,   69,   73,   77,   81,   84,   88,   91,   94,   97,  100,  103,
+     106,  108,  111,  113,  115,  117,  118,  120,  122,  123,  124,  125,  126,  126,  127,  127,
+     127,  127,  127,  126,  126,  125,  124,  123,  122,  120,  118,  117,  115,  113,  111,  108,
+     106,  103,  100,   97,   94,   91,   88,   84,   81,   77,   73,   69,   65,   61,   57,   53,
+      49,   44,   40,   35,   31,   26,   22,   17,   12,    8,    3,   -2,   -6,  -11,  -16,  -20,
+     -25,  -29,  -34,  -38,  -43,  -47,  -51,  -56,  -60,  -64,  -68,  -72,  -76,  -79,  -83,  -86,
+     -90,
+};
+static int32_t knob_cx(int32_t v, int32_t k) { return (int32_t)knob_cos[k] * v / 127; }
+static int32_t knob_sy(int32_t v, int32_t k) { return (int32_t)knob_sin[k] * v / 127; }
+
+/* x where the edge (x0,y0)-(x1,y1) crosses row y, rounded to nearest. The caller skips
+ * horizontal edges, so y1 != y0 always. */
+static int32_t knob_edge_x(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t y)
+{
+    int32_t num = (y - y0) * (x1 - x0), den = y1 - y0;
+    if (den < 0) { den = -den; num = -num; }
+    if (den == 0) return x0;                 /* horizontal: either end will do */
+    return x0 + (num >= 0 ? (num + den / 2) / den : (num - den / 2) / den);
+}
+
+/* One segment of the ring, FILLED between the inner and the outer radius.
+ *
+ * The first version traced KNOB_ARC_THICK separate 1 px Bresenham chains, one per radius,
+ * and that is what left the pinholes: measured on the host, a finished ring enclosed 6
+ * background pixels at r = 19.8 .. 21.9 -- between two of those chains, not in the bottom
+ * gap and not at a segment join. Chains 1 px apart do not tile a 5 px band, because each
+ * one rounds its own way and two neighbours can straddle a pixel. Two chains (the original
+ * 2 px stroke) almost always end up touching, which is why no hole was visible until the
+ * stroke got thick. It is not the trigonometry table: the table is exact at the 128
+ * segment ends, and the old sine version would have holed the same way at this width.
+ *
+ * So the stroke is covered the way a rasteriser covers a shape: the segment is the quad
+ * between (inner[k], outer[k]) and (inner[k+1], outer[k+1]), and that quad is filled row
+ * by row. Consecutive segments share an edge, so there is no seam left to hole. */
+static void knob_arc_seg(int32_t cx, int32_t cy, int32_t k0, int32_t k1, uint16_t c)
+{
+    const int32_t ro = KNOB_ARC_R, ri = KNOB_ARC_R - KNOB_ARC_THICK + 1;
+    const int32_t ax = cx + knob_sy(ri, k0), ay = cy - knob_cx(ri, k0);   /* inner, k0 */
+    const int32_t bx = cx + knob_sy(ro, k0), by = cy - knob_cx(ro, k0);   /* outer, k0 */
+    const int32_t dx = cx + knob_sy(ro, k1), dy = cy - knob_cx(ro, k1);   /* outer, k1 */
+    const int32_t ex = cx + knob_sy(ri, k1), ey = cy - knob_cx(ri, k1);   /* inner, k1 */
+    int32_t y, y0 = ay, y1 = ay;
+
+    if (by < y0) y0 = by;
+    if (dy < y0) y0 = dy;
+    if (ey < y0) y0 = ey;
+    if (by > y1) y1 = by;
+    if (dy > y1) y1 = dy;
+    if (ey > y1) y1 = ey;
+
+    for (y = y0; y <= y1; y++) {
+        int32_t lo = 0x7fffffff, hi = -0x7fffffff, x;
+        /* the four edges, each one only where it actually spans this row */
+        /* CLOSED at both ends. The first version used the usual half-open interval
+         * (min <= y < max), which is right for a general polygon but wrong here: at the
+         * 12 o'clock vertex every edge of the quad is horizontal or ends exactly on that
+         * row, so no edge claimed it and the top of the ring kept a 1 px background dot
+         * at every value (measured: `FFFFFFFFFF.FFFFFFFFFF` on row 197 of the host shot).
+         * Painting a row twice costs one extra compare; painting it never is a hole. */
+        if (ay <= y && y <= ey) { x = knob_edge_x(ax, ay, ex, ey, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (ey <= y && y <= dy) { x = knob_edge_x(ex, ey, dx, dy, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (dy <= y && y <= by) { x = knob_edge_x(dx, dy, bx, by, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (by <= y && y <= ay) { x = knob_edge_x(bx, by, ax, ay, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        /* and the reversed windings, for the segments either side of 0 degrees */
+        if (ey <= y && y <= ay) { x = knob_edge_x(ex, ey, ax, ay, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (dy <= y && y <= ey) { x = knob_edge_x(dx, dy, ex, ey, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (by <= y && y <= dy) { x = knob_edge_x(bx, by, dx, dy, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (ay <= y && y <= by) { x = knob_edge_x(ax, ay, bx, by, y); if (x < lo) lo = x; if (x > hi) hi = x; }
+        if (lo <= hi)
+            cv_rect(lo, y, hi - lo + 1, 1, c);
+    }
+}
+
+static void knob_arc(int32_t cx, int32_t cy, int32_t v, uint16_t c, uint16_t track)
+{
+    /* Which segment the fill ends on, in table units: 0..KNOB_TRIG_N. Integer arithmetic
+     * all the way, because the answer only ever needs to pick a segment and a float
+     * comparison against a segment boundary is how the fill ended up 82, 83, 83, 83 in an
+     * earlier draft. */
+    const int32_t fill_end = (v < 0 ? 0 : v > 127 ? 127 : v) * KNOB_TRIG_N / 127;
+    int32_t k;
+
+    for (k = 0; k < KNOB_TRIG_N; k++) {
+        knob_arc_seg(cx, cy, k, k + 1, track);
+        if (k < fill_end)
+            knob_arc_seg(cx, cy, k, k + 1, c);
+    }
+
+    /* The pointer: a short tick ACROSS the arc at the value's angle, not a hand from the
+     * centre. A hand was the first version and the measurement that condemned it is that
+     * it runs through the 90-degree gap at the bottom, so at v=0 it fills part of the gap
+     * and the control reads as a nearly closed ring -- the one place the "where does the
+     * range end" information lives. A tick outward from the arc keeps the gap empty at
+     * every value, and it also survives a much smaller radius than a hand does.
+     *
+     * It straddles the stroke rather than sitting just outside it: at R = 23 a tick that
+     * only stuck out would be four pixels of a 145-pixel ring, and the pointer's job is to
+     * be findable before it is to be tidy. */
+    {
+        int32_t r0 = KNOB_ARC_R - KNOB_ARC_THICK;
+        int32_t r1 = KNOB_ARC_R + 2;
+        cv_line(cx + knob_sy(r0, fill_end), cy - knob_cx(r0, fill_end),
+                cx + knob_sy(r1, fill_end), cy - knob_cx(r1, fill_end), c);
+    }
+}
+
 static void knob_c(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
                    int32_t v127, int lit, uint16_t hue)
 {
     uint16_t c = hue ? hue : (lit ? sk.ink_hi : sk.ink);
     uint16_t cv = hue ? hue : (lit ? sk.acc : sk.ink);
+    int32_t cx = x + w / 2;
+    int32_t cy = KNOB_ARC_TOP + KNOB_ARC_R;   /* 21 + 23 = 44 on the band */
+
+    /* the name on top, then the ring, then the value INSIDE the ring.
+     *
+     * The value used to sit under the name and above a bar, then under the name above a
+     * small arc. Inside the ring is the layout the 64 px band was always tall enough for:
+     * the ring gets 47 of the 64 px and the value needs no row of its own, so the ring is
+     * four times the area it had. It is centred in the hole, which is where a knob's number
+     * belongs -- at the knob's middle, not at its left edge, or four values of different
+     * lengths read as four left-aligned strings instead of four objects. */
     cv_text(x, y, &FONT_XS, name, c);
-    cv_text(x, y + 18, &FONT_XS, val, cv);
-    cv_rect(x, y + 34, w, 8, sk.track);
-    if (v127 > 0) {
-        int32_t fw = w * v127 / 127;
-        if (fw < 1)
-            fw = 1;                       /* a bar at "just off zero" is not nothing */
-        cv_rect(x, y + 34, fw, 8, hue ? hue : (lit ? sk.ink_hi : sk.ink));
-    }
+    knob_arc(cx, cy, v127, hue ? hue : (lit ? sk.ink_hi : sk.ink), dim(sk.ink, 1, 5));
+    cv_text(cx - txt_w(val) / 2, cy - FONT_XS.h / 2, &FONT_XS, val, cv);
 }
 
 static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *val,
@@ -2561,10 +3269,26 @@ void app_frame(void)
     input();
 
     /* Keep save_dirty() honest: the whole record is compared against what flash holds,
-     * once a frame. This is what the "not saved" mark on the screen reads. */
+     * once a frame. This is what the save line under the scope reads. */
     {
         save_rec r;
         save_snapshot(&r);
+        /* On the FIRST frame with no record in flash, what boot set up IS the baseline.
+         *
+         * The defaults are not all zero: region_reset_all() gives every slot its whole self
+         * (region_end = the slot's length, 52369 for the demo PAD) while save_load() left
+         * rec_written zeroed, so the first scan compared a real record against an empty one
+         * and reported unsaved from frame one. Measured: `expect save_dirty 0` passed
+         * before any frame ran and read 1 after `wait 100`.
+         *
+         * This is not new -- it was true before the save line existed. It was invisible
+         * because the old mark was two words nobody had asked the meaning of at boot; a bar
+         * that measures the distance to flash cannot be built on top of it.
+         *
+         * Done here rather than at the end of app_init because app_init has not finished
+         * when save_load() returns: ui_apply(), the bank's frame count and region_fix() all
+         * still move the state afterwards, and a baseline taken at that moment marks those
+         * corrections as edits. By the first frame everything that runs at boot has run. */
         save_scan(&r);
     }
 
@@ -2752,7 +3476,23 @@ void app_frame(void)
                 int32_t db, col;
                 for (col = 1; col * 20 < 240; col++)
                     cv_line(col * 20, 0, col * 20, SCOPE_H - 1, GRID_DIM);
-                for (db = 0; db >= -50; db -= 10) {
+                /* Down to -30 dBFS, not -50. The scale is linear in amplitude, so the
+                 * lines bunch up geometrically toward the centre: measured on this band,
+                 * -30 lands at y 40/44, -40 at 41/43, and -50 at 41/43 as well -- the
+                 * last two are the SAME ROW, so -50 drew nothing and -40 drew a line
+                 * 1 px from the centre rule with the trace's own back-and-forth running
+                 * through it. Three rules inside 4 px of the centre is what made a
+                 * near-vertical trace look like it was fighting the graticule.
+                 *
+                 * Stopping at -30 keeps every line at least 2 px from the centre rule
+                 * (-30 is the innermost, at 40/44) and leaves the spacing that reads as
+                 * a scale: 28 px from 0 to -10, 8 to -20, 3 to -30. Below -30 the
+                 * remaining space is 2 px, which cannot carry a rule that says anything.
+                 *
+                 * What is lost, stated: nothing below -30 dBFS is marked. A trace down
+                 * there is 0.032 of full scale, i.e. a 2 px line, and it already had no
+                 * grid to read against. */
+                for (db = 0; db >= -30; db -= 10) {
                     /* The y of db on this band, each side of the centre. fm_db2lin is
                      * the platform's own dB -> linear, and it is scaled by SCOPE_REF:
                      * the lines are dB relative to the eight-voice peak that reaches
@@ -2808,7 +3548,9 @@ void app_frame(void)
         }
     }
     dbg_draw(&sk);
+    frame_blits = 0;
     cv_blit(0, 0);                 /* without this the band is drawn and never shown */
+    frame_blits++;
 
     /* ─── the panel body ──────────────────────────────────────────────────────
      *
@@ -2870,6 +3612,77 @@ void app_frame(void)
      * which is the rule this panel has kept since the first layout. */
     cv_begin(240, MAT_H, sk.bg);
     {
+        /* ── the save line ──────────────────────────────────────────────────────
+         *
+         * Two pixels under the scope, in the padding the band already had.
+         *
+         * It used to be the words "NOT SAVED" at the top left of the picture, and the
+         * measurement that condemned that is that the words sat ON the waveform: in the
+         * label's own 13 x 62 box, 443 px of SYNTH's waveform and 403 px of SMPL's and
+         * GRAN's were erased to make room, in the brightest part of the picture. Moving it
+         * into MAT_PAD's top 2 rows costs the picture nothing -- the wave reaches no higher
+         * than y = 90 and the line is at y = 84, so four rows of air stay between them.
+         *
+         * LENGTH is the number of groups that differ from flash (save_change_count: 17
+         * parameters, 3 selectors, 8 regions -- a region counts once, because dragging a
+         * loop boundary is one edit). COLOUR is how long they have been unsaved: dim at
+         * first, `ink` at SAVE_LINE_FULL_MS, never ink_hi, because ink_hi is what a knob
+         * arc fills with and the bottom of this band is not a fifth control.
+         *
+         * Nothing is drawn when the record matches flash. A permanent empty track would
+         * be two rows of grey that mean "saved", which is the absence of news, and this
+         * screen has no room for news that says nothing.
+         *
+         * The divisions are integer: the count is 0..28 and the width is 232 px, so the
+         * unit is 240/SAVE_LINE_FULL_CHANGES, the full screen width. Rounded up, so one
+         * change is never zero pixels -- a line that stays empty for the first edit reads
+         * as broken. */
+        if (save_dirty()) {
+            int32_t n = save_change_count();
+            /* Full 240, not the picture's 232. The line is a readout of the whole panel, not
+             * a picture of the material, so it spans the screen edge to edge -- starting at
+             * x 4 left a 4 px gap that reads as a mistake rather than as a margin. One unit
+             * is therefore 240/8 = 30 px. */
+            int32_t w = n * 240 / SAVE_LINE_FULL_CHANGES;
+            uint32_t age;
+
+            if (w > 240)
+                w = 240;
+            if (w < 1)
+                w = 1;
+            save_line_len = w;
+            if (!unsaved_live) {
+                unsaved_live = 1;
+                unsaved_at = plat_ms();
+            }
+            age = plat_ms() - unsaved_at;
+            /* 3/5 -> 5/5 of ink across SAVE_LINE_FULL_MS. The brightness is the second
+             * axis: it starts bright enough to be read at a glance and still has room to
+             * say "this has been sitting here too long". */
+            {
+                /* 3/5 -> 5/5, not 2/5 -> 5/5. Measured against each skin's own ground the
+                 * old first step sat only dLum +26 (SYNTH) / +34 (SMPL) / +26 (GRAN) from
+                 * the background, which is not a line, it is a rumour of one; the player
+                 * reported exactly that ("一开始的红色不够醒目"). At 3/5 the same numbers
+                 * are +56 / +68 / +58, still well under ink_hi (+125 / +135 / +119 + the
+                 * highlight step), so the ramp keeps its meaning and its ceiling.
+                 *
+                 * Three steps instead of four is the cost, and it is paid where it matters
+                 * least: this line has one job on its first frame -- to be seen -- and
+                 * four steps it cannot see are worth less than three it can. */
+                int32_t step = (int32_t)(age * 3u / SAVE_LINE_FULL_MS);
+                if (step > 3)
+                    step = 3;
+                save_line_step = step;
+                save_line_age = age;
+                cv_rect(0, SAVE_LINE_ROW, w, 2, dim(sk.ink, step + 2, 5));
+            }
+        } else {
+            unsaved_live = 0;
+            save_line_len = 0;
+            save_line_step = 0;
+        }
+
         /* The picture runs the full width, and the three knob values sit on top of it in
          * the corners their knobs occupy:
          *
@@ -2895,7 +3708,12 @@ void app_frame(void)
         if (!smp_count && src != SRC_SYNTH) {
             cv_text(MAT_X0 + 2, 46, &FONT_XS, "NO SAMPLES", sk.ink);
         } else if (src == SRC_SYNTH) {
-            src_shape(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
+            /* The rack on this page, the single frame everywhere else: this page edits the
+             * eight against each other, and one curve cannot show the thing being edited. */
+            if (edit_page)
+                src_rack(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
+            else
+                src_shape(&sk, MAT_X0, MAT_PAD, SYN_W, MAT_WAVE);
         } else if (src == SRC_GRAN) {
             /* the voice the cloud is most likely to be heard from: the newest one. With
              * several keys down the picture shows one voice's cloud, and the newest is
@@ -2973,7 +3791,7 @@ void app_frame(void)
             cv_text(MAT_LAB_L, ybot, &FONT_XS, "SPRAY", dim(sk.ink_hi, 3, 5));
             cv_text(MAT_LAB_L + txt_w("SPRAY") + 4, ybot, &FONT_XS, pct(k_spray),
                     sk.ink_hi);
-        } else if (edit_page) {
+        } else if (edit_page && src != SRC_SYNTH) {
             nm = "LOOP";
             vv = region[smp_i].on ? "ON" : "OFF";
             w = txt_w(vv);
@@ -2987,7 +3805,7 @@ void app_frame(void)
          * reads no wavetable, so the knob is dead there, and a dead value is worse
          * than an empty corner. */
         if (src == SRC_SYNTH || src == SRC_GRAN || edit_page) {
-            if (edit_page) {
+            if (edit_page && src != SRC_SYNTH) {
                 nm = "ZOOM";
                 vv = zoom_text(edit_zoom);
             } else if (src == SRC_SYNTH) {
@@ -3011,8 +3829,13 @@ void app_frame(void)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE", sk.ink);
             else if (arp_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ARP PAGE", sk.ink);
-            else if (edit_page)
+            else if (edit_page && src != SRC_SYNTH)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "EDIT PAGE", sk.ink);
+            /* SYNTH's edit page prints no caption: the rack IS the page (all eight frames
+             * at once is not something the other sources ever do), and a caption on its
+             * last row sat on top of the near frame's curve. The knob labels in the
+             * column say FRAME / OFFSET / SPREAD / SHAPE, which is more than "EDIT PAGE"
+             * ever said. */
 
             /* ── "not saved" ────────────────────────────────────────────────────
              *
@@ -3031,33 +3854,16 @@ void app_frame(void)
              *
              * Nothing is drawn once it is saved: a permanent "saved" light would be one
              * more thing on the screen that means nothing. */
-            if (save_dirty()) {
-                /* Left edge, under the page name, NOT the right edge. The right-hand side
-                 * of this band is SYNTH's label column (BANK, MORPH -- § SYN_W), and a
-                 * 42 px mark anchored there reached back to x 192 and closed the 12 px gap
-                 * the geometry promises between the picture (ends at 175) and the labels
-                 * (start at 189). Measured by test_screen.py, which asserts that gap as a
-                 * clean strip: the mark is what broke it, so the mark moves.
-                 *
-                 * One line below the page name, because both can be up at once (a page is
-                 * open and there are unsaved edits) and two strings on one row would
-                 * collide on the left. 10 px apart is one FONT_XS row plus its leading. */
-                const char *ns = "NOT SAVED";
-                const int32_t yns = MAT_PAD + 11;    /* under the slot name, at the top */
-                cv_rect(MAT_X0 + 2, yns + 3, 3, 3, dim(sk.ink_hi, 3, 5));
-                cv_text(MAT_X0 + 9, yns, &FONT_XS, ns, dim(sk.ink_hi, 3, 5));
-            }
         }
     }
+    /* One transfer for this band. There used to be five in a row -- and the row sits
+     * after cv_begin(240, MAT_H, ...), so all five were sending the MATERIAL band to
+     * the screen, four of them redundantly. lcd_data() syncs (waits out the previous
+     * DMA) before it starts, so those four were four full 240x92 transfers of pixels
+     * already on the glass, ~8 ms each at the measured ~44 MHz. The last one wins and
+     * it is the same buffer every time, so nothing on screen depended on the rest. */
     cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
+    frame_blits++;
 
     cv_begin(240, KNOB_H, sk.bg);
     if (env_page) {
@@ -3076,6 +3882,19 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "TYPE",  ARP_NAME[k_arp_type], k_arp_type * 42, 1);
         knob(120, KNOB_TOP, 54, "OCT",   arp_oct_text(k_arp_oct), k_arp_oct, 1);
         knob(178, KNOB_TOP, 54, "GATE",  pct(k_arp_gate), k_arp_gate, 1);
+    } else if (edit_page && src == SRC_SYNTH) {
+        /* SYNTH's EDIT page: the phase ramp.
+         *
+         * K1 picks a frame, K2 turns that frame, K3 fans all eight out, K4 picks the
+         * shape of the fan. The page cannot show the wave being edited -- 256 points
+         * across 240 px with no cursor is a guessing game, and the offset is a value you
+         * hear rather than see. The frame prints as a number because frames have no
+         * names and "3" is what the MORPH knob's position corresponds to. */
+        knob(4,   KNOB_TOP, 54, "FRAME",  frame_text(),  edit_frame * 127 / (WV_FRAMES - 1), 1);
+        knob(62,  KNOB_TOP, 54, "OFFSET", foff_text(),   foff_mark(),  1);
+        knob(120, KNOB_TOP, 54, "SPREAD", spread_text(), (int32_t)foff_spread, 1);
+        knob(178, KNOB_TOP, 54, "SHAPE",  (char *)FOFF_SHAPE_NAME[foff_shape],
+             (int32_t)foff_shape * 127 / (FOFF_SHAPE_N - 1), 1);
     } else if (edit_page) {
         /* The EDIT page: the four boundaries, in the order they appear on the picture,
          * so K1 is the leftmost marker and K4 the rightmost. START and END are the
@@ -3107,6 +3926,30 @@ void app_frame(void)
         knob(62,  KNOB_TOP, 54, "RES",   pct(k_res), k_res, 0);
         knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(k_lfo_rate), k_lfo_rate, 1);
         knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
+    } else if (fx_page) {
+        /* The FX page: the filter's own. CUT and RES stay on K1 and K2 because they ARE
+         * the filter, exactly as on the LFO page -- and because a page that moved them
+         * would make the two pages disagree about where the filter lives.
+         *
+         * TYPE's ring fills 1/3 then 2/3 then 3/3, which is the only thing a three-state
+         * ring can say; the name in the hole says which. KEY TRK's ring shows the actual
+         * percentage, so 25 % is a quarter of the way round and not a detent count.
+         *
+         * Neither value is a Hz figure, and that is deliberate: with key tracking on, the
+         * corner is a different frequency per note, so a single number here would be a
+         * number that is true for one note and false for the chord. The ring is the knob
+         * position, which is the thing the knob actually controls. */
+        knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
+        knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
+        knob(120, KNOB_TOP, 54, "TYPE",   FTYPE_NAME[k_ftype],
+             (int32_t)k_ftype * 127 / (WV_FTYPE_N - 1), 1);
+        /* The ring's argument is 0..127, and k_ktrack is PERCENT -- passing the percent
+         * straight in drew 100 % as 100/127 of the arc, a ring that never filled. The
+         * conversion is the page's, not the DSP's, because the DSP's unit is percent and
+         * the ring's unit is a knob position; the two scales meeting in one place is how
+         * they were allowed to disagree. */
+        knob(178, KNOB_TOP, 54, "KEY TRK", ktrack_text(k_ktrack),
+             (int32_t)k_ktrack * 127 / 100, 1);
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
@@ -3114,6 +3957,7 @@ void app_frame(void)
         knob(178, KNOB_TOP, 54, "AMOUNT", pct(k_amount), k_amount, 0);
     }
     cv_blit(0, SCOPE_H + MAT_H);
+    frame_blits++;
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the
@@ -3156,7 +4000,39 @@ void app_frame(void)
             lit |= 1u << B_SEL;
         if (src == SRC_SMPL)
             lit |= 1u << B_EDIT;
-        plat_leds(lit, in_keys);
+
+        /* B_SAVE says the same thing the line under the scope says, on the button you
+         * would press about it. The two read the same state and change on the same frame.
+         *
+         * Three levels, because that is what the matrix can show: lit, mid (felucca-bsp's
+         * steady ~12 % level) and the glow every unlit button already has.
+         *
+         *   saved              glow, like every button at rest -- no news
+         *   unsaved            mid
+         *   unsaved 5 minutes  lit, the same instant the line reaches full ink
+         *
+         * Tying "fully lit" to SAVE_LINE_FULL_MS rather than inventing a second threshold
+         * is the point: one event, said in two places. A lamp with its own clock would be
+         * a second thing to keep in step, and it would be the one that drifts.
+         *
+         * plat_lights_mid, not plat_lights: the mid level is a separate call in the
+         * platform's contract ("call it after plat_lights each time the lights change").
+         * plat_leds is still the right base because it owns PLAY's green LED and the glow. */
+        {
+            uint32_t mid = 0;
+
+            save_led = 0;
+            if (save_dirty()) {
+                save_led = save_line_step >= 3 ? 2 : 1;
+                if (save_led == 2)
+                    lit |= 1u << B_SAVE;
+                else
+                    mid |= 1u << B_SAVE;
+            }
+            plat_leds(lit, in_keys);
+            if (mid)
+                plat_lights_mid(mid, 0);
+        }
     }
 }
 
@@ -3195,6 +4071,11 @@ int app_expect(const char *what, int *got)
      * what proves B_SAVE wrote ONCE and not once per frame. */
     if (!strcmp(what, "saved"))       { *got = save_loaded(); return 1; }
     if (!strcmp(what, "save_dirty"))  { *got = save_dirty(); return 1; }
+    if (!strcmp(what, "frame_blits")) { *got = frame_blits;    return 1; }
+    if (!strcmp(what, "save_line"))   { *got = save_line_len;  return 1; }
+    if (!strcmp(what, "save_ink"))    { *got = save_line_step; return 1; }
+    if (!strcmp(what, "save_age"))    { *got = (int)save_line_age; return 1; }
+    if (!strcmp(what, "save_led"))    { *got = (int)save_led; return 1; }
     if (!strcmp(what, "save_count"))  { *got = (int)save_count(); return 1; }
     if (!strcmp(what, "save_last"))   { *got = save_last_result(); return 1; }
     if (!strcmp(what, "arp_rate"))   { *got = k_arp_rate; return 1; }
@@ -3236,6 +4117,61 @@ int app_expect(const char *what, int *got)
         uint32_t v, n = 0;
         for (v = 0; v < WV_VOICES; v++) n += dsp.v[v].active ? 1u : 0u;
         *got = (int)n;
+        return 1;
+    }
+    if (!strcmp(what, "ftype"))       { *got = k_ftype;  return 1; }
+    if (!strcmp(what, "ktrack"))      { *got = k_ktrack; return 1; }
+    if (!strcmp(what, "fx_page"))     { *got = fx_page;  return 1; }
+    /* SYNTH's EDIT page. `foff` is the offset of the frame K4 has selected -- the value
+     * the three digit knobs are turning -- and `edit_frame` is which one that is. A test
+     * that only checked one of them could not tell "the knob did nothing" from "the knob
+     * edited the wrong frame". */
+    if (!strcmp(what, "foff"))        { *got = foff_tab[bank_i][edit_frame]; return 1; }
+    /* The pair the rack lights. Computed the same way src_rack does it, from k_morph, so a
+     * test can assert WHICH frames the picture lights without reading pixels -- the curves
+     * of neighbouring frames overlap in an 80 px band and a pixel probe kept counting the
+     * frame above (measured: every low-MORPH reading came back "f0 f1 f2 HI"). */
+    if (!strcmp(what, "rack_pair")) {
+        float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+        int32_t m0;
+        if (mf < 0.0f) mf = 0.0f;
+        if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
+        m0 = (int32_t)mf;
+        *got = m0 * 16 + ((m0 + 1 < (int32_t)WV_FRAMES) ? m0 + 1 : m0);   /* m0 << 4 | m1 */
+        return 1;
+    }
+    if (!strcmp(what, "foff_spread")) { *got = foff_spread; return 1; }
+    if (!strcmp(what, "foff_shape"))  { *got = foff_shape; return 1; }
+    if (!strcmp(what, "foff_sum"))    {                       /* the whole table, summed */
+        int32_t i, j, t = 0;
+        for (i = 0; i < WV_BANK_COUNT; i++)
+            for (j = 0; j < WV_FRAMES; j++)
+                t += (int32_t)foff_tab[i][j];
+        *got = t; return 1;
+    }
+    if (!strcmp(what, "edit_frame"))  { *got = edit_frame; return 1; }
+    if (!strcmp(what, "edit_src"))    { *got = edit_src; return 1; }
+    /* The whole table, as a sum: 8 banks x 8 frames packed one byte each would overflow
+     * the int, so this is the sum of products with a position weight. A single byte
+     * moving changes it, and a byte moving to the WRONG frame changes it differently --
+     * which is the injection the per-frame probe could not see, because a probe that
+     * reads the frame the page says it is on agrees with a page that always writes
+     * frame 0 whenever it is looking at frame 0. */
+    if (!strcmp(what, "foff_hash")) {
+        uint8_t b, f; int32_t h = 0;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                h += (int32_t)foff_tab[b][f] * (1 + (int32_t)f);
+        *got = h;
+        return 1;
+    }
+    if (!strcmp(what, "foff_at"))     { *got = foff_tab[0][0]; return 1; }
+    if (!strcmp(what, "foff_max")) {
+        uint8_t b, f; int32_t mx = 0;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                if ((int32_t)foff_tab[b][f] > mx) mx = foff_tab[b][f];
+        *got = mx;
         return 1;
     }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
@@ -3393,6 +4329,7 @@ void app_init(void)
     ui_apply();
     bank_i = 0;
     bank.frames = WV_BANKS[0];
+    bank.foff = foff_tab[0];
     held_prev = 0;
     btn_prev = 0;
     wf_idx = 0;
@@ -3438,6 +4375,31 @@ void app_init(void)
             for (i = 0; i < SMP_MAX; i++)
                 region_fix(i);
         }
+    } else {
+        /* No record in flash: the state boot just settled on IS "saved".
+         *
+         * Nothing has been edited yet, so there is nothing to save, and the player should
+         * not be told to save a sound they never touched.
+         *
+         * This is not cosmetic. The boot defaults are not all zero -- region_reset_all()
+         * gives every slot its whole self (region_end is the slot's length, 52369 for the
+         * demo PAD) while save_load() leaves its baseline zeroed. So the first scan
+         * compared a real record against an empty one and reported "unsaved" from the
+         * first frame. Measured: `expect save_dirty 0` passed before any frame ran and
+         * read 1 after `wait 100`.
+         *
+         * That was already true before the save line existed, and it was invisible because
+         * the old mark was two words nobody had asked the meaning of at boot. A bar whose
+         * length is the distance to flash cannot stand on top of it.
+         *
+         * Placed last in app_init, not at the end of the save_load() block above and not at
+         * the first frame: everything that settles the boot state has to have run, and on
+         * the host a script's first command runs after app_init but before the first
+         * frame -- adopting at the first frame swallowed that command as part of the
+         * baseline (measured: `spin K1 -34` then `expect save_dirty 1` read 0). */
+        save_rec r;
+        save_snapshot(&r);
+        save_adopt(&r);
     }
 }
 
@@ -3461,6 +4423,8 @@ static void save_snapshot(save_rec *r)
     r->eg_r = k_eg_r;
     r->lfo_rate = k_lfo_rate;
     r->lfo_depth = k_lfo_depth;
+    r->ftype = k_ftype;
+    r->ktrack = k_ktrack;
     r->arp_rate = k_arp_rate;
     r->arp_type = k_arp_type;
     r->arp_oct = k_arp_oct;
@@ -3474,6 +4438,15 @@ static void save_snapshot(save_rec *r)
         r->region[i].loop_s = region[i].loop_s;
         r->region[i].loop_e = region[i].loop_e;
         r->region[i].on = region[i].on;
+    }
+    {
+        uint8_t b, f;
+        for (b = 0; b < SAVE_BANKS; b++)
+            for (f = 0; f < 8; f++)
+                r->foff[b][f] = (b < WV_BANK_COUNT && f < WV_FRAMES)
+                                ? foff_tab[b][f] : 0u;
+        r->foff_spread = foff_spread;
+        r->foff_shape = foff_shape;
     }
 }
 
@@ -3497,6 +4470,8 @@ static void save_apply(const save_rec *r)
     k_eg_r = r->eg_r;
     k_lfo_rate = r->lfo_rate;
     k_lfo_depth = r->lfo_depth;
+    k_ftype = r->ftype;
+    k_ktrack = r->ktrack;
     k_arp_rate = r->arp_rate;
     k_arp_type = r->arp_type;
     k_arp_oct = r->arp_oct;
@@ -3510,6 +4485,14 @@ static void save_apply(const save_rec *r)
         region[i].loop_s = r->region[i].loop_s;
         region[i].loop_e = r->region[i].loop_e;
         region[i].on = r->region[i].on;
+    }
+    {
+        uint8_t b, f;
+        for (b = 0; b < WV_BANK_COUNT; b++)
+            for (f = 0; f < WV_FRAMES; f++)
+                foff_tab[b][f] = (b < SAVE_BANKS && f < 8) ? r->foff[b][f] : 0u;
+        foff_spread = r->foff_spread > 127u ? 0u : r->foff_spread;
+        foff_shape = r->foff_shape < FOFF_SHAPE_N ? r->foff_shape : 0u;
     }
 }
 

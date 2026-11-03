@@ -120,7 +120,7 @@ static void fill_material(void)
 }
 
 static wv_sample smp;
-static wv_bank bank;
+static wv_bank bank = { 0 };
 static wv_state g_a;
 
 static void setup(void)

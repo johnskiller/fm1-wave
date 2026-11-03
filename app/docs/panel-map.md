@@ -211,12 +211,29 @@ plays, and its meaning is a number. A page is for structure — a boundary, a fr
 direction — where the value is not something a hand sweeps but a decision about what the
 material is.
 
-EDIT is only implemented for SMPL, and the button does nothing in SYNTH and GRAN. What
-those two could carry is specified in `docs/spec.md` §5d with the measurements behind it
-(flash and store limits for a bank, the per-sample cost of a frame phase, the four grain
-axes and which one is a call site).
+EDIT is implemented for **two** sources and still does nothing in GRAN. The button means
+"edit this source's structure", not "open the SMPL editor" — that is the model `docs/spec.md`
+§5d argues for, and the one a second oscillator extends instead of replacing. GRAN's page
+(its cloud region) is specified there too, with the measurements behind it.
 
-**What this page does today** — the whole of it:
+**SYNTH's page, built** (§5d-i for what it does to the sound):
+
+| | |
+|---|---|
+| K1 | `FRAME` — which of the eight frames the other knobs act on |
+| K2 | `OFFSET` — that frame's phase, 0..255 points of 256; one detent is one point |
+| K3 | `SPREAD` — rewrites all eight as a ramp, points per frame (2 per detent, 0..254) |
+| K4 | `SHAPE` — `LIN` / `ALT` / `RAND`, the shape of that ramp |
+| PRESETS | zeroes every offset and SPREAD with them |
+| ring | `OFFSET`'s ring is the offset as a position in the cycle: one turn = one full cycle |
+| text | `OFFSET` prints quarters where they land exactly (`1/4`, `3/4`) and a percentage between |
+| stored | the 8×8 table plus SPREAD and SHAPE; not which frame is selected |
+
+`SPREAD` is the knob to reach for first: one turn and all eight frames fan out, which is
+the change the A/B is about. `K2` desynchronises one frame from that ramp, which is what
+you do when you are listening to that frame.
+
+**SMPL's page, the whole of it:**
 
 | | |
 |---|---|
@@ -349,9 +366,16 @@ and the loop pair dotted. Two defects were measured and fixed on the way in:
   range, so the markers existed and could not be seen. They are 2 px and dot every 2 rows.
 
 **The edits persist on `B_SAVE`, and only then.** A region moves in RAM as the knob turns;
-`B_SAVE` writes all eight slots' regions (and every knob) to `OBJ_SETTINGS`, and until it
-is pressed the panel shows a dim `NOT SAVED` mark at the top left of the material band. An
-unsaved region resets to the whole slot at power-off.
+`B_SAVE` writes all eight slots' regions (and every knob) to `OBJ_SETTINGS`. An unsaved
+region resets to the whole slot at power-off.
+
+What says so on screen is **the save line**: two rows at `y 87..88`, in the padding below the
+scope's 0 dBFS line and above the picture (three rows of air below the graticule, one above
+the wave). Its **length** is how many groups differ from flash (8 groups = the full 240 px,
+30 px each), its **colour** is how long they have been unsaved (3/5 `ink` to `ink` over 5
+minutes in four steps, never `ink_hi`), and it is absent entirely when the record matches
+flash. Being the source's own `ink`, it is amber in SYNTH, green in SMPL and cyan in GRAN. It replaced the words `NOT SAVED`, which were measured erasing 443 px
+of SYNTH's waveform in the brightest part of the picture.
 
 ## Buttons
 
@@ -360,7 +384,7 @@ unsaved region resets to the whole slot at power-off.
 | `B_SEL` | SEL | **SOURCE** cycles SYNTH → SMPL → GRAN | app | app.c:47 |
 | `B_ENV` | ENV | **ENV page** toggle (A/D/S/R on K1–K4) | app | app.c:47 |
 | `B_EDIT` | EDIT | **SMPL EDIT page** toggle (START/END/LOOP S/LOOP E on K1–K4, LOOP on PRESETS, ZOOM on ALGORITHM); dead in SYNTH and GRAN | app | app.c |
-| `B_FX` | FX | nothing | **free** | — |
+| `B_FX` | FX | **FX page** toggle: the filter's tap and key tracking (CUT/RES stay on K1–K2, TYPE on K3, KEY TRK on K4) | app | app.c |
 | `B_LFO` | LFO | **LFO page** toggle (RATE/DEPTH on K3–K4) | app | app.c:47 |
 | `B_GLO` | GLO | nothing | **free** | — |
 | `B_SAVE` | SAVE | **write the panel state to `OBJ_SETTINGS`** | app | `app/save.c` |
@@ -414,7 +438,7 @@ to draw and refuses to compile if they do not sum to 240:
 #define SCOPE_MID  (SCOPE_H / 2)                      /* 42 */
 #define SCOPE_HALF ((SCOPE_H - 2) / 2)                /* 41 */
 #define KNOB_TOP   4
-#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* 46 */
+#define KNOB_INK   (KNOB_TOP + 34 + 8)                /* 46: name, value, then the arc box */
 #define KNOB_H     64
 #if (MAT_H + KNOB_H + SCOPE_H) != 240
 #error "the three bands must fill the 240 px screen"
@@ -448,7 +472,8 @@ Measured, with the derivation in place:
 band       rows        ink extent
 scope      0..83       33..50    (the trace; centre line at 42)
 material   84..175     91..169   SYNTH (79 px of the 80 px picture), 91..171 ENV/GRAN, 94..160 SMPL
-knobs      176..239    183..221  (39 px of ink, 18 px spare for the round knob art)
+knobs      176..239    193..239  (name, then a 46 px ring, r = 23: three quarters of a
+                                turn with a tick on it, gap at the bottom)
 ```
 
 ### The three material pictures
@@ -716,6 +741,109 @@ graticule, it is a missing one.
 The trace runs over it (drawn after), which is how a real scope looks: the grid is
 behind the signal.
 
+### The knob art: an arc and a tick
+
+A knob is a 270-degree arc with a tick on it, not a bar. The bar answered "how much" but
+not "how far round", and that is the question four knobs under a screen get asked from a
+metre away.
+
+```
+   (name)              name: FONT_XS, sk.ink, left-aligned in the column
+    _____              arc: r = 23, 5 px stroke, 128 segments, 270 deg
+   /     \             gap: 90 deg, centred on straight down
+  |  127  |            value: FONT_XS, centred INSIDE the ring
+   \     /             fill: sk.ink_hi (or ink when the page is not lit)
+    -----              tick: a 4 px radial line across the stroke at the value's angle
+```
+
+**The ring is as big as the band allows, and the value lives inside it.** The band is 64 px;
+the name takes 15, two pixels of air are left, and what remains is 47 -- so `r = 23` with the
+stroke's outer edge on the band's last row. 23 is not a taste: one more pixel and the ring is
+clipped by the band. Four columns of 54 px hold a 46 px ring with 4 px either side, so
+neighbours cannot touch.
+
+Putting the value in the hole is what makes that radius possible, and it costs the hole its
+width: the space for text is the **chord** at the glyph's height, not the diameter. The glyphs
+of FONT_XS occupy 9 rows (measured -- the font's cell is 15 px but its ink is not), so at a
+clear hole radius of 18 the chord is 35 px, against 33 px for the widest string the app can
+print. That bound is why the EDIT page prints seconds ("12.810s", 33 px) and not milliseconds
+("52369ms", 50 px). Three decimals rather than two because at 128x zoom the window is 8
+samples wide and two decimals would print the same number for different positions; a
+boundary control whose number does not move is broken.
+
+**The stroke is five radii, and five is the widest that fits.** Six puts the clear hole at 17
+and the chord at 32.8 px -- one pixel short of the widest value. So the thickness is set by
+the text, not chosen.
+
+**Where zero is.** The gap sits at the bottom, so the two ends of the range are visible as
+ends. A full circle was the first draft and it hides exactly that: a ring tells you the
+value but not where the range starts.
+
+**Which way it fills.** From the lower left, clockwise, 270 degrees at v=127. The hardware
+encoder turns clockwise for more (`turn K1 +1` raises the value), so the arc fills the way
+the hand turns. An anticlockwise fill would be a second convention in one panel.
+
+**Why a tick and not a hand.** The first pointer was a line from the centre out to the arc.
+It reads well at rest and fails at one specific place: at v=0 a hand pointing lower-left
+runs through the gap and fills part of it, so the control reads as a nearly closed ring.
+A radial tick across the arc keeps the gap empty at every value, and it survives a smaller
+radius.
+
+**A stroke is a filled quad, not a bundle of 1 px lines.** The first attempt drew the segment
+and then "thickened" it by nudging the start point one pixel along the segment's own
+direction -- which is the line's direction, not the stroke's, so the second line landed on
+the first and the arc came out 1 px thick (measured: exactly one lit pixel in every row of
+the ring). A stroke is a second radius.
+
+That fix carried a defect that only showed up at 5 px. Drawing one 1 px Bresenham chain per
+radius does not tile the band: each chain rounds its own way, so two neighbours can straddle
+a pixel and leave the background showing through the stroke. Measured on the host, a finished
+ring enclosed **6 background pixels per knob** at r = 19.8 .. 21.9 -- inside the stroke, not
+in the gap and not at a segment join. With two chains (the earlier 2 px stroke) the two lines
+almost always touch, which is why nothing was visible until the stroke got thick. It was not
+the trigonometry table: the 128-entry table is exact at the segment ends, and the older
+`fm_sinf` version holes the same way at this width.
+
+So each segment is the **quad** between (inner[k], outer[k]) and (inner[k+1], outer[k+1]),
+filled row by row: for every row its four edges give a left and a right x, and the span
+between them is one `cv_rect`. Consecutive segments share an edge, so there is no seam left to
+hole. This is also faster than the five-chain version, measured by running the same 400-tap
+script through both on the host: **0.344 s against 0.350 s** (490 `cv_rect` calls against 640
+`cv_line` calls, and `cv_rect` fills a row without Bresenham's per-pixel error term).
+
+Two details are load-bearing and were both found by measuring, not by reasoning:
+
+- The row bounds are **closed** (`ay <= y && y <= ey`). The usual half-open test is right for a
+  general polygon but wrong at the 12 o'clock vertex, where every edge of the quad is either
+  horizontal or ends exactly on that row, so no edge claimed it and the top of the ring kept a
+  1 px background dot at every value (`FFFFFFFFFF.FFFFFFFFFF` on row 197 of the host shot).
+- The test is done for **both windings** of each edge. Dropping the reversed cases looks like
+  dead code -- the quad's winding is constant -- and puts 12 holes back, because the closed
+  bounds make some rows fall outside the single-winding spans.
+
+**The core has no 32-bit divide routine.** The image's only divide symbol is `__udivdi3`
+(64-bit), so the `knob_edge_x` interpolation compiles to the hardware divide instruction.
+
+**The geometry is checked, the look is not.** `app/tests/test_knob.py` (25 checks) pins the
+facts the design rests on, each one measured from a host screenshot: the gap is centred on
+down and about a quarter turn; the track spans about 270 degrees; the fill grows with the
+value while the track gives way; the fill is contiguous from the lower left and ends on the
+value's own angle; the gap stays empty at every value; the value is centred in its column and
+fits inside the hole; and **the stroke carries no pinholes** -- that last one exists because
+the art shipped with 6 of them per knob, and putting the old five-chain drawing back turns it
+red on all four values.
+Each of those four had a draft that got it wrong, and each is pinned by a check that fails
+when the defect is put back. Whether the result is pleasant is the player's call by looking
+at it.
+
+A note for whoever extends this: the knob's centre is at **(31.5, 216.0)** on screen, and
+that is not what the source says. An earlier note here gave 224.5 for a smaller ring, read
+off the pixel scan of that version; when the ring grew to r = 23 the centre moved with it and
+the scan is what tracked it. `cy = KNOB_ARC_TOP + KNOB_ARC_R` with `KNOB_ARC_TOP =
+KNOB_TOP + FONT_XS.h + 2 = 17` gives 40 inside the band, and the band's canvas starts at
+`SCOPE_H + MAT_H = 176`, so 216. Measure the circle; the source reading is the thing that got
+it wrong twice.
+
 ### The material band
 
 SMPL and GRAN run the picture the full band, 232 x 80, and print three values on top of
@@ -851,7 +979,7 @@ only says "moved"; the screen says which.
 
 | Function | State | Why unassigned |
 |---|---|---|
-| **PANIC** / all-notes-off | not implemented | `B_HOME` is the natural home (idle except during restore) |
+| **PANIC** / all-notes-off | not implemented | no button left for it: `B_HOME` is reserved for the VCO selector (spec.md §5d). Panic reaches the panel anyway -- the platform silences the synth at power-cycle, and MIDI CC 123 covers the external case |
 | Material page | not implemented | no button of its own; spec's `BTN_BANK` names a control this panel does not have |
 | Octave shift | not implemented | `B_OCT-` / `B_OCT+`, power-on conflict only |
 | Glide / portamento | not in the DSP | `B_GLO` is free |
@@ -873,16 +1001,18 @@ there are more free buttons than pending functions.
 
 | Button | Could carry | Cost / caveat |
 |---|---|---|
-| `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
+| `B_HOME` | **VCO 1 / VCO 2** (planned, not built) | property of the VOICE, not of the material, which is why it is not on `B_EDIT`; idle except during the RESTORE prompt (`unity.c:340`). Was the PANIC candidate until the player reserved it — see spec.md §5d |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
-| `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 45 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob |
-| `B_FX` | **filter type** (LP / BP / HP) | the SVF already computes all three every sample and only `lp` is used, so the switch is free of arithmetic — see `spec.md` §5d |
+| `B_SAVE` | save the current knob set as the boot state | **built** (`app/save.c`, 190 B in `OBJ_SETTINGS`, `test_save.py` 55 checks); manual only — the write erases a 4 KiB sector and this app runs from the same flash, so it cannot ride a knob. Its lamp: glow when saved, `mid` while an edit waits, `lit` once the save line is full (same `SAVE_LINE_FULL_MS`), dark again after the write |
+| ~~`B_FX`~~ | ~~filter type~~ | **taken** — it became the FX page (filter tap + key tracking). See the table above. |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
 
-**If only one is done**: `B_HOME` → PANIC. It costs a dozen lines and fixes the one
-failure mode that makes an instrument unusable in front of people.
+**If only one is done**: `B_GLO` → glide. `B_HOME` is no longer available for PANIC: the
+player reserved it for the VCO selector, on the argument that choosing an oscillator is a
+per-patch mode and panic is reachable by other means (power-cycle on the panel, CC 123 over
+MIDI). That leaves glide as the cheapest genuinely-missing function.
 
 ---
 

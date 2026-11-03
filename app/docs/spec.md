@@ -49,9 +49,9 @@ flashing one replaces the other.
 
 ```
                     ┌── wavetable osc ──┐
-keys ─► allocation ─┤                   ├─► shaper ─► SVF low-pass ─► VCA ─► mix ─► scope
-       (8 voices)   └── granular ───────┘   (shape,     (cut, res)    (env)
-                     per voice, one of         amount)
+keys ─► allocation ─┤                   ├─► shaper ─► SVF ─► VCA ─► mix ─► scope
+       (8 voices)   └── granular ───────┘   (shape,   (cut,res, (env)
+                     per voice, one of         amount)  type,ktrack)
 ```
 
 One oscillator per voice, and **the oscillator is one of two sources**: a
@@ -390,6 +390,43 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
 - `WV_GRAINS` is the whole granular budget knob. Lowering it to 2 makes the cloud
   exactly the tiling pair and nothing more.
 
+### 5c2. The filter's tap, and key tracking
+
+Both live on the **FX page** (`B_FX`), which is the panel's spare button doing what
+`panel-map.md` had already pencilled in for it.
+
+**TYPE (K3): LP / HP / BP.** Zavalishin's topology-preserving SVF computes `lp`, `bp`
+and `hp` every sample as intermediate results of one iteration; the voice read `lp`
+and discarded the other two. So the selector is a move out of registers that are live
+anyway — no second filter, no extra arithmetic. Measured at CUT 40 (217 Hz) against a
+262 Hz tone, the three taps give distinctly different output, and the **order is
+HP > BP > LP**, not the textbook BP > HP > LP: this SVF's `bp` is the integrator state
+(`bp = g*hp + s1`), which scales differently from the normalised `H_bp`. The tests
+assert the measured order and the fact that the curves cross as CUT moves (LP rises
+past the tone, HP falls), which is what a selector that was stored and never read
+could not produce.
+
+**KEY TRK (K4): 0 / 25 / 50 / 75 / 100 %.** How far the corner follows the note, in
+percent of one octave of corner per octave played, from **C4 (60)**. At 100 % a note an
+octave up has its corner an octave up; at 0 % every note has the corner the CUT knob
+says. Five settings rather than a 0..127 sweep on purpose: a knob that can land on 37 %
+makes two patches that should match not match.
+
+The ratio is applied as a **multiplier on the shared `cut_z` ramp**, not as a per-voice
+smoother and not as a per-voice frequency. The ratio between two notes is exact either
+way, but only this way keeps one ramp for eight voices — a per-voice smoother would make
+the knob glide at whatever rate the last note set, and re-deriving `g` from a scaled
+frequency would add a `tan()` per voice per sample for the same picture.
+
+Cost: one `fm_exp2f` per voice per block (8 per block, against 2048 voice-samples), and
+one multiply per voice per sample when the setting is on. The chip's FPU divides in
+hardware — `pi32v2 -mcpu=r3 -mfprev1` compiles `a/b` to one instruction and the image
+holds 34 such divides, none calling a helper — so the division this page's arithmetic
+could have added was never the constraint. Only `double` falls back to `__divdf3`.
+
+The reference note is C4, so turning tracking on never moves the note a patch was voiced
+on. Measured: C4's output is bit-identical at 0 % and 100 %.
+
 ### 5d. EDIT — what a deeper edit can actually reach
 
 EDIT means **edit the voice**, not turn a knob. A knob is a performance control and has
@@ -432,7 +469,7 @@ edit" is answered by SELECT, not by a list.
 **What an edit is, though, is not "draw the wave".** 256 points across 240 px with no zoom
 is a guessing game, and a cursor is a UI this panel does not have. The axis that fits both
 the panel and the storage is the **per-frame phase offset** (0..255 points, one byte per
-frame, 8 bytes total, in `OBJ_SETTINGS`).
+frame, 8 bytes total, in `OBJ_SETTINGS`). **Built** — see §5d-i below.
 
 Why it is not a shortcut: `wv_table_read2(fa, fb, phase, t)` reads both frames at the
 *same* phase, so MORPH between two frames is a sample-by-sample sum of two shapes exactly
@@ -440,10 +477,51 @@ in phase. Giving each frame its own offset makes MORPH a phase scan of the table
 idea a wavetable synth uses per frame, and it is audible well below anything that sounds
 broken.
 
-The cost is honest and **unmeasured**: the offset lands in the per-sample hot path — an
-add and a wrap per frame read, per voice, at 44.1 kHz. That is measured before it is
-promised, not estimated, and the measurement is cheap: the split renderer already reports
-per-core CPU.
+#### 5d-i. Built: the per-frame phase offset, and what it actually does
+
+**Storage: 8 bytes of table + 2 bytes of setting, in `OBJ_SETTINGS`.** No flash, no RAM
+copy: the tables stay `static const` in flash and the offset is applied at read time.
+
+**The read.** `wv_table_read2o(fa, fb, ph, t, o0, o1)` is the offset form of
+`wv_table_read2`. The fractional part of the phase is *shared*: an offset of n whole points
+moves `i0` and `i1` by n and leaves `ff` alone, so a per-frame offset costs **one add and
+one mask per frame read per sample** — not a second phase wrap and not a second float
+multiply. The two frames' offsets are resolved **once per block** in `voice_block`, next to
+the frame pair, because MORPH does not move inside a block. When every offset is zero the
+per-sample test `(o0 | o1)` takes the old path, so an untouched bank runs the code it
+always ran — asserted bit for bit, not by ear.
+
+**What it sounds like, measured.** Same note, same MORPH position, same shaper; the only
+difference is the offsets. `app/tools/render_foff.sh` writes one WAV per pair — the note
+with offsets off, then the same note with them on, back to back:
+
+| pair | rms | spectral centroid |
+|---|---|---|
+| SAW SQR, 32 pt/frame | 0.1695 → 0.1522 (−10.3 %) | 1908 → 1359 Hz (−28.8 %) |
+| SAW SQR, 8 pt/frame | 0.1695 → 0.1682 (−0.8 %) | 1908 → 1476 Hz (−22.6 %) |
+| SAW SQR, 64 pt/frame | 0.1695 → 0.1302 (−23.2 %) | 1908 → 1446 Hz (−24.2 %) |
+| OPEN2, 32 pt/frame | 0.1786 → 0.1793 (+0.4 %) | 1966 → 1644 Hz (−16.4 %) |
+| VOX, 32 pt/frame | 0.1530 → 0.1707 (+11.6 %) | 6381 → 5990 Hz (−6.1 %) |
+
+The direction is **down** in every case: two frames in phase sum to a wave with sharper
+features, and turning them against each other softens the sum before the shaper. The
+level does not move by a fixed amount — it is a timbre change that on SAW SQR also loses
+1 dB — which is the honest description: this is not a volume trim, it is a different
+waveform.
+
+**The renderer has to clear its buffer, and that is a real trap.** `wv_render` *adds* into
+`out` (wv_dsp.h: "added to what is there: the caller may mix several parts"); the platform
+gets away with it because its buffer is the DMA bank it just handed back. A file renderer
+that reuses one buffer must clear per block. Measured the wrong way: five identical takes
+of one note gave rms **0.17, 0.33, 0.46, 0.56, 0.62** — a rising staircase that looks like
+the offset "building up" and is nothing of the kind. Every number in the table above was
+taken after that was found and fixed, and the fixed renderer is deterministic: plain
+0.169523 twice, offset 0.152147 twice.
+
+**The page.** SYNTH's `B_EDIT` (§9f-bis) — K1 picks a frame, K2 turns it, K3 fans all
+eight out, K4 picks the shape of the fan. `B_EDIT` used to mean SMPL's region editor and
+nothing else; it now means "edit this source's structure", which is the model §5d asks for
+and the one a second oscillator would extend rather than replace.
 
 **Frame operations** — copy frame *n* onto *m*, rotate a frame by *n* points — reach
 material that was never curated, and are the other half of the same page. They are the
@@ -466,7 +544,8 @@ position to `[0, len-1]`, which is why SPRAY is one-sided.
 | **cloud region** | the slot stops being the whole cloud. `wv_grains_start()` already takes `[start, end)` and already wraps inside it — `app.c` passes `0, 0` | **call site only**, and it reuses the region marks SMPL already has |
 | **reverse grains** | `g->inc` negative | a sign and a clamp: `read_at()` returns 0 for `pos < 0`, so a reverse grain must start at least `len_out × rate` into the material or its own window fades it out |
 | **pitch spread** | per-grain random rate multiple at spawn; shimmer | one line in `spawn()` |
-| **density** | overlap other than 2 | the expensive one: the sin²/cos² gain argument is **tied to overlap = 2** (§5c), so any other value needs real window-sum compensation |
+| **density** (grain count) | overlap other than 2 | the expensive one: the sin²/cos² gain argument is **tied to overlap = 2** (§5c), so any other value needs real window-sum compensation |
+| **stereo spread** | per-grain pan across the field | the render path is mono today (§5c: one `out` buffer, one write). Panning each grain needs the voice to produce L and R, which is the same change a stereo SYNTH would need — so this axis is priced by the "per-grain filter and pan; stereo grains" line in §10 (Not in v1), not by a `pan` field. A per-grain pan whose output is summed to mono would be inaudible, which is the trap to avoid |
 
 The first is the one that matters most and costs least: a cloud over a chosen span is the
 central control of a granular instrument — scanning position and length — and the
@@ -479,15 +558,21 @@ and watch where the cloud's grains actually read, not where the page says they s
 
 Ordered by what is already true, not by what sounds best:
 
+0. **~~SYNTH's per-frame phase~~ — BUILT** (`e1a14ab`, page `3d7daa4`). Eight bytes, no
+   flash, no RAM copy, and the hot-path measurement came back fine. K1 FRAME, K2 OFFSET
+   (points of 256), K3 SPREAD (points per frame), K4 SHAPE. It is also the page that
+   proved the model in §5d: a source's structure, on EDIT, with nothing else competing
+   for the button.
 1. **GRAN's cloud region** — a call site. `wv_grains_start()` takes `[start, end)` and
    wraps inside it today; `app.c` passes `0u, 0`. Reuses SMPL's region marks, needs no
    storage, and is the axis a granular instrument is built around. The reference frame is
    one press of `B_EDIT` while SOURCE is GRAN.
-2. **SYNTH's per-frame phase** — 8 bytes, no flash, no RAM copy. Blocked only on the
-   hot-path measurement: if two extra phase operations per voice per sample cost more CPU
-   than the split can absorb, the answer is no and it costs nothing to have found out.
-3. **GRAN's reverse grains** — a sign and a clamp on `g->inc`; `read_at()` returns 0 for
-   `pos < 0`, so the start has to move back by the window.
+2. **GRAN's reverse grains** — a sign and a clamp on `g->inc`; `read_at()` returns 0 for
+   `pos < 0`, so the start has to move back by the window. The player's first named GRAN
+   edit control.
+3. **GRAN's density, then stereo spread** — both are named as GRAN edit controls, and both
+   are engine work rather than page work: density needs the window-sum compensation, and
+   spread needs a stereo path before a per-grain pan means anything.
 4. **SYNTH's frame operations** — the first item that costs flash, and therefore the
    first that is a trade against the 276 KiB pool. It waits until there is a reason.
 5. **GRAN's density** — overlap other than 2 needs real gain compensation; it is the only
@@ -498,12 +583,34 @@ whole panel state to `OBJ_SETTINGS`. A deep edit that is lost at power-off is a 
 uses, so this had to land first. The next two items still cost no storage, which is why
 they come before the frame operations.
 
-**And the page model is upstream of persistence.** If a second oscillator arrives, EDIT
-stops meaning "this source's structure" and starts meaning "this voice's structure", and
-the page model changes with it: SMPL's four boundaries, SYNTH's frame offsets and GRAN's
-grain motion would compete for one button and one row of knobs. Deciding the voice-level
-model first means all three have somewhere to go; building them first means re-homing all
-three later.
+**The page model, decided** (player, 2026-11-03). The collision above does not happen, and
+the reason is that the two axes were never the same axis:
+
+  - **`B_EDIT` edits a SOURCE.** Not a voice, not an oscillator -- the thing SOURCE is
+    currently on. SMPL has its region editor, SYNTH has the frame rack, GRAN will have
+    what a grain needs: reverse, density, how far the cloud is spread across the stereo
+    field. Each of those is a property of the material, so each of them belongs on the
+    button that is already pointed at the material.
+  - **`B_HOME` chooses between the two VCOs of one patch** (planned, not built). Two
+    oscillators are a property of the VOICE, so they get their own button rather than
+    sharing EDIT's.
+
+That split is what makes the three source editors stop competing: adding GRAN's page does
+not take anything from SMPL's or SYNTH's, and a second VCO does not take anything from any
+of them. It also settles what the word "EDIT" has meant all along -- §5d's opening line
+says edit the voice, and the pages built since then have all been source structure. The
+button was named for the deeper idea and has been used for the narrower one; the narrower
+one is what it does.
+
+`B_HOME` is the right button for it and was idle: the platform reads it only inside the
+RESTORE prompt (`unity.c:340`, "no" to a factory restore) and PANIC was the only other
+candidate. A VCO selector is a per-patch mode, which is closer to "home" than to the
+panic the panel already reaches through all-notes-off at power-cycle.
+
+Still to settle when a second VCO is actually built: what the screen does with two
+oscillators' worth of picture (the material band draws one source today), and whether the
+four knobs follow the selected VCO or stay on the voice's shared filters. Neither is
+blocking, because both are visible the moment the button exists.
 
 ---
 
@@ -512,6 +619,18 @@ three later.
 Three bands, heights derived from what each has to draw, with a compile-time
 `#error` if they do not sum to 240. No mode word, no label for a value that is not
 on screen.
+
+**One transfer per band, and that is not a style choice.** `lcd_data()` calls `lcd_sync()`
+first — it waits for the previous DMA to finish before starting the next — and the panel
+runs at 60 MHz, ~44 MHz effective measured, so a 240 × 92 band is about **8 ms** of wall
+time. The material band had **five** `cv_blit(0, SCOPE_H)` calls in a row (the `SCOPE_H`
+argument is where the band is sent, no longer what it holds), left over from when
+that band was drawn in layers: four of them re-sent the same pixels, one transfer after another,
+≈ **32 ms of every frame** spent waiting to send a picture that was already on the glass.
+The last blit is the one that wins, so nothing on screen ever depended on the other four.
+One per band now — scope, material, knobs — and `frame_blits` in `app.c` is a probe on the
+count, so `test_screen.py` fails if a second transfer appears (injected: 4 per frame, 2
+checks fail).
 
 ```
 ┌────────────────────────────────────────┐  y 0
@@ -575,7 +694,8 @@ span more than one sample.
 Every corner label names its parameter. A position is only a name when it is the
 same name in every mode, and the top right is BANK in SYNTH but SLOT elsewhere.
 
-**Band 3 — knobs, y 176..239.** Four knobs, each a name, a value and a bar.
+**Band 3 — knobs, y 176..239.** Four knobs, each a name and a 270-degree ring with the
+value inside it.
 `CUT / RES / SHAPE / AMOUNT` normally; `A / D / S / R` while the ENV page is up.
 No encoder numbers: the position is the name. The one just turned highlights.
 
@@ -703,11 +823,78 @@ waits for silence is a save that does not happen when the chord is the thing wor
 
 The price is that an edit lives in RAM until saved, and a parameter that turns and never
 persists is exactly the kind of bug you cannot hear. So the panel says it: `save_dirty()`
-is true whenever the live record differs from the one in flash, and the screen draws a dim
-`NOT SAVED` mark in the top-left of the material band until it doesn't. It is compared by
-the whole record once a frame rather than set by hand at each of the ~40 writers — one
-forgotten `dirty = 1` would be that same silent bug, and comparing 190 B at 60 Hz is
-cheaper than the risk.
+is true whenever the live record differs from the one in flash, and the screen draws a line
+until it doesn't. It is compared by the whole record once a frame rather than set by hand at
+each of the ~40 writers — one forgotten `dirty = 1` would be that same silent bug, and
+comparing 190 B at 60 Hz is cheaper than the risk.
+
+**The line, and why it replaced the words.** It used to be the text `NOT SAVED` at the top
+left of the material band, and that was measured as damage: in the label's own 13 x 62 box on
+SYNTH, 443 px of the waveform were erased to make room (403 px on SMPL and GRAN), in the
+brightest part of the picture. The replacement is two rows in the padding the band already
+had — `y 87..88` — `MAT_PAD` rows 3..4 (`SAVE_LINE_ROW`), not its top two. The top two were the
+first attempt and the player rejected them on sight: `y 83` is the scope's 0 dBFS graticule,
+a full-width 240 px grey line at `(98,97,106)`, so the save line started on the very next
+row with no air, and two full-width bars on consecutive rows read as one crowded block
+("离scope的下线太近"). Three rows of gap now separate them, and the wave's first ink is
+`y 91`, so a row of air remains below the line at its heaviest.
+
+It spans the full 240 px, not the picture's 232: it is a readout of the panel, not a picture
+of the material, and starting at `x 4` left a 4 px gap that read as a mistake.
+
+It carries two numbers on two axes, because both questions are worth answering and neither
+fits the other:
+
+- **length** = how many groups differ from flash, over `SAVE_LINE_FULL_CHANGES` (8) groups
+  across 240 px, so 30 px per group. A group is a saved field, and a region counts once —
+  dragging a loop boundary is one edit, not four. The ceiling is 28 (17 parameters, 3
+  selectors, 8 regions); 8 was chosen because a run of edits is short and 8 px per group
+  would make the first few invisible.
+- **colour** = how long they have been left that way, from `dim(ink, 3, 5)` to `ink` over
+  `SAVE_LINE_FULL_MS` (5 minutes) in four steps, then flat. The floor is 3/5, not 2/5:
+  measured against each skin's own ground the 2/5 step sat only dLum +26 (SYNTH), +34 (SMPL)
+  and +26 (GRAN) from the background, which the player reported as not standing out
+  ("一开始的红色不够醒目"). At 3/5 the same numbers are +56 / +68 / +58. Four steps are
+  kept rather than three because at three, 2 minutes and 0 seconds drew the same colour —
+  a ramp that does not move for the first third of its life.
+  `ink_hi` is deliberately not the ceiling: that is the colour a knob arc fills with, and a
+  line in it reads as a fifth control.
+
+**B_SAVE's lamp says the same thing, on the button you would press about it.** Three levels,
+because that is what the matrix can show: the glow every unlit button has (saved), `mid`
+(felucca-bsp's steady ~12 % level, an edit waiting) and `lit` (the line is full). The top
+level is tied to `SAVE_LINE_FULL_MS` rather than given a threshold of its own, so "the line
+is full" and "the button is fully lit" are one event said in two places and cannot drift.
+
+**What the tests cannot see about that lamp.** `plat_host.c`'s `plat_lights_mid` takes a
+button mask and a key mask and discards the buttons (`(void)b; mid_keys = k & ~lit_keys`), so
+the simulator cannot record a mid *button*. Measured: deleting the `plat_lights_mid` call
+leaves `test_save.py` at 55/55 green. The app's own state machine (`save_led` 0/1/2, and the
+299 s / 301 s boundary around the line's threshold) is covered; a B_SAVE that sat at glow
+while an edit waited would be caught by eye on the device and by nothing here. Closing that
+means teaching the host to record mid buttons, which is a change to `platform/`.
+The lit path *is* checked end to end — `leds` prints the lit set, and `SAVE` must be out of
+it while unsaved and in it once the line fills.
+
+Because the colour is the source's own `ink`, the line is amber in SYNTH, green in SMPL and
+cyan in GRAN. That is the skin's rule applied consistently, not the line having a palette of
+its own; the player asked, and the answer is "it follows whatever source you are looking at".
+
+Nothing is drawn when the record matches flash. A permanent empty track would be two rows of
+grey meaning "saved", which is the absence of news.
+
+The count is `save_change_count()`, which the save line added to `save.c`. `save_scan()`
+compares field by field rather than in one `memcmp`, because it has to say *how many* and not
+just *whether*; at 190 B once a frame this is not worth optimising.
+
+**A unit with no record has no baseline.** `B_SAVE` is the only writer, so a fresh unit's
+`OBJ_SETTINGS` is empty — and the boot defaults are not all zero (`region_reset_all()` gives
+every slot its whole self; `region_end` is 52369 for the demo PAD). Comparing a real record
+against a zeroed one reported "unsaved" from the first frame. Measured: `expect save_dirty 0`
+passed before any frame ran and read 1 after `wait 100`. `save_adopt()` now takes the state
+`app_init()` settled on as the baseline when flash held nothing. This was already wrong
+before the line existed; it was invisible because the old mark was two words whose meaning at
+boot nobody had asked about.
 
 **The version gate is real.** A record whose `version` is not `SAVE_VERSION` is rejected
 and the defaults boot, so a firmware update that changes the layout cannot read an old
@@ -905,9 +1092,42 @@ What is checked, and the measurement behind each:
 - **EDIT does nothing outside SMPL** — from SYNTH and from GRAN, `src` and `edit` both
   unchanged afterwards. Injected: the old "switch the source there" behaviour fails both.
 
-### 9h. Built: persistence (`app/tests/test_save.py`)
+### 9f-bis. Built: SYNTH's EDIT page, the phase ramp (`app/tests/test_synth_edit.py`)
 
-45 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
+31 checks. The page is the first whose four knobs are **not four independent values**: K3
+(SPREAD) rewrites all eight frames at once, so the page has a ramp the eight values are
+derived from, and K2 pulls one frame off it. That is why the checks are mostly about
+*relationships* between frames rather than about one number.
+
+- **the table is the sum of its parts** — `foff_sum` is a probe on purpose. LIN at 8
+  points a frame is 8 × (0+1+…+7) = **224**, and that number cannot be reached by an
+  implementation that stores the knob position and forgets to multiply. Injected: K3
+  storing SPREAD without calling `foff_ramp()` fails three checks.
+- **one frame is not the ramp** — after K2 moves frame 0, frame 1 stays where the ramp put
+  it. Injected: an edit path that rebuilds the ramp on every knob fails here.
+- **ALT is not half of LIN** — ALT puts the odd frames at the full step and the even ones
+  at zero, so its sum is 4 × 8 = **32**, not 112. The first version of this check asserted
+  "half" and was wrong about its own arithmetic; the number now comes from the formula.
+- **EN_PRESET clears all eight, and SPREAD with them** — `foff_sum` 0 *and* `foff_spread`
+  0. Injected: clearing only the selected frame leaves 224 of table behind while the page
+  would read zero.
+- **the offsets are saved but the frame index is not** — the table and the two ramp
+  settings round-trip through `reboot`; `edit_frame` deliberately does not, because which
+  frame the page points at is a view, like which page is open, and saving it would open a
+  page on power-up. There is no check on the absent field: an assertion about a field that
+  is not in the record is a check that cannot fail. Its absence is visible where it belongs,
+  in `save_rec`'s definition.
+- **the reboot is not trusted to clear statics** — `plat_host.c` calls `app_host_reboot()`
+  under `#ifdef APP_HOST_REBOOT`, which this app never defines, so a simulated reboot keeps
+  every static. A record that is written and never read back therefore passes a naive
+  round-trip. The script turns the value *off* between the save and the reboot; a restore
+  that does nothing then reads 0 and the check fails. Injected: dropping the restore fails
+  one check.
+- **SMPL's page is still SMPL's** — after `B_SEL` to SMPL, `B_EDIT` opens `edit_src == 1`.
+
+### 9h. Built: persistence and the save line (`app/tests/test_save.py`)
+
+55 checks. The host simulator's `reboot` re-runs boot against a flash image that outlives
 it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 
 - **a knob survives a reboot** — CUT turned to 40, `reboot`, `cut` reads 40. Injected:
@@ -928,13 +1148,68 @@ it, so "turn a knob, reboot, read it back" is a real test and not a mock.
 - **the version gate both ways** — a planted record of another version is rejected and the
   defaults boot; the same record at this version is accepted and its values boot. Both
   halves, because a gate that refuses everything passes the first half alone.
-- **the mark is drawn, and out of the way** — the `NOT SAVED` ink is counted in the
-  material band while dirty and gone once saved, and its extent stays left of x 176, the
-  picture's edge. That second one came from a measured regression: anchored to the band's
-  right edge the 42 px string reached back into SYNTH's label column and closed the 12 px
-  gap `test_screen.py` asserts, so the mark moved to the top left. A clean-columns test
-  could not catch it (the labels ink those columns anyway); the check is about the mark's
-  own extent, measured by differencing the two screenshots.
+- **the save line, both of its axes** — length is asserted through `save_line` (0 px at
+  boot, 30 px for one changed group, 0 again after the save), colour through `save_ink`
+  (0..3, reaching 3 only after 5 minutes) and through the pixels: the fully-bright line must
+  be exactly `ink`, and `ink_hi` must not appear. The line is also counted on both of its
+  rows while unsaved and on neither once saved, and the picture's top four rows (`y 86..89`)
+  must stay empty so a long line cannot become a lid on the waveform. SMPL and GRAN are
+  checked separately because the line takes the source's own colour — and they measure
+  60 px, not 30, because switching SOURCE is itself a saved field, which is the check that
+  caught length counting knobs instead of groups.
+
+### 9i. Built: the knob art (`app/tests/test_knob.py`)
+
+25 checks on the smallest drawing in the app, which is also the one a player sees most:
+the four knobs under the screen. A bar became a 270-degree arc with a tick, then the ring
+grew to `r = 23` with a 5 px stroke and the value moved inside it, and every property that
+makes the arc readable was got wrong in some draft of it, so each is measured from a host
+screenshot rather than asserted from the source.
+
+- **the gap is at the bottom and about a quarter turn** — the track colour's angles are
+  collected on the ring, and the widest run of empty degrees has to be centred on straight
+  down within 25 deg and be 70..110 deg wide. Injected: a full-circle span makes it 11 deg
+  and fails.
+- **the track spans about 270 degrees** — 360 minus the gap, 250..290.
+- **the fill grows and the track gives way** — the filled and track pixel counts inside one
+  knob's annulus are both monotonic across v = 0, 32, 64, 96, and the fill's range is more
+  than 5x. Injected: a fill condition that is always true gives 82, 83, 83, 83 and no track
+  at all.
+- **it fills from the lower left, clockwise** — the fill's angles at v = 0 start at -135 and
+  at v = 64 the run ends on the value's own angle from the formula (-135 + v/127 * 270).
+  Injected: filling the last N segments instead of the first N puts the fill at -3..135.
+- **the gap stays empty at every value** — 0 ink pixels inside +-30 deg of straight down,
+  at all four values. Injected: a hand from the centre puts ink in the gap at v = 0.
+- **the value is centred inside the hole, the name is not** — the four values have to read as
+  four objects, so the value's ink is centred within 2 px of the column's middle while the
+  name starts at its left edge. The value is sampled **by row**, over the 9 rows its glyphs
+  occupy, not through a circle: a radial window at the hole's radius catches the stroke's
+  rounded shoulder once the stroke is thick, and read a centre of 25 against 31.
+- **the value fits inside the hole** — its measured width against the **chord** at glyph
+  height, 35 px, which is what bounds the stroke at 5 px and the EDIT page's text format at
+  seconds with three decimals.
+- **the ENV page has an arc under all four knobs** — a page that leaks a knob from the page
+  before it is visible here.
+- **the stroke carries no pinholes** — the background is flood-filled from outside each
+  knob's box; anything still background, inside it, unreachable from the edge and inside the
+  stroke's own radial band is a hole. 8-connected, because a 4-connected flood splits a
+  diagonal contact and over-reports holes a person cannot see. `r_lo = 18.5` excludes the
+  glyphs' own counters -- the hole inside a "6" is the letter, not a defect. **This check
+  exists because the art shipped with 6 holes per knob:** drawing the stroke as five 1 px
+  Bresenham chains cannot tile a 5 px band. Putting the old five-chain drawing back fails all
+  four values at 6 px each.
+
+Five mistakes this file made about itself, all found by the checks failing on correct
+code: it computed the knob's centre from the source and was 3.5 px off (the band's canvas
+origin is not where the reading assumed); it counted ink over the whole band, where the
+value's text shares the fill's colour; it expected the ENV page's arcs to be drawn in
+`sk.ink`, when a page's knobs are lit and fill at `sk.ink_hi`; it took the value's ink
+through a radial window at r = 19, which is the stroke's own innermost radius at a 5 px
+stroke, so it measured the ring; and it computed the hole's chord with the font's cell
+height of 15 px instead of the 9 rows its glyphs actually ink, which read as "a 5 px stroke
+cannot fit the widest value" when it does. The centre is measured by a circle fit
+(31.5, 216.0) and recorded, the value is sampled by row, and the chord uses the measured
+glyph height.
 
 ### 9g. The panel, as built
 
