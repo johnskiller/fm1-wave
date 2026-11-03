@@ -390,6 +390,121 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
 - `WV_GRAINS` is the whole granular budget knob. Lowering it to 2 makes the cloud
   exactly the tiling pair and nothing more.
 
+### 5d. EDIT — what a deeper edit can actually reach
+
+EDIT means **edit the voice**, not turn a knob. A knob is a performance control and has
+to be reachable with one hand while the other plays; a page is for structure — a
+boundary, a frame, a grain's direction — where the value is not something a hand sweeps
+but a decision about what the material *is*.
+
+Only SMPL has one today (§5b: the region and its loop). This section is what the other
+two sources could carry, measured against the code rather than guessed, so the argument
+happens before anything is built.
+
+#### SYNTH: the bank is editable, one bank at a time
+
+The constraints are all facts about the current build, and **one of them decides the
+design**: there is no free storage in the data area.
+
+| what | value | consequence |
+|---|---|---|
+| `WV_BANKS` | `static const int16_t[8][2048]` | in flash, XIP; editing means building a mutable copy |
+| one bank | 8 × 256 × 2 = **4096 B** | — |
+| `PLAT_STORE_MAX` | **3840 B** per object | a bank is 1.07 objects: storing the frames needs **two** |
+| store slots in the data area | `OBJ_PANEL` 0xDC000, `OBJ_BLE` 0xDE000, then `PLAT_DATA_HI` 0xE0000 | **both are taken. Zero free pairs.** Each object is a pair of 4 KiB sectors, so a bank would need 16 KiB that does not exist |
+| data area below them | 0x97000..0xDC000 = 69 sectors, **all** the resource region | the only place to take 16 KiB from is the sample pool's ceiling (276 KiB → 260 KiB) |
+| RAM free | **11,756 B** | a 4 KB working copy fits |
+| `OBJ_SETTINGS` | 0xFC000, Felucca's own pair, outside the data area | already holds this app's settings |
+
+So the arithmetic splits the feature in two, and the split is the useful part:
+
+- **A per-frame phase offset is 8 bytes** — one byte per frame. It fits in `OBJ_SETTINGS`
+  as it stands, needs no new flash, and no RAM copy: it is a read-time offset, the table
+  stays as it is in flash. That is the version that costs nothing to store.
+- **Anything that changes the samples** — copy a frame onto another, rotate one — needs
+  the 4096 B, therefore two objects, therefore 16 KiB carved out of the pool's ceiling.
+  That is a real trade against polyphony of material, and it should be made on purpose,
+  not discovered.
+
+Eight banks would be 128 KiB, which does not fit under any layout, so "which bank did you
+edit" is answered by SELECT, not by a list.
+
+**What an edit is, though, is not "draw the wave".** 256 points across 240 px with no zoom
+is a guessing game, and a cursor is a UI this panel does not have. The axis that fits both
+the panel and the storage is the **per-frame phase offset** (0..255 points, one byte per
+frame, 8 bytes total, in `OBJ_SETTINGS`).
+
+Why it is not a shortcut: `wv_table_read2(fa, fb, phase, t)` reads both frames at the
+*same* phase, so MORPH between two frames is a sample-by-sample sum of two shapes exactly
+in phase. Giving each frame its own offset makes MORPH a phase scan of the table — the
+idea a wavetable synth uses per frame, and it is audible well below anything that sounds
+broken.
+
+The cost is honest and **unmeasured**: the offset lands in the per-sample hot path — an
+add and a wrap per frame read, per voice, at 44.1 kHz. That is measured before it is
+promised, not estimated, and the measurement is cheap: the split renderer already reports
+per-core CPU.
+
+**Frame operations** — copy frame *n* onto *m*, rotate a frame by *n* points — reach
+material that was never curated, and are the other half of the same page. They are the
+half that needs the 4096 B, so they are the half that trades pool ceiling for flash. Two
+page parameters, no editor.
+
+**Not proposed: drawing a wave point by point.** 256 points across 240 px with no zoom,
+and the panel has no cursor — it is a different instrument's UI, not a missing feature of
+this one.
+
+#### GRAN: the grain's motion, four axes, very different bills
+
+The cloud today is deliberately uniform. Every grain reads at `g->inc = gr->rate` — the
+same rate as every other grain in every other voice on that note; `wv_grain` has no `dir`
+field; the window is fixed sin² and `WV_GRAIN_OVERLAP` is fixed at 2; `spawn()` clamps
+position to `[0, len-1]`, which is why SPRAY is one-sided.
+
+| axis | what changes | cost |
+|---|---|---|
+| **cloud region** | the slot stops being the whole cloud. `wv_grains_start()` already takes `[start, end)` and already wraps inside it — `app.c` passes `0, 0` | **call site only**, and it reuses the region marks SMPL already has |
+| **reverse grains** | `g->inc` negative | a sign and a clamp: `read_at()` returns 0 for `pos < 0`, so a reverse grain must start at least `len_out × rate` into the material or its own window fades it out |
+| **pitch spread** | per-grain random rate multiple at spawn; shimmer | one line in `spawn()` |
+| **density** | overlap other than 2 | the expensive one: the sin²/cos² gain argument is **tied to overlap = 2** (§5c), so any other value needs real window-sum compensation |
+
+The first is the one that matters most and costs least: a cloud over a chosen span is the
+central control of a granular instrument — scanning position and length — and the
+parameter already exists in the engine. It is also the same class of defect as the loop
+that was wired to `start, end`: an API with the right arguments, a call site that does not
+pass them. The measurement that will guard it is the one that guards the loop: hold a note
+and watch where the cloud's grains actually read, not where the page says they should.
+
+#### The order, and the thing that has to be settled first
+
+Ordered by what is already true, not by what sounds best:
+
+1. **GRAN's cloud region** — a call site. `wv_grains_start()` takes `[start, end)` and
+   wraps inside it today; `app.c` passes `0u, 0`. Reuses SMPL's region marks, needs no
+   storage, and is the axis a granular instrument is built around. The reference frame is
+   one press of `B_EDIT` while SOURCE is GRAN.
+2. **SYNTH's per-frame phase** — 8 bytes, no flash, no RAM copy. Blocked only on the
+   hot-path measurement: if two extra phase operations per voice per sample cost more CPU
+   than the split can absorb, the answer is no and it costs nothing to have found out.
+3. **GRAN's reverse grains** — a sign and a clamp on `g->inc`; `read_at()` returns 0 for
+   `pos < 0`, so the start has to move back by the window.
+4. **SYNTH's frame operations** — the first item that costs flash, and therefore the
+   first that is a trade against the 276 KiB pool. It waits until there is a reason.
+5. **GRAN's density** — overlap other than 2 needs real gain compensation; it is the only
+   one whose cost is a rewrite of the window argument, not a parameter.
+
+**Persistence is upstream of all of them.** `B_SAVE` is unread and nothing in this app is
+stored. A deep edit that is lost at power-off is a page nobody uses. It is also why the
+first two items cost no storage: they are worth doing whether or not persistence lands,
+whereas frame operations are not.
+
+**And the page model is upstream of persistence.** If a second oscillator arrives, EDIT
+stops meaning "this source's structure" and starts meaning "this voice's structure", and
+the page model changes with it: SMPL's four boundaries, SYNTH's frame offsets and GRAN's
+grain motion would compete for one button and one row of knobs. Deciding the voice-level
+model first means all three have somewhere to go; building them first means re-homing all
+three later.
+
 ---
 
 ## 6. Screen (240 × 240)
@@ -559,16 +674,29 @@ and the app cannot see those registers.
 
 ## 8. Storage
 
-**Parameters**: one store object, saved on change with a debounce, written by
-`plat_store_save()` (atomic across its A/B sectors — an interrupted save cannot
-leave a half-written state).
+**What is built today: nothing.** `B_SAVE` is unread and no app state is written.
+`app.c` says so at the top and it is still true — a power cycle restores every knob to its
+default and every slot's region to the whole sample. This section is therefore half fact
+and half plan, and the halves are labelled.
 
-**Sample data**: not in the store. The resource region (`resources = FILE`)
-holds it, with its own CRC-32 commit, and the platform's installer/restore path
-writes it. `backup = true` is required for `resources`, which also gives the
-user a way to get the samples back out.
+**Sample data** — built. Not in the store: the resource region (`resources = FILE`) holds
+it with its own CRC-32 commit, and the platform's installer path writes it over USB. Read
+in place, 276 KiB of the data area.
 
-Nothing else persists in v1: no presets, no per-bank settings, no names.
+**Parameters** — planned. One object, `OBJ_SETTINGS` at 0xFC000 (Felucca's own pair,
+outside the data area, already declared), written by `plat_store_save()` which is atomic
+across its A/B sectors: an interrupted save cannot leave a half-written state.
+`PLAT_STORE_MAX` is 3840 B per object.
+
+**There is no free store slot in the data area.** `OBJ_PANEL` is at 0xDC000 and `OBJ_BLE`
+at 0xDE000, and `PLAT_DATA_HI` is 0xE0000: the two pairs exactly fill the space above the
+resource region, and every byte from 0x97000 to 0xDC000 is the sample pool. So anything
+that needs a *second* object — a 4 KB bank, a preset list — is a pair of 4 KiB sectors
+taken from either the pool's ceiling (276 KiB → 260 KiB) or `OBJ_SETTINGS`' own headroom.
+That is a deliberate trade, and it is why §5d splits SYNTH's edit into an 8-byte version
+and a 4 KB version.
+
+Nothing else is planned for v1: no presets, no patch names, no per-bank settings.
 
 ---
 
@@ -720,7 +848,39 @@ bugs they were written for:
 - `app/tests/test_grainmap.py`, **71 checks** — lane separation against SPRAY,
   bar width against GRAIN SIZE, and "no read, no mark" for the grain bars.
 
-### 9f. The panel, as built
+### 9f. Built: the EDIT page (`app/tests/test_edit.py`)
+
+41 checks over the smallest page on the panel, because it is the one with the most ways to
+be wrong while looking right. Both pictures and numbers are asserted, and the two defects
+the page actually had are each pinned by a check that fails when the defect is put back.
+
+What is checked, and the measurement behind each:
+
+- **the region reaches the engine** — `region_on` / `region_start` / `region_end` /
+  `region_lstart` / `region_lend` / `region_loop` are separate probes, because
+  `app_expect` takes one name and one value and a page's state is not one number.
+- **the four boundaries are four colours** — each hue is looked up as its RGB565 value at
+  both its live brightness and its 3/5 brightness, and they are required to be in four
+  different places. Injected: a shared colour makes every lookup land on the theme ink.
+- **the playhead exists and moves** — white, in the tab rows of the material band, at two
+  or more positions while a key is held.
+- **a loop repeats between LOOP S and LOOP E** — followed over time, not looked at once:
+  with a loop at 59..152 px of 232 the head reads 22, 51, 90, 129, 76, 115, 154. In from
+  START, then 129 → 76 is the wrap. Injected: wiring the engine's loop to `start, end`
+  puts the head at 169, 208, 15.
+- **release leaves the loop** — with a 1.2 s release the head reads 132, 142, 161, 174 at
+  20/120/320/450 ms after key-up, crossing LOOP E. Injected: keeping the loop through
+  release turns that into 132, 142, 69, 81.
+- **one detent is one pixel** — the step is compared against the window's own samples per
+  pixel at 1×, 4× and 16×; a stale `len/1000 >> zoom` reads ratio 0.230.
+- **the window centres on the boundary being turned** — measured at 128×, where a 1×
+  window cannot show it at all (`span == len` makes `view` identically 0, which is why the
+  first version of this check passed while the feature was broken).
+- **the region cannot invert** — START and END driven past each other, both directions.
+- **EDIT does nothing outside SMPL** — from SYNTH and from GRAN, `src` and `edit` both
+  unchanged afterwards. Injected: the old "switch the source there" behaviour fails both.
+
+### 9g. The panel, as built
 
 `docs/panel-map.md` is the authority and is checked by `panel.txt`; this section
 records where the built panel differs from §3's intent.
@@ -758,6 +918,8 @@ Named so they are decisions and not omissions:
 - Unison / detune; filter envelope; velocity → cutoff
 - Presets, patch names, program change
 - Arpeggiator, sequencer (DriftSeq), MIDI thru / controller mode (fm1-ctrl)
+- A second oscillator — and it is the reason §5d settles the page model before the
+  features, not after
 
 ---
 
@@ -774,3 +936,11 @@ Named so they are decisions and not omissions:
 4. **Banks 6–8**: which three timbres, after SAW→PULSE, RESO, HOLLOW, VOX, DIGI?
 5. **Scope**: post-mix output (proposed) or per-voice? Post-mix is what you
    hear; per-voice is a debugging view.
+6. **Deep edit, and which source first** (§5d). Three candidates, in cost order:
+   GRAN's cloud region (a call site), SYNTH's per-frame phase (a hot-path cost that
+   has to be measured), GRAN's reverse grains (a sign and a clamp). Open: which one
+   is worth the page, and does SYNTH's promise survive its CPU measurement?
+7. **The page model, before a second oscillator exists** (§5d). EDIT is "this
+   source's structure" today; with a second VCO it becomes "this voice's structure"
+   and all three pages re-home. Open: decide the voice-level model now, or accept
+   re-homing all three later.

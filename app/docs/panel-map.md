@@ -77,7 +77,7 @@ does not have to be swept back.
   detent for GRAIN SIZE. Dead in SMPL.
 - **PRESETS** is SPRAY in GRAN, LOOP ON/OFF in the SMPL EDIT page, and does nothing in
   SYNTH and in SMPL outside that page.
-- **ALGORITHM** is ZOOM in the SMPL EDIT page: left zooms out, right zooms in, 16 steps
+- **ALGORITHM** is ZOOM in the SMPL EDIT page: left zooms out, right zooms in, 8 steps
   from the whole slot to 128x.
 - **CUT / RES / SHAPE / AMOUNT** are live in every source.
 
@@ -206,6 +206,31 @@ made `touch_poll` dead code.
 
 **`B_EDIT` — the SMPL edit page**
 
+**EDIT means edit the voice.** A knob is a performance control: one hand, while the other
+plays, and its meaning is a number. A page is for structure — a boundary, a frame, a grain's
+direction — where the value is not something a hand sweeps but a decision about what the
+material is.
+
+EDIT is only implemented for SMPL, and the button does nothing in SYNTH and GRAN. What
+those two could carry is specified in `docs/spec.md` §5d with the measurements behind it
+(flash and store limits for a bank, the per-sample cost of a frame phase, the four grain
+axes and which one is a call site).
+
+**What this page does today** — the whole of it:
+
+| | |
+|---|---|
+| region | `start` … `end` sounds, `loop_s` … `loop_e` repeats |
+| loop | one switch, on the PRESETS encoder |
+| release | leaves the loop and rings on to `end` |
+| zoom | 0–7 → 1×…128×, window centres on the last boundary turned |
+| step | one detent = one pixel of the window |
+| picture | four coloured boundaries, dimmed material outside the region, a white playhead |
+| stored | nothing — a power cycle restores the whole slot |
+
+**What it does not do, and is not planned to**: pan after zoom (the boundaries are the
+navigation), per-slot edit persistence until `B_SAVE` exists, slicing.
+
 EDIT does nothing outside SMPL. It used to switch the source to SMPL from SYNTH and
 GRAN, on the argument that a button which does nothing is a broken button — but EDIT sits
 beside the pages a player actually presses, and a stray press replaced the source and
@@ -246,9 +271,10 @@ so the engine looped the whole region whatever the marks said. Nothing in the pi
 could catch it — the marks were right and the sound was wrong — so it is now guarded by
 following the playhead over time: it must sweep in from START, then stay inside
 LOOP S..LOOP E and wrap there. Measured with a loop at 59..152 px of 232: the head reads
-22, 51, 90, 129, 76, 115, 154 — in, then 129 → 76 is the wrap. Chopping was the earlier plan and was dropped: the automatic chop was
-already good enough to *play*, and what a sample instrument actually lacked was a loop
-and a way to trim it.
+22, 51, 90, 129, 76, 115, 154 — in, then 129 → 76 is the wrap.
+
+Chopping was the earlier plan and was dropped: the automatic chop was already good enough
+to *play*, and what a sample instrument actually lacked was a loop and a way to trim it.
 
 **Why a loop at all.** Before this page all three `wv_note_on_sample` call sites passed
 `loop = 0`, so a held key played the material once and stopped. That is a drum hit, not
@@ -264,7 +290,7 @@ slot, because a loop outside the region would never be reached.
 on, left turns it off; there is no press. It is the only free encoder in SMPL (see the
 encoder table), and a knob that reports its state back is what the corner label is for.
 
-**ZOOM has no pan, and does not need one.** ALGORITHM is the zoom level, 16 steps, 0 =
+**ZOOM has no pan, and does not need one.** ALGORITHM is the zoom level, 8 steps, 0 =
 the whole slot and 15 = 128x. The window follows **whichever boundary was turned last**,
 centred on it — so a zoomed window is never lost off to the side; turning START brings
 START to the middle. K1–K4 are the navigation. Measured at 128x: turning START leaves the
@@ -426,13 +452,24 @@ knobs      176..239    183..221  (39 px of ink, 18 px spare for the round knob a
 
 ### The three material pictures
 
-Each source draws what it actually is, at the same 176 x 80 px:
+Each source draws what it actually is. SYNTH uses 172 px with a 60 px label column;
+SMPL and GRAN use the full 232 px, because the picture is the whole point of those two
+pages.
 
 | source | picture | what carries which parameter |
 |---|---|---|
 | SYNTH | the wavetable's shape at the current MORPH, fixed phase | shape = the table; MORPH = which frame, printed at the right |
 | SMPL | min/max envelope of the whole slot, one column per 53 samples on the demo kit | the slot's own dynamics; SLOT printed over it |
 | GRAN | the same envelope at 2/5 brightness, with one bar per live grain | bar WIDTH = GRAINSIZE, their SPREAD = SPRAY |
+
+**GRAN's cloud is the whole slot, and that is a gap, not a decision.** `app.c` calls
+`wv_note_on_grain(&dsp, &smp[smp_i], note, vel, 0u, 0)` — always the full slot — while
+`wv_grains_start()` already takes `[start, end)` and already wraps inside it. So a grain
+voice cannot be aimed at a part of the material, which is the one control a granular
+instrument is built around. It is one call site away, and it is the same class of defect
+as the loop that was wired to `start, end` instead of the loop's own marks: the engine
+takes the arguments and the call site does not pass them. Specified in `spec.md` §5d as
+the first GRAN candidate precisely because it is a call site and not a feature.
 
 **Why min/max and not the waveform.** DEMO K is 9256 samples across 176 px: 53 samples
 per column. Drawing one sample per column gives a line that changes character with the
@@ -801,7 +838,7 @@ built from state:
 | `B_LFO` | the LFO page is up |
 | `B_ARP` | the ARP page is up |
 | `B_SEL` | SOURCE is not SYNTH (the power-on default) |
-| `B_EDIT` | SOURCE is SMPL, where EDIT is the chop button |
+| `B_EDIT` | SOURCE is SMPL, where EDIT opens the region page |
 
 Keys light while held, which is `plat_leds`'s own behaviour and the reason to call it
 instead of `plat_lights`. `B_SEL` has three states and a two-state lamp, so the lamp
@@ -837,8 +874,8 @@ there are more free buttons than pending functions.
 |---|---|---|
 | `B_HOME` | **PANIC** — all notes off | cheapest useful thing on the panel; idle except during restore |
 | `B_GLO` | **glide / portamento** on or off | needs a per-voice pitch slew, ~20 lines |
-| `B_SAVE` | save the current knob set as the boot state | `plat_store_save` exists; the settings object is already there |
-| `B_FX` | a second waveshaper stage, or a filter-type switch | no DSP behind it yet |
+| `B_SAVE` | save the current knob set as the boot state | `plat_store_save` exists, 3840 B per object; **a prerequisite for deep edit**, not an extra — an edit that is gone at power-off is a page nobody uses |
+| `B_FX` | **filter type** (LP / BP / HP) | the SVF already computes all three every sample and only `lp` is used, so the switch is free of arithmetic — see `spec.md` §5d |
 | ~~`B_LFO`~~ | **taken**: the LFO page | — |
 | `B_ARP` | ~~arpeggiator~~ | **assigned** — see the ARP page above |
 | `B_SEQ` | step sequencer | larger still; that is Saadet's territory |
@@ -850,40 +887,28 @@ failure mode that makes an instrument unusable in front of people.
 
 ## Keys
 
-27 keys, F3–G5 (`plat.h: NKEYS 27`). In SYNTH and GRAN every key is a note. In
-SMPL the mapping is two-part:
+27 keys, F3–G5 (`plat.h: NKEYS 27`), and **every key is a note in all three sources**.
+SMPL pitches the selected slot from its root and applies that slot's region and loop;
+`EN_SELECT` chooses the slot. There is no per-key mapping and no chop table.
 
-- A key at or above `SLICE_BASE` (note 53, the lowest) **and** below
-  `SLICE_BASE + slice_count` plays that chop at 1×, from the chop's own start.
-- Every other key — including all of them when nothing has been chopped — falls
-  back to `wv_note_on_sample`.
+That is a change from the first version, and the reason it went is worth keeping: the
+chop map existed so a key could fire one detected slice at 1x, and the region replaced
+it because what a sample instrument actually lacked was a loop and a way to trim it, not
+a kit. `slices[]`, `reslice()`, `SLICE_BASE` and `wv_slice.h` are gone from `app.c`; the
+whole slot is the instrument.
 
-Both paths follow `EN_PRESET`. That was not always true, and the defect is worth
-keeping written down because of how it hid:
+**The defect that the chop era hid, kept because it is the general shape of the bug**:
+the fallback played `smp[0]` — the boot slot — so every key ignored `EN_SELECT`, and
+`slices_from` was only set at boot, so the chop path kept playing the boot slot's slices
+too. The screen read `smp_i` and said `SLOT 2/2` while the sound was `SLOT 1/2`. GRAN was
+unaffected because it reads `smp[smp_i]` directly, and **that difference between the
+sources is the only reason the bug was visible** — with all three wrong in the same way
+there would have been nothing to compare against.
 
-- the fallback played `smp[0]` -- the boot slot -- so every key above the chops
-  ignored the knob entirely;
-- `slices_from` was set once at boot, and `EN_PRESET` moved `smp_i` without
-  re-chopping, so the chop path also kept playing the boot slot's slices.
-
-The screen read `smp_i`, so it said `SLOT 2/2` while the sound was `SLOT 1/2`. GRAN
-was unaffected (it reads `smp[smp_i]` directly), and **that difference between the
-sources is the only reason the bug was visible at all** -- with all three behaving
-alike there would have been nothing to compare against.
-
-Fixed by `reslice()`, which chops the selected slot and records it in `slices_from`
-in the same breath, called at boot, on every `EN_PRESET` turn, and on `B_EDIT`. The
-chop path additionally refuses to use chops whose `slices_from` is not the selected
-slot, so a future path that moves `smp_i` without re-chopping falls back to the whole
-slot instead of playing one sample's boundaries inside another sample. Re-chopping on
-a slot change discards a manual `B_EDIT`, which is right: a chop belongs to the
-material it was cut from.
-
-Checked by `app/tests/test_slot.py` (8 checks), not by `smpl.txt` -- the two demo
-slots peak only 0.7 dB apart, so a level threshold cannot tell them apart, while their
-envelopes differ completely (slot 0: a transient gone in 4 of 16 segments; slot 1:
-11 of 16 flat). Injecting the old `smp[0]` makes the two envelopes identical, and the
-test fails 3 checks.
+`app/tests/test_slot.py` still exists and now **skips itself** when the pool holds real
+material rather than the demo kit its shape checks were written against. `wv_slice.c` is
+still compiled and still unit-tested by `test_slice.c`; nothing in the app calls it.
+Whether to keep a tested-but-unused reader is an open item, not an accident.
 
 ---
 
