@@ -379,20 +379,32 @@ static uint8_t arp_gated;                 /* the note of this step has already e
  * because a narrower far frame would say the far frame holds less TIME, and every frame
  * is 256 points.
  *
- * STK_DY > STK_DX is the part that matters. Equal steps (5/5) packed the frames as
- * tightly vertically as horizontally and the eight curves tangled; 9 px apart vertically
- * against 6 px horizontally is what let the eye separate them, because a frame's own
- * height is only 2 * STK_AMP = 16 px and the gap between neighbours has to be a
- * comparable fraction of that. STK_DX was then cut from 6 to keep the near frame as wide
- * as possible: frame width = 172 - 7 * 6 = 130 px, and the amplitude that still fits in
- * 80 px is (79 - 7 * 9) / 2 = 8 px.
+ * STK_DY >= STK_DX is the part that matters. Equal steps (5/5) packed the frames as
+ * tightly vertically as horizontally and the eight curves tangled. Vertically apart is
+ * what lets the eye separate them, because a frame's own height is only 2 * amp.
+ *
+ * THE BUDGET, which is the whole argument here. The picture is 80 px tall and it has to
+ * hold seven steps, the lift, and two amplitudes:
+ *
+ *     2 * amp + 7 * STK_DY + RACK_LIFT <= 80 - 2      =>  amp <= (78 - 7*DY - LIFT)/2
+ *
+ *     DY 8, lift 8  ->  amp  7 px   (the first version; the player said "振幅太小")
+ *     DY 6, lift 8  ->  amp 14 px   <- this one, twice the height, 3 px between planes
+ *     DY 5, lift 8  ->  amp 16 px   2 px between planes, the zero lines start to merge
+ *
+ * 14 px is where a frame's own waveform is readable at all: the SAW SQR bank's frames
+ * span peak to peak over that height, and at 7 px the curve was a nearly flat line with
+ * the shape squeezed out of it. The frames are allowed to touch -- they are planes of one
+ * object, and the depth comes from brightness, not from air between them.
+ *
+ * Width is untouched: frame width = 172 - 7 * 6 = 130 px.
  *
  * The far frames are DIMMED rather than outlined. This band has two colours by design
  * (ground and ink); a card border would be a third, and eight borders on 16-px-tall
  * frames would be more ink than the curves. Brightness is the depth cue instead: f0 at
  * half ink, f7 at full. */
-#define STK_DX     6
-#define STK_DY     8
+#define STK_DX     6              /* px right per frame */
+#define STK_DY     6              /* px up per frame */
 #define RACK_LIFT  8              /* how far the edited frame rises */
 #define SYN_COL_W  60                                 /* the labels' column */
 #define SYN_COL_R  (240 - 4)                          /* its right edge: x 235 */
@@ -1229,7 +1241,7 @@ static void input(void)
      * knob. GRAN needs seven controls for seven encoders, and this is the seventh.
      * In SMPL it stays MORPH and is dead, as it always was. */
     if ((e = plat_enc(EN_ALGO)) != 0) {
-        if (edit_page) {
+        if (edit_page && src != SRC_SYNTH) {
             /* ZOOM: left is out, right is in, one step per detent, clamped at both
              * ends. The window is a power of two of the slot, 1/2^zoom, so eight
              * steps reach one sample in 256 -- enough to see the waveform's shape
@@ -2551,13 +2563,22 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * MORPH knob travels through, and this page's whole job is turning them against each
  * other -- which is invisible if only the current one is drawn.
  *
- * So on this page the picture becomes the RACK: all eight frames on a sheared axis, the
- * one being edited lifted out of it. Not a perspective drawing (see STK_DX / STK_DY).
+ * So on this page the picture becomes the RACK: all eight frames on a sheared axis.
  *
- * It reads each frame through wv_table_read() at morph = frame, which is the same reader
- * the voices use, so the offsets turned on this page are what the picture shows. A frame
- * drawn by walking the table directly would be a second implementation of the same idea
- * and the two would drift.
+ * TWO FRAMES LIGHT, NOT ONE. MORPH does not choose a frame, it crossfades two: at
+ * mf = 3.4 the voice adds frame 3 and frame 4 at 60/40. So the rack lights exactly the
+ * pair that is sounding, at brightnesses in that ratio -- a single bright frame would be
+ * a lie about what the reader is doing, and the pair is also the answer to the question
+ * this page exists for ("which two waves am I turning against each other").
+ *
+ * It is a STATIC highlight: morph is one number shared by all voices (wv_dsp.h:81, and
+ * app.c is its only writer), not a modulation target, so the lit pair changes when the
+ * MORPH knob moves and at no other time. Drawing it per voice would draw the same pair
+ * every frame. When morph becomes modulatable this is where a per-voice marker goes.
+ *
+ * The frame being EDITED (edit_frame) is a separate mark and must stay legible next to
+ * the pair: it keeps the lift plus a bright index, and if it is one of the two sounding
+ * frames it simply gets the louder of the two brightnesses.
  *
  * COST, stated: 8 polylines instead of 1 -- about 6x the drawing on this band, at 60 fps.
  * It only runs on this page, which is the page you are on to look rather than to play.
@@ -2565,8 +2586,18 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
 static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
 {
     const int32_t fw   = w - 7 * STK_DX;                          /* the near frame is widest */
-    const int32_t amp  = (h - 2 - 7 * STK_DY - RACK_LIFT) / 2;    /* 7 px at 172 x 80 */
+    const int32_t amp  = (h - 2 - 7 * STK_DY - RACK_LIFT) / 2;    /* 14 px at 172 x 80 */
     const int32_t base0 = y0 + h - 1 - amp;                       /* f0's zero line */
+
+    /* the pair the voices are mixing right now -- the same arithmetic wv_frames_at
+     * does, so the picture and the reader cannot disagree */
+    float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+    int32_t m0, m1;
+    if (mf < 0.0f) mf = 0.0f;
+    if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
+    m0 = (int32_t)mf;
+    m1 = (m0 + 1 < (int32_t)WV_FRAMES) ? m0 + 1 : m0;
+
     int32_t pass, px, py;
 
     /* Far frame first, so nearer ones overlap it -- that is the order. The edited frame is
@@ -2576,7 +2607,7 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
     for (pass = 0; pass <= (int32_t)WV_FRAMES; pass++) {
         const int32_t sel = (pass == (int32_t)WV_FRAMES);
         const int32_t f   = sel ? (int32_t)edit_frame : pass;
-        int32_t x, base;
+        int32_t x, base, lit;
         uint16_t ink;
 
         if (!sel && pass == (int32_t)edit_frame)
@@ -2584,13 +2615,36 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
 
         x    = x0 + f * STK_DX;
         base = base0 - f * STK_DY - (sel ? RACK_LIFT : 0);
-        ink  = sel ? k->ink_hi : dim(k->ink, 5 + f, 12);
 
-        /* The frame's own zero line. At 15 px of height the curve alone does not say
-         * "this is a plane"; the row does. Not on the edited frame -- its lift already
-         * separates it, and a rule under a raised card reads as a shadow. */
-        if (!sel)
-            cv_rect(x, base, fw, 1, dim(k->ink, 2, 12));
+        /* Is this frame one of the two the voices are mixing? `lit` is 0 for "not
+         * sounding", else 1 or 2 for the near/far member of the pair. */
+        /* 2 = the louder member of the pair (which is m0 while a crossfade is in
+         * progress, and both of them when MORPH sits exactly on a frame), 0 = silent. */
+        lit = (f == m0) ? 2 : ((f == m1) ? 1 : 0);
+
+        /* Brightness carries the job, in three steps, and NOT scaled by ft: at 172 px
+         * a 60/40 split drawn as two brightnesses 3 % apart reads as one frame, and the
+         * question here is "which two", not "in what ratio". A silent frame sits at
+         * (4+f)/16 -- far ones darker, so the rack still has depth -- and the two being
+         * mixed take ink_hi and 8/12 of it. */
+        if (lit == 2)
+            ink = k->ink_hi;
+        else if (lit == 1)
+            ink = dim(k->ink_hi, 8, 12);
+        else
+            ink = dim(k->ink, 4 + f, 16);
+
+        /* the edited frame: the lift is its mark, and its index is drawn bright below.
+         * Its ink is the pair's if it is sounding, else a mid step -- it must not look
+         * like a silent frame while being edited. */
+        if (sel && !lit)
+            ink = dim(k->ink_hi, 7, 12);
+
+        /* The frame's own zero line. At 28 px of height the curves of neighbouring frames
+         * overlap, so this row is what still says where each plane sits. Dim, and drawn
+         * only for frames that are not sounding: under a lit frame it competes. */
+        if (!lit)
+            cv_rect(x, base, fw, 1, dim(k->ink, 2, 16));
 
         py = 0;
         for (px = 0; px < fw; px++) {
@@ -2605,6 +2659,19 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
             else
                 cv_line(x + px - 1, py, x + px, y, ink);
             py = y;
+        }
+
+        /* the frame's index, at the left end of its own baseline: on this page the
+         * numbers are the only thing that ties a plane to "f3", and the pair highlight
+         * is meaningless without knowing which two. Only the selected frame and the
+         * sounding pair get one -- eight labels in 80 px is a list, not a picture. */
+        if (sel || lit) {
+            char fb[3];
+            fb[0] = 'f';
+            fb[1] = (char)('0' + f);
+            fb[2] = 0;
+            cv_text(x + 1, base - amp - 1, &FONT_XS, fb,
+                    sel ? k->ink_hi : ink);
         }
     }
 }
@@ -4039,6 +4106,19 @@ int app_expect(const char *what, int *got)
      * that only checked one of them could not tell "the knob did nothing" from "the knob
      * edited the wrong frame". */
     if (!strcmp(what, "foff"))        { *got = foff_tab[bank_i][edit_frame]; return 1; }
+    /* The pair the rack lights. Computed the same way src_rack does it, from k_morph, so a
+     * test can assert WHICH frames the picture lights without reading pixels -- the curves
+     * of neighbouring frames overlap in an 80 px band and a pixel probe kept counting the
+     * frame above (measured: every low-MORPH reading came back "f0 f1 f2 HI"). */
+    if (!strcmp(what, "rack_pair")) {
+        float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+        int32_t m0;
+        if (mf < 0.0f) mf = 0.0f;
+        if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
+        m0 = (int32_t)mf;
+        *got = m0 * 16 + ((m0 + 1 < (int32_t)WV_FRAMES) ? m0 + 1 : m0);   /* m0 << 4 | m1 */
+        return 1;
+    }
     if (!strcmp(what, "foff_spread")) { *got = foff_spread; return 1; }
     if (!strcmp(what, "foff_shape"))  { *got = foff_shape; return 1; }
     if (!strcmp(what, "foff_sum"))    {                       /* the whole table, summed */

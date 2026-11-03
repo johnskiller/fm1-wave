@@ -273,6 +273,36 @@ show foff_spread
     ck(one(o, "foff") == 3, "including the frame that had been hand-turned")
     ck(one(o, "foff_spread") == 4, "and SPREAD came back with it")
 
+    # ── the rack lights the pair MORPH is mixing ───────────────────────────────
+    # wv_dsp.h:81 -- morph is one number shared by every voice and app.c is its only
+    # writer, so the lit pair changes when the MORPH knob moves and at no other time.
+    # That is why the highlight is static rather than per-voice: there is nothing per
+    # voice to show yet. When morph becomes a modulation target, this check still holds
+    # (it asserts the pair follows k_morph) but the picture should grow a per-voice mark.
+    print("the lit pair follows MORPH, two frames at a time")
+    script = ("master 200\nwait 100\ntap EDIT\nmaster 200\nwait 100\n"
+              "show rack_pair\n")
+    want = [(0, 0x01)]
+    for spin, morph in ((2, 16), (2, 32), (2, 48), (2, 64), (3, 88)):
+        script += f"spin ALGO {spin}\nmaster 200\nwait 100\nshow rack_pair\n"
+        mf = morph * 7 / 127
+        m0 = int(mf)
+        want.append((morph, m0 * 16 + min(m0 + 1, 7)))
+    script += "q\n"
+    with tempfile.TemporaryDirectory() as out:
+        sp = os.path.join(out, "rk.txt")
+        open(sp, "w").write(script)
+        r = subprocess.run([HOST, sp, out], capture_output=True, text=True,
+                           timeout=120, cwd=out)
+    got = [int(l.split()[-1]) for l in r.stdout.splitlines() if "rack_pair" in l]
+    ck(len(got) == len(want), f"the probe answered every time ({len(got)}/{len(want)})")
+    for (morph, exp), g in zip(want, got):
+        hi, lo = g >> 4, g & 15
+        ck(g == exp, f"MORPH {morph}: lights f{hi},f{lo} (expected 0x{exp:02x})")
+        ck(hi != lo, f"MORPH {morph}: two distinct frames are mixed")
+        ck(hi < 8 and lo < 8, f"MORPH {morph}: pair stays inside the bank")
+    ck(got and got[0] != got[-1], "the lit pair moves as MORPH travels the bank")
+
     print(f"\n{'ALL PASSED' if not fails else 'FAILED'} ({count} checks, {len(fails)} failed)")
     if fails:
         for f in fails:
