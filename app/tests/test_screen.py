@@ -388,12 +388,22 @@ shot grn.png
     ck(expect("press LFO\n", "lfo", 1), "B_LFO opens the page")
     ck(expect("tap LFO\n", "page_no", 1), "LFO opens on screen 1")
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "pressing LFO again goes to screen 2")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 2),
-       "and stops there: a two-screen page has nowhere else to go")
+    # Round, not stop: the page button is the only way to walk a page's screens, so the
+    # last one cannot be a dead end (player, this session).
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
+       "and a third press rounds back to screen 1")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 2),
+       "so the walk is a cycle: 1 2 1 2")
     ck(expect("tap LFO\ntap LFO\ntap HOME\n", "lfo", 0),
-       "HOME closes it from its last screen")
+       "HOME closes it from screen 2")
     ck(expect("tap LFO\ntap LFO\ntap HOME\ntap LFO\n", "page_no", 1),
        "and coming back always starts at screen 1")
+    # One screen: wrapping onto itself, so the press is a no-op and the page stays up.
+    # This is the case that teaches HOME is the exit, so it is asserted rather than
+    # assumed.
+    for btn, probe in (("ENV", "env"), ("ARP", "arp")):
+        ck(expect("tap %s\ntap %s\n" % (btn, btn), probe, 1),
+           "%s pressed twice stays on its one screen" % btn)
 
     # ── B_HOME is the way out ──────────────────────────────────────────────────
     # The page button cannot mean "close" once a page has more than one screen: it

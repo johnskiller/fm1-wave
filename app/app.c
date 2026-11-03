@@ -99,15 +99,16 @@ static smp_region     region[SMP_MAX];
  * One page is up at a time, and it has a screen number. Two variables, not five
  * flags, because the rule the player set this session applies to all of them:
  *
- *   A page's own button never closes it. It ADVANCES -- press it again and you are
- *   on the page's second screen, then its third. Leaving is somebody else's job:
- *   any other page button, or B_HOME, which always means "back to the voice".
- *   Coming back always starts at screen 1, so the way in is the same every time.
+ *   A page's own button never closes it. It ADVANCES, and it ROUNDS: press it again
+ *   and you are on the second screen, then the third, then back on the first. It is
+ *   the only way to walk a page's screens. Leaving is somebody else's job: any other
+ *   page button, or B_HOME, which always means "back to the voice". Coming back always
+ *   starts at screen 1, so the way in is the same every time.
  *
- * A page with one screen therefore stops in place when pressed again. That is not a
- * degenerate case to be special-cased away -- it is the rule, and it is what teaches
- * the player that HOME is the exit. ENV and ARP are one screen each and they behave
- * exactly like this.
+ * A page with one screen therefore rounds onto itself when pressed again -- a no-op.
+ * That is not a degenerate case to be special-cased away, it is the same arithmetic
+ * with one screen: ENV and ARP behave exactly like this, and it is what teaches the
+ * player that HOME, not the page button, is the exit.
  *
  * The predicates below read like the flags this replaced, so that the hundreds of
  * places that ask "is the ENV page up" did not have to be rewritten. They are
@@ -146,11 +147,17 @@ static void page_press(uint8_t which)
     if (page != which) {
         page = which;
         page_no = 1;
-    } else if (page_no < PAGE_SCREENS[which]) {
-        page_no++;
+    } else {
+        /* Round, not stop. Pressing the page's own button is the ONLY way to walk its
+         * screens (player, this session), so it has to be able to come back -- a page
+         * whose last screen was a dead end would leave the most-used screen reachable
+         * only by leaving the page and re-entering it.
+         *
+         * A one-screen page therefore lands back on screen 1, which is where it already
+         * was: pressing ENV twice is a no-op, and that is still the rule rather than a
+         * special case. */
+        page_no = (uint8_t)(page_no % PAGE_SCREENS[which] + 1u);
     }
-    /* else: the last screen stays put, on purpose -- there is nowhere to advance to, and
-     * the exit is HOME */
 }
 static uint8_t        edit_zoom;      /* 0..7: the visible fraction is 1/2^edit_zoom */
 static uint8_t        edit_live;      /* which marker the last turn moved: keeps the window there */
