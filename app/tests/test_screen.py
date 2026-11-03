@@ -409,6 +409,29 @@ shot grn.png
     ck(one >= 28, "one note draws at least a third of the scope band")
     ck(four > one, "a chord draws taller than one note (the scope tracks polyphony)")
 
+    # ── one transfer per band, three for the screen ────────────────────────────
+    # A band transfer is not free: lcd_data() syncs (waits out the previous DMA) before
+    # it starts, and at the measured ~44 MHz effective rate a 240x92 band is about
+    # 8 ms. The screen had five scope blits in a row -- four of them re-sending pixels
+    # that were already on the glass, one after another, ~32 ms of every frame. This is
+    # the count that keeps them gone. It is a probe inside app.c rather than the host's
+    # own `blits` counter so the check reads the same number the device spends.
+    print("every band is sent once")
+    script = "master 200\nwait 120\nshow frame_blits\n"
+    for page in ("ENV", "LFO", "ARP", "FX"):
+        script += f"tap {page}\nmaster 200\nwait 120\nshow frame_blits\n"
+    script += "tap FX\ntap SEL\nmaster 200\nwait 120\nshow frame_blits\nq\n"
+    with tempfile.TemporaryDirectory() as out:
+        sp = os.path.join(out, "b.txt")
+        open(sp, "w").write(script)
+        r = subprocess.run([HOST, sp, out], capture_output=True, text=True, timeout=120, cwd=out)
+    counts = [int(l.split()[-1]) for l in r.stdout.splitlines() if "frame_blits" in l]
+    print(f"  blits per frame: {counts}")
+    ck(len(counts) >= 5, "the probe answered on every page (it is not silently absent)")
+    ck(all(c == 3 for c in counts),
+       f"each frame sends exactly three band transfers, got {counts}")
+    ck(max(counts or [0]) <= 3, "nothing is sent twice in one frame")
+
     print(f"checks {checks}, failed {fails}")
     return 1 if fails else 0
 

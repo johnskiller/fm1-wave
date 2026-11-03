@@ -1809,6 +1809,11 @@ static int32_t  save_line_len;  /* what the save line drew last frame, px */
 static int32_t  save_line_step; /* its brightness step, 0..3 (dim(x, step+2, 5)) */
 static uint32_t save_line_age;  /* ms since the first unsaved edit */
 static int32_t  save_led;       /* B_SAVE's lamp: 0 saved, 1 mid, 2 lit */
+/* How many band transfers the last frame sent. Three is the whole screen: scope,
+ * material, knobs. The count is here because a transfer is not free -- lcd_data()
+ * waits for the previous one, so an extra blit is an extra 8 ms of the frame spent
+ * sending pixels that are already on the glass. A probe, not a setting. */
+static int32_t  frame_blits;
 static int      unsaved_live;   /* unsaved_at holds a start time */
 
 static src_skin_t src_skin(void)
@@ -3365,7 +3370,9 @@ void app_frame(void)
         }
     }
     dbg_draw(&sk);
+    frame_blits = 0;
     cv_blit(0, 0);                 /* without this the band is drawn and never shown */
+    frame_blits++;
 
     /* ─── the panel body ──────────────────────────────────────────────────────
      *
@@ -3661,15 +3668,13 @@ void app_frame(void)
              * more thing on the screen that means nothing. */
         }
     }
+    /* One blit for the whole band. There used to be five of these in a row, left over
+     * from when the band was drawn in layers; lcd_data() syncs (waits for the previous
+     * transfer) before it starts, so four of them were four full 240x92 transfers of
+     * the same pixels, sent and waited out one after another. Nothing on screen ever
+     * depended on it: the last blit wins, and it is the same buffer every time. */
     cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
-
-    cv_blit(0, SCOPE_H);
+    frame_blits++;
 
     cv_begin(240, KNOB_H, sk.bg);
     if (env_page) {
@@ -3763,6 +3768,7 @@ void app_frame(void)
         knob(178, KNOB_TOP, 54, "AMOUNT", pct(k_amount), k_amount, 0);
     }
     cv_blit(0, SCOPE_H + MAT_H);
+    frame_blits++;
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the
@@ -3876,6 +3882,7 @@ int app_expect(const char *what, int *got)
      * what proves B_SAVE wrote ONCE and not once per frame. */
     if (!strcmp(what, "saved"))       { *got = save_loaded(); return 1; }
     if (!strcmp(what, "save_dirty"))  { *got = save_dirty(); return 1; }
+    if (!strcmp(what, "frame_blits")) { *got = frame_blits;    return 1; }
     if (!strcmp(what, "save_line"))   { *got = save_line_len;  return 1; }
     if (!strcmp(what, "save_ink"))    { *got = save_line_step; return 1; }
     if (!strcmp(what, "save_age"))    { *got = (int)save_line_age; return 1; }
