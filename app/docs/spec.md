@@ -422,6 +422,235 @@ grains (the reader supports `dir = -1`; the cloud does not use it yet).
 - `WV_GRAINS` is the whole granular budget knob. Lowering it to 2 makes the cloud
   exactly the tiling pair and nothing more.
 
+### 5c1. Granulating a bank — **NOT BUILT**
+
+*Written 2026-11-04 as a design note at the player's request. Nothing here is
+implemented; §5c describes what the code does today.*
+
+Today GRAN reads a **sample slot**: got from flash by `plat_res()`, seconds long, at some
+rate, pitched from a `root` note. A second possibility is to point the same grain engine
+at a **synth bank** — the 8 × 256 int16 tables of §5a — so the cloud is made of the
+instrument's own synthetic material instead of a recording.
+
+**The engine barely needs to know.** `wv_grains` touches a `wv_sample` for five fields
+only — `data`, `len`, `rate`, `root`, `gain` (`wv_grain.c:79`, `read_at`). And
+`WV_BANKS[WV_BANK_COUNT][WV_FRAMES * WV_POINTS]` is one **contiguous** array of int16
+(`build/gen/wv_banks.h`), which means:
+
+| material | samples | at rate 1 | what it is |
+|---|---|---|---|
+| one bank | 2,048 | 46.4 ms | that bank's 8 frames, in order |
+| all eight banks | 16,384 | 371 ms | the whole bank table as one corpus |
+
+So a bank can be handed to the cloud as a `wv_sample` view with `rate = 44100`,
+`gain = 256`, and `len` set to either figure. No DSP change, no new buffer, **no RAM** —
+the tables are already in flash and read in place (XIP). This is the cheapest thing in
+this document: an adapter, a source check, and a decision about `root`.
+
+#### Why it is worth considering at all
+
+Granulating a *sample* scatters a recorded sound. Granulating a *bank* scatters a
+designed spectrum: each frame of a bank is a different cycle, so reading across frames
+means the grains are made of the morph itself. That is a different instrument, not a
+second way to play the same one, and it is the reason this is a spectrum-design idea
+rather than a memory-saving idea.
+
+**How this relates to PPG / Waldorf, precisely.** Checked 2026-11-04 against the sources
+below, because the names were being used loosely:
+
+- **PPG Wave 2.3**: 30 wavetables, 64 waves each, 256 points per wave, **8-bit**; only
+  about **250 waveforms are actually stored**, and most table positions are interpolated
+  between them (Hermann Seib's table document, quoting the "over 1800 waveforms"
+  marketing figure).
+- **Waldorf Microwave**: 32 ROM tables (the Wave 2.3's 30 plus two), **61 waves plus
+  tri/saw = 64 positions**, waves stored as **64 bytes, 8-bit, positive half-cycle only**,
+  the negative half mirrored — a 12-bit output derived from that. Its name for the method
+  is **DSWS, Dynamic Spectral Wavetable Synthesis**.
+- **Neither machine is documented as granulating its own wavetables.** What they do is
+  *scan* a table from a modulation source. So this section is **not** "PPG did it, we
+  copy it".
+
+What *is* borrowed from that lineage is the model: **a cycle that changes, and a position
+in that change as something a player travels.** What is different here is that the grains
+read the table as **material**, so the position in the morph becomes a dimension the cloud
+is scattered over instead of a line a single oscillator walks. §5c3 records that the
+lineage's actual mechanism — the scan position as a **modulation destination** — is the
+planned next stage and is **not built yet**; this section is the thing that comes after
+it, not a substitute for it.
+
+#### The constraint that decides the whole design
+
+**One cycle is 256 points, so a grain must advance 256·hz/44100 samples per output sample
+to stay in tune.** A grain can be no longer than the material divided by that rate, which
+makes grain length a function of pitch — something a sample-based cloud never has to
+think about, because a sample is seconds long.
+
+With all eight banks contiguous (16,384 samples):
+
+| key | Hz | rate | material available | longest possible grain |
+|---|---|---|---|---|
+| F3 | 174.6 | 1.01 | 16,164 | 366 ms |
+| A3 | 220.0 | 1.28 | 12,829 | 291 ms |
+| C4 | 261.6 | 1.52 | 10,788 | 245 ms |
+| C5 | 523.3 | 3.04 | 5,394 | 122 ms |
+| G5 | 784.0 | 4.55 | 3,600 | **82 ms** |
+
+`python3 app/tools/grain_bank_ceiling.py` reproduces this table and the one below it from
+the DSP headers, so the day `WV_POINTS` changes the arithmetic gets re-derived instead of
+going stale.
+
+The GRAIN knob spans 10–200 ms (§5c above). **The top of that knob is unreachable from
+E4 upward** — measured, the ceiling is 194 ms at E4, 163 ms at G4, 122 ms at C5. With one
+bank instead of eight the whole table shrinks by 8× and even F3 only reaches 46 ms — so
+**one bank as material is not a usable configuration at the top of the keybed; all eight
+contiguous is the only version worth building.**
+
+Three ways to handle the ceiling, none chosen:
+
+1. **Clamp the knob to what the key allows.** The knob's own range becomes pitch-dependent.
+   Honest, and it makes the limit visible instead of audible.
+2. **Exceed it and let the grain read past the end**, where `read_at` returns silence
+   (§5c): the grain window still runs, so it fades rather than clicks, and the cloud gets
+   quieter as the knob passes the limit. Simple, but it turns a limit into a level
+   change, which is the kind of thing that reads as a fault.
+3. **Ignore it in v1** and note it in the manual. Worst of the three.
+
+#### What else changes, and must be decided
+
+- **`root` has no meaning for a bank.** The sample path uses `wv_smp_inc`, which is
+  `rate/44100 × 2^((note−root)/12)`: it is *relative* to where the material sits. A bank
+  is an oscillator table, where SYNTH instead uses `hz/WAVE_HZ` — *absolute*. Something
+  has to pick a reference note for bank material. F3 (the lowest key) making rate 1.0 is
+  the least surprising choice, and it is a decision, not a default.
+- **MORPH becomes a dead control in GRAN.** §5c's existing text already says this for the
+  current GRAN ("MORPH has nothing to read in a grain voice"), and that is why `EN_ALGO`
+  is GRAIN SIZE there. If banks become grain material, MORPH plausibly gains a job —
+  *which part of the bank table the cloud may wander in* — and by the player's
+  what-you-see rule (§3) a control that is visible must do what its label says. Either
+  MORPH restricts the corpus window, or the GRAN page stops showing it. **Note that §5c3
+  makes MORPH a modulation destination**, which would give it a second job in the same
+  source; the two sections have to agree before either is built.
+- **Eight banks contiguous is a corpus, not eight corpora.** Reading across a bank
+  boundary means a grain can span SAW SQR's frame 7 into RESO's frame 0. That is either
+  the feature (371 ms of continuous, related material) or a click, depending on the
+  window and where the boundary falls. It has not been measured.
+
+#### Where it would live on the panel
+
+No new control. `B_SEL` cycles SYNTH → SMPL → GRAN; a fourth state (**bank-fed granular**)
+would be a fourth press, or a second parameter of the existing GRAN state. The panel has
+no spare switch for it and the page model (§3) has no spare page. Whatever is chosen, it
+must not take a knob from GRAN's existing seven, and it must not make the source
+indicator ambiguous — the three-colour icon (amber / green / cyan) has no fourth colour.
+
+#### Costs
+
+- **Flash: 0.** The tables are already there.
+- **RAM: 0.** XIP, read in place.
+- **CPU: 0.** A grain reading a bank does exactly the work a grain reading a sample does
+  — one interpolated read. §5c's bill (`grains × voices`) is unchanged.
+- **The real cost is the constraint above**: pitch-dependent grain length, and a corpus
+  measured in hundreds of milliseconds rather than seconds.
+
+#### Not decided, and not to be assumed
+
+Whether this ships, which of the three ceiling policies applies, what `root` is, what
+MORPH does, and whether a grain may read across a bank boundary. This section exists so
+that the arithmetic is on record before anyone writes the adapter and discovers the
+grain-length ceiling by ear.
+
+#### The version that removes the ceiling: morph into a ring, then granulate it
+
+*The player's suggestion, 2026-11-04: "动态的 morph 之后再喂给 gran".* It is the better
+idea of the two, and it dissolves the constraint above rather than living with it.
+
+The adapter reads the bank **as** material, so the material is a 256-point cycle and pitch
+sets how fast it is consumed. If instead the SYNTH voice renders normally — correct pitch,
+correct morph, correct envelope — and its output is **written into a ring buffer**, then
+the grains read ordinary 44.1 kHz audio:
+
+| | adapter (read the bank) | ring (record the synth) |
+|---|---|---|
+| material | 16,384 samples of *table* | N samples of *audio* |
+| grain rate | `256·hz/44100` (pitch-dependent) | **1.0** (pitch-independent) |
+| longest grain | 366 ms at F3 → **82 ms at G5** | **the same at every key** |
+| pitch comes from | the key, via the read rate | the synth, already correct |
+| morph | a position in the corpus | **history: the buffer holds the sweep** |
+| RAM | 0 | the buffer |
+
+So the pitch-dependent ceiling **does not exist here**, and `root` stops being a question —
+the synth already decided the pitch. That removes two of the three hard problems in one
+move.
+
+**RAM: measured, not estimated.** `build.py app` reports **pool 97800 B of 344064** — 240.5
+KiB free — while `.bss` has only 10.8 KiB, so the ring has to live in the pool:
+
+| length | mono int16 at 44.1 kHz | |
+|---|---|---|
+| 1.0 s | 86.1 KiB | |
+| 2.0 s | 172.3 KiB | comfortable |
+| 2.5 s | 215.3 KiB | near the limit |
+| 3.0 s | 258.4 KiB | does not fit |
+
+Mono is what a grain engine needs, so 2 s is a real budget rather than a round number.
+
+**What this buys that neither PPG nor Waldorf could do.** Their oscillators are one cycle
+wide: they have a *position* in a table but no *past*. A ring of a swept morph means the
+cloud can contain **several different morph positions at once** — grains started at
+different points in the buffer are different timbres sounding simultaneously. The thing the
+grains scatter over stops being time (a sample) or spectrum-at-one-instant (the adapter)
+and becomes **the instrument's own recent history**. That is a genuinely new axis, and it is
+the one reason to prefer this over the adapter.
+
+**The timing problem it creates, which has to be decided first.** Grains read material from
+the *past*, so:
+
+- If the cloud is the **only** voice path, a note's first 10–200 ms has no material to read
+  and is silent. `wv_grains` places two grains on the first block so a note does not fade
+  in (`wv_grain.c:19`, "why a note starts with two grains") — but that trick works by
+  reading a grain that *would have* started a hop earlier, which only makes sense when the
+  material is a sample that already exists. A ring that is still filling has nothing at
+  that position, and `read_at` returns silence past the end (`wv_grain.c:69`), so the
+  attack problem is real and is not solved by the existing code.
+- If the SYNTH's direct output **plays alongside** the cloud, the attack is clean and the
+  grains fade in as the buffer fills — but then the source is two things at once, and
+  "GRAN" would no longer mean "grain only".
+- §5c3's second ENV and second LFO are what would make either version expressive; the ring
+  is most useful once the morph can be swept by something other than a hand.
+
+Not chosen, not designed, not scheduled. Recorded so the numbers are on the table before
+anyone writes it.
+
+#### Better implementations to weigh against the adapter
+
+The adapter above is the cheap version: pretend the bank is a sample. It is worth being
+explicit that it is also the crude version, and that granulating a *table* invites things
+granulating a *sample* does not.
+
+- **Read the cycle, not the timeline.** A bank is 8 × 256 — a cycle that changes 8 times,
+  not 2,048 samples of timeline. A grain could instead read **one frame for its whole
+  life** and let successive grains take successive frames, so every grain is a clean
+  single cycle and MORPH becomes "which frame the grains are drawn from". That also
+  removes the pitch dependence of the *material* — a grain needs one cycle, not a
+  fragment of the corpus, so what it consumes per grain is 256 points at the grain's own
+  rate rather than a slice of a fixed 16,384 — at the cost of a per-grain frame index.
+- **Phase-locked grains.** Because the material is periodic, grains can start on cycle
+  boundaries instead of at arbitrary offsets. That is what would keep a cloud in tune
+  without the `rate` arithmetic, and it is the difference between "granulating a wavetable"
+  and "granulating a recording of a wavetable".
+- **The morph axis as the grain axis.** Use MORPH to set which frame a grain reads and
+  let the 8 frames be the scatter dimension: the cloud becomes a distribution over
+  timbre rather than over time. This is the one idea here that has no sample-based
+  analogue at all, and it is probably the reason to build this rather than the adapter.
+- **Band-limiting by construction.** Every grain reads an integer number of cycles, so a
+  grain's spectrum is exactly the frame's spectrum — no interpolation across a
+  discontinuity, and none of §5a's aliasing question arises inside a grain.
+
+None of these is designed, costed or chosen. The **adapter** is still the thing to build
+first, despite the ring being the better instrument: the adapter is a day's work and it
+answers the only question that matters — whether granulated table material is worth the
+rest — without spending 172 KiB of pool on the answer.
+
 ### 5c2. The filter's tap, and key tracking
 
 Both live on the **LFO page's second screen** (`B_LFO` twice). They had a `B_FX` page of
@@ -461,6 +690,76 @@ could have added was never the constraint. Only `double` falls back to `__divdf3
 
 The reference note is C4, so turning tracking on never moves the note a patch was voiced
 on. Measured: C4's output is bit-identical at 0 % and 100 %.
+
+### 5c3. Modulation: more destinations, a second LFO, a second ENV — **NOT BUILT**
+
+*Recorded 2026-11-04 because it was being mistaken for a gap in the design. It is not: it
+is the next stage of it, and the panel was built to take it.*
+
+The player's plan, stated 2026-11-04: **MORPH as a modulation destination, multiple LFO
+targets, a second LFO, a second ENV.** None of it is built. This section records what the
+code already has room for, so the work is a schedule rather than a redesign.
+
+#### What exists, exactly
+
+| | today | in `wv_state` |
+|---|---|---|
+| LFOs | **1**, one per instrument, not per voice | `lfo_rate`, `lfo_depth`, `lfo_ph` |
+| LFO destinations | **1, hard-wired: CUT** | `lfo_cut_scale()` multiplies the corner |
+| LFO shape | sine only | `fm_sin_pi(lfo_ph * TWO_PI)` |
+| ENVs | **1** (the VCA's ADSR) | `eg_a`, `eg_d`, `eg_s`, `eg_r` |
+| ENV destinations | **1: the VCA level** | `level`/`target` |
+| MORPH destinations | none — `s->morph` is a knob byte | read once per block in `voice_block` |
+
+Three facts that matter for the schedule:
+
+- **MORPH is already resolved once per block, not per sample** (`wv_dsp.c:675`), with the
+  comment saying so. That was a measured optimisation (the frame pair was 12–16 % of the
+  read path). It means a modulated MORPH costs **one add before `wv_frames_at`** per voice
+  per block — the interpolation itself is unchanged. This is the cheapest of the four.
+- **The LFO is shared across voices on purpose** — one sine, not eight. That is the right
+  shape for a filter sweep and the wrong shape for anything per-note, which is why a
+  **second** LFO is a different instrument rather than a second copy: one shared, one
+  per-voice, and the per-voice one is what a wavetable scan wants.
+- **`depth` means octaves today** (`0..127` → `0..4` octaves either side of CUT,
+  symmetric in octaves, see `lfo_oct`). A destination that is not a frequency cannot use
+  that scale. PANEL: `DEPTH` therefore has to mean *"of this destination's own range"*,
+  not octaves, the moment there is more than one destination — or the page needs one more
+  number than it has knobs.
+
+#### What each addition costs, before anything is designed
+
+- **MORPH as a destination: nearly free.** The block hoist already exists; the value is
+  `k_morph + mod` saturated to the frame range. No new state per voice.
+- **Multiple destinations: an amount per destination.** One shared LFO with N targets
+  needs N depth values, and the panel has **one** DEPTH knob. Either the page grows a
+  screen per destination, or the model becomes a small table (destination, amount) that
+  a page edits one row at a time. The second is the one the existing page model (§3) can
+  already express: pages have screens, screens have four knobs.
+- **A second LFO: the same `.bss` question as everything else.** State is small
+  (`rate`, `depth`, `ph` ≈ 6 B); the cost is that the page, the lamp rule and the save
+  record all have to learn about it. The save record is **190 B with `PLAT_STORE_MAX`
+  3840** (§8), so a second LFO and a second ENV fit with room to spare; what does not fit
+  is unbounded growth of the (destination, amount) table.
+- **A second ENV: per-voice state.** The VCA envelope is per-voice already — `level`,
+  `target` (4 B each), `estage` plus 3 B of padding = **12 B per voice**, so a second one
+  is **96 B at 8 voices** plus four shared stage bytes in `wv_state` where `eg_a..eg_r`
+  already live. Not a constraint. The constraint is the **ENV page has one screen and
+  four knobs**, all of them taken (§4). A second ENV needs either a second screen on
+  `B_ENV` (which the page model already supports — `PAGE_SCREENS[]`) or a `B_HOME`-style
+  selector.
+
+#### Order that the code suggests
+
+1. **MORPH as a destination, from the existing LFO.** One add, one panel decision (what
+   DEPTH means). It is the one that makes the instrument sound like its lineage.
+2. **A destination table** — because step 1 creates the second destination that exposes
+   the one-DEPTH-knob problem.
+3. **Second ENV**, then **second LFO** — both are state, and state is cheap; both are
+   page work, and page work is what this instrument is careful about.
+
+Steps 1 and 2 are the ones that change how it sounds. Steps 3 and 4 change how deep a
+patch can be. Nothing here is scheduled, and none of it should be reported as built.
 
 ### 5d. EDIT — what a deeper edit can actually reach
 
