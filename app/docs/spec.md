@@ -717,7 +717,19 @@ this section is still a schedule, and the tables below keep their `NOT BUILT` re
 | MORPH destinations | LFO 1 and 2, via `WV_DEST_MORPH` | one add in the block hoist (`morph_pos()`) |
 
 The LFO page reaches this in two screens: screen 1 is CUT/RES/RATE/DEPTH, screen 2 is the
-seven-ring table — **six destinations plus K3's RATE**. `B_REC` selects which LFO both
+seven-ring table — **six destinations plus K3's RATE**. A ring there has three states, and
+they are told apart by shape and not only by brightness, because amount zero and a slot the
+source does not have read identically when both were a dim ring:
+
+| state | drawing |
+|---|---|
+| amount > 0 | ring filled to the amount, the value in the hole |
+| route exists, amount 0 | **no ring**, a bright `OFF` — "here, turned down" |
+| no route on this source | dim ring, `NOT` over `USED`, dim — "this knob does nothing here" |
+
+A zero route has no arc to fill, so an empty ring there was claiming a scale that is not
+there. K3's RATE uses the same three shapes: an LFO at 0 Hz is a route turned down, not a
+knob the source lacks. `B_REC` selects which LFO both
 screens edit, and its lamp shows which — the button matrix gives each button one bit and
 one colour, and only PLAY has a second LED, so lit/unlit is the vocabulary this hardware has.
 
