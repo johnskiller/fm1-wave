@@ -3384,22 +3384,48 @@ static void knob_at(int32_t cx, int32_t cy, const char *name, const char *val,
             lit ? sk.acc : sk.ink);
 }
 
-/* A ring this source has no route for: its own circle, dim, with OFF in the hole.
+/* ── the three states a ring can be in ────────────────────────────────────────
  *
- * Not an empty hole -- an empty hole reads as a broken knob -- and not a ring with a slash
- * through it, which at 47 px reads as a scribble rather than as a word.
+ * A player looking at the table has to tell three different things apart, and brightness
+ * alone could not carry them (player, 2026-11-04: "调制量为0的OFF，和没有用上这个旋钮的OFF容易
+ * 混淆"). So each state has its own SHAPE as well as its own colour:
  *
- * No name, because there is nothing to name: a slot's destination is a property of the
- * SOURCE, so this ring is not "SPRAY with no amount", it is a position this source does not
- * fill. Naming it would have to name the other source's destination, which is worse than a
- * dim OFF -- the row already reads as a row of rings, and one short of the others says
- * "fewer destinations here" without claiming which. */
+ *   amount > 0    ring, filled to the amount, the value inside   ink_hi + acc
+ *   route exists,
+ *   amount == 0   NO RING, a bright OFF in the hole              acc, the whitest colour
+ *                 -- "this route is here and it is turned down". No ring because there is
+ *                 no arc to fill: drawing an empty ring at zero made this look like the
+ *                 third state, which is the exact confusion this shape removes.
+ *   no route      dim ring + two dim lines, NOT / USED           dim ink
+ *                 -- "this knob does nothing on this source". The ring is the knob's
+ *                 outline, so the knob still reads as present; the dimness and the two
+ *                 stacked words say it is not wired.
+ *
+ * "NOT USED" and not "NO USE": the second is not English for an unused control (it means
+ * "pointless"), and this is a label, not an idiom. Two lines because one would be 44 px
+ * against the hole's 34.
+ *
+ * No destination NAME on the unused ring, because there is nothing to name: a slot's
+ * destination is a property of the SOURCE, so the ring is not "SPRAY with no amount", it is
+ * a position this source does not fill. Naming it would have to name another source's
+ * destination, which is worse than saying nothing. */
+
+/* a route this source HAS, turned all the way down: no arc, a bright OFF.
+ * The caller draws the name, because the two rows put it in different places. */
+static void route_zero(int32_t cx, int32_t cy)
+{
+    cv_text(cx - txt_w("OFF") / 2, cy - FONT_XS.h / 2, &FONT_XS, "OFF", sk.acc);
+}
+
+/* a slot this source has no route for: dim outline, NOT / USED */
 static void route_absent(int32_t cx, int32_t cy)
 {
     uint16_t c = dim(sk.ink, 2, 5);
+    const char *a = "NOT", *b = "USED";
 
     knob_arc(cx, cy, 0, c, c);
-    cv_text(cx - txt_w("OFF") / 2, cy - FONT_XS.h / 2, &FONT_XS, "OFF", c);
+    cv_text(cx - txt_w(a) / 2, cy - FONT_XS.h + 1, &FONT_XS, a, c);
+    cv_text(cx - txt_w(b) / 2, cy, &FONT_XS, b, c);
 }
 
 
@@ -4166,6 +4192,8 @@ void app_frame(void)
              * "SELECT MORPH", so the ring passes an empty name and the value does the work. */
             if (d == ROUTE_NONE)
                 route_absent(cx, 52);
+            else if (lfo_amt[lfo_edit][d] == 0)
+                route_zero(cx, 52);
             else
                 knob_at(cx, 52, "", dest_text(d, lfo_amt[lfo_edit][d]),
                         (int32_t)lfo_amt[lfo_edit][d], 1);
@@ -4561,8 +4589,6 @@ void app_frame(void)
          * establishes that a route's amount is called DEPTH and a 54 px cell holds six
          * letters at this font ("MORPH MD" measured 51 of 54 px -- no slack for a second
          * word, and an abbreviation is not a label). */
-        knob(4,   KNOB_TOP, 54, "CUT",     pct(k_cut), k_cut, 0);
-        knob(62,  KNOB_TOP, 54, "RES",     pct(k_res), k_res, 0);
         /* Screen 2 is the route table: six destinations and K3's RATE. The three above the
          * picture are drawn in the material band this screen covers; these are the four
          * under it. K3 is RATE in the same place it is on screen 1 -- so a player routing
@@ -4581,13 +4607,25 @@ void app_frame(void)
                 uint8_t d;
 
                 if (slot == ROUTE_SLOTS) {
-                    knob(x, KNOB_TOP, 54, "RATE", lfo_rate_text(lfo_rate[lfo_edit]),
-                         lfo_rate[lfo_edit], 1);
+                    /* RATE gets the same three shapes as a route: an LFO at 0 Hz is a
+                     * route that exists and is turned down, not a knob this source lacks. */
+                    if (lfo_rate[lfo_edit] == 0) {
+                        cv_text(x, KNOB_TOP, &FONT_XS, "RATE", sk.ink_hi);
+                        route_zero(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
+                    } else {
+                        knob(x, KNOB_TOP, 54, "RATE", lfo_rate_text(lfo_rate[lfo_edit]),
+                             lfo_rate[lfo_edit], 1);
+                    }
                     continue;
                 }
                 d = route_dest(src, slot);
                 if (d == ROUTE_NONE) {
                     route_absent(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
+                    continue;
+                }
+                if (lfo_amt[lfo_edit][d] == 0) {
+                    cv_text(x, KNOB_TOP, &FONT_XS, DEST_NAME[d], sk.ink_hi);
+                    route_zero(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
                     continue;
                 }
                 knob(x, KNOB_TOP, 54, DEST_NAME[d], dest_text(d, lfo_amt[lfo_edit][d]),
