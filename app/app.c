@@ -3018,9 +3018,34 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
  * "drawing does not advance the LFO").
  *
  * In frames, 0..WV_FRAMES-1: the unit the rack and the reader both use. */
+/* Where the knob alone puts the readers, in frames. The rest state, and the baseline the
+ * live value is measured from. */
+static float knob_morph_frames(void)
+{
+    return (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+}
+
 static float morph_live(void)
 {
-    return wv_morph_pos(&dsp);
+    /* ── but only while something is playing ────────────────────────────────
+     *
+     * With nothing sounding there is no "current morph position" to report: the LFO is
+     * free-running whether or not a voice is reading it, so the live value would be the
+     * phase of a modulator that is moving nothing. What the player wants to see between
+     * notes is where the sweep will START from, and that is the knob -- the number the
+     * patch is saved with and the one an edit is measured against.
+     *
+     * (player, 2026-11-04: "还是弹奏的时候才动，停下来就表示morph旋钮数值比较好")
+     *
+     * So the picture moves while you play and settles back to the knob when you stop. Both
+     * halves of that are worth having: the movement is the modulation being visible at all,
+     * and the rest state is the reference the movement is relative to. A readout that kept
+     * sweeping in silence would be showing a number that belongs to no note.
+     *
+     * wv_active() is the DSP's own count of voices that are still sounding, so this agrees
+     * with the ear at the release tail too -- the sweep continues until the last voice is
+     * done, which is exactly when the sound stops. */
+    return wv_active(&dsp) ? wv_morph_pos(&dsp) : knob_morph_frames();
 }
 
 /* The same, as the 0..127 the panel shows. Rounded, because the readout is a percentage

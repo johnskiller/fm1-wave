@@ -569,6 +569,27 @@ shot grn.png
        "and the knob itself has not moved")
     ck(expect(play + "master 300\nmaster 500\n", "morph_live", 11),
        "but the position the voices are on has moved off the knob")
+    # ── and it settles back to the knob in silence ─────────────────────────────
+    # A free-running LFO is moving nothing when no voice is reading it, so a readout that
+    # kept sweeping between notes would be showing a number that belongs to no note. The
+    # rest state is the knob -- the value the patch is saved with and the baseline the sweep
+    # is measured from (player, 2026-11-04: "还是弹奏的时候才动，停下来就表示morph旋钮数值比较好").
+    silent = "tap LFO\nturn K3 14\ntap LFO\nturn SELECT 40\ntap HOME\n"
+    ck(expect(silent + "master 400\n", "morph_live", 0),
+       "with nothing playing the readout is the knob, not the LFO's phase")
+    ck(expect(silent + "master 200\nmaster 200\nmaster 200\n", "morph_live", 0),
+       "and it does not drift while the panel keeps redrawing")
+    ck(expect(silent + "key 14 down\nmaster 400\n", "morph_live", 28),
+       "a note makes it live")
+    # the release tail is part of "sounding": the sweep must not stop at key-up, because
+    # the sound does not stop at key-up either
+    tail = "tap ENV\nturn K4 20\ntap HOME\n" + "tap LFO\nturn K3 14\ntap LFO\nturn SELECT 40\ntap HOME\n" \
+           + "key 14 down\nmaster 400\ntapkey 14\nmaster 100\n"
+    ck(expect(tail, "voices", 1), "a long release keeps a voice sounding after key-up")
+    v1 = show_val(tail, "morph_live")
+    v2 = show_val(tail + "master 400\n", "morph_live")
+    ck(v1 is not None and v2 is not None and v1 != 0,
+       "and the readout keeps moving through the tail (%r -> %r)" % (v1, v2))
     # the sweep is what proves it is modulation and not a one-off offset
     a = show_val(play + "master 200\nmaster 200\nmaster 200\n", "morph_live")
     b = show_val(play + "".join("master 200\n" for _ in range(6)), "morph_live")
