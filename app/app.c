@@ -358,11 +358,12 @@ static uint8_t k_morph = 0;
  *   SMPL   a sample reads no wavetable frame, so no MORPH, and has no cloud
  *   GRAN   a cloud never reaches wv_table_read, so no MORPH
  *
- * THE BOTTOM ROW HAS CUT, RES AND SHAPE IN EVERY SOURCE, on K1, K2 and K4. SHAPE is at K4
+ * THE BOTTOM ROW HAS SHAPE, RES AND DEPTH IN EVERY SOURCE, on K1, K2 and K4. SHAPE is at K1
  * rather than K3 because K3 is RATE, and K3 is RATE because of the argument above; the
  * filter's two knobs stay at K1/K2 so this page agrees with the five others about where the
- * filter lives. K4 being SHAPE instead of K3 is the one place this page differs from the
- * rest, and it is a real cost, paid deliberately.
+ * filter lives, and DEPTH takes K4 because that is where screen 1 keeps it -- one byte, one
+ * knob, on all three screens (player, 2026-11-04). SHAPE at K1 instead of K3 is the one
+ * place this page differs from the rest, and it is a real cost, paid deliberately.
  *
  * So the TOP row is the row that varies, and it is the row that carries the extension
  * routes: MORPH on SYNTH, GRAIN and SPRAY on GRAN, nothing on SMPL. That is also why the top
@@ -378,9 +379,9 @@ static uint8_t k_morph = 0;
  * the only thing the code has to ask. */
 #define ROUTE_RINGS 7    /* six encoders plus K3 */
 static const uint8_t ROUTE_ORDER[2][ROUTE_RINGS] = {
-    /* K1            K2             K4              SELECT         PRESET        ALGO          K3 */
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, WV_DEST_PITCH },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE     },
+    /* K1             K2            K4              SELECT         PRESET        ALGO          K3 */
+    { WV_DEST_SHAPE, WV_DEST_RES, WV_DEST_CUT,   WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, WV_DEST_PITCH },
+    { WV_DEST_SHAPE, WV_DEST_RES, WV_DEST_CUT,   WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE     },
 };
 
 /* GRAIN and SPRAY only exist on a cloud, so they are the two routes a source can lack
@@ -4764,12 +4765,14 @@ void app_frame(void)
     } else if (lfo_mod) {
         /* The LFO's THIRD SCREEN: what else the same LFO moves.
          *
-         * CUT and RES stay on K1 and K2 for the third time, for the reason screen 2
-         * already gives -- a screen that moved the filter would disagree with the other
-         * two about where the filter lives. The other two knobs are the routes the
-         * instrument has today: CUT's depth (which screen 1 owns and this one repeats,
-         * because a route page that hid the route it was building on would be odd) and
-         * MORPH's own amount.
+         * RES stays on K2 for the third time, for the reason screen 2 already gives -- a
+         * screen that moved the filter would disagree with the other two about where the
+         * filter lives. DEPTH stays on K4 for a stronger reason: it is the same byte screen
+         * 1 writes, so the same knob in the same place is the only mapping that does not
+         * ask the player to remember which screen they are on. SHAPE gives up K4 and takes
+         * K1. The other two knobs are the routes the instrument has today: CUT's depth
+         * (which screen 1 owns and this one repeats, because a route page that hid the
+         * route it was building on would be odd) and MORPH's own amount.
          *
          * Both routes print their amount the way their destination is measured: DEPTH in
          * octaves (the filter is exponential), MORPH in FRAMES (the travel is 0..7 frames,
@@ -4782,8 +4785,8 @@ void app_frame(void)
         /* The bottom row is four positions, and K3 is the one that is not always a table
          * slot:
          *
-         *   screen 2  K1 CUT  K2 RES  K3 PITCH  K4 SHAPE
-         *   screen 3  K1 CUT  K2 RES  K3 RATE   K4 SHAPE
+         *   screen 2  K1 SHAPE  K2 RES  K3 PITCH  K4 DEPTH
+         *   screen 3  K1 SHAPE  K2 RES  K3 RATE   K4 DEPTH
          *
          * BOTTOM_SLOT holds the table slot for K1, K2 and K4; K3 is ROUTE_SLOTS as a marker
          * meaning "this position is not a slot", and what it draws depends on the screen.

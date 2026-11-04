@@ -721,11 +721,13 @@ The LFO page reaches this in **three screens**:
 | screen | LFO | K1 | K2 | K3 | K4 | SELECT | PRESET | ALGO |
 |---|---|---|---|---|---|---|---|---|
 | 1 | 1 | CUT | RES | RATE | **DEPTH** | — | — | — |
-| 2 | 1 | **DEPTH** | RES | **PITCH** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
-| 3 | 2 | **DEPTH** | RES | **RATE** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+| 2 | 1 | SHAPE | RES | **PITCH** | **DEPTH** | MORPH | (GRAIN) | (SPRAY) |
+| 3 | 2 | SHAPE | RES | **RATE** | **DEPTH** | MORPH | (GRAIN) | (SPRAY) |
 
-**One word per byte.** `K4` on screen 1 and `K1` on screens 2 and 3 are the same byte,
-`lfo_amt[i][WV_DEST_CUT]`, so they carry the same name: **DEPTH**. They used to be called
+**One word per byte, in one place.** `K4` on screens 1, 2 and 3 is the same byte,
+`lfo_amt[i][WV_DEST_CUT]`, so they carry the same name -- **DEPTH** -- and sit on the same
+knob. SHAPE moved to `K1` on the two tables to keep it there (player, 2026-11-04: *"P2 P3 把
+depth 和 shape 交换一下，这样就可以保持 depth 始终在 K4"*). They used to be called
 "DEPTH" and "CUT", which collided with screen 1's `K1` -- the corner itself, 30 Hz..16 kHz --
 and gave two different numbers one word (player, 2026-11-04: *"P1 还有一个 K1-CUT，指的就是
 真正的 CUT 频率…而且此处无法统一成 CUT"*). A ring on this table is always an AMOUNT, so

@@ -416,8 +416,9 @@ shot grn.png
     #   * a route is only reachable where its destination exists (no MORPH on SMPL)
     #   * K3 is RATE, the SAME byte screen 1 writes: this page edits two LFOs, and a player
     #     routing LFO 2 must be able to change its speed without leaving the table
-    #   * K4 is SHAPE here, NOT screen 1's DEPTH -- the two are different bytes, so
-    #     dialling a filter sweep does not silently add a waveshape sweep
+    #   * K4 is the CUT amount on BOTH screens, because it is the same byte: screen 1 calls
+    #     it DEPTH and the table calls it the CUT route, and one knob in one place for one
+    #     number is the reason the table puts SHAPE on K1 instead (player, 2026-11-04)
     #   * PITCH is not on the table at all: it was dropped to pay for K3's rate, on the
     #     player's argument that its value is already reachable from its own encoder and
     #     from pitch bend
@@ -425,13 +426,19 @@ shot grn.png
        "LFO's route screen is screen 2")
     ck(expect("tap LFO\ntap LFO\n", "lfo_edit", 0),
        "and it edits LFO 1 until REC says otherwise")
-    # SYNTH: K1 CUT / K2 RES / K4 SHAPE / SELECT MORPH / PRESET, ALGO none / K3 RATE
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 40),
-       "screen 2: K4 sets SHAPE's amount in SYNTH")
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 0),
+    # SYNTH: K1 SHAPE / K2 RES / K4 CUT / SELECT MORPH / PRESET, ALGO none / K3 RATE
+    ck(expect("tap LFO\ntap LFO\nturn K1 10\n", "amt_shape", 40),
+       "screen 2: K1 sets SHAPE's amount in SYNTH")
+    ck(expect("tap LFO\ntap LFO\nturn K1 10\n", "lfo_depth", 0),
        "and it does NOT set CUT's depth")
-    ck(expect("tap LFO\nturn K4 10\n", "amt_shape", 0),
-       "screen 1's K4 is still DEPTH, not a route amount")
+    # K4 is DEPTH on both screens because it is one byte, not two knobs that happen to
+    # agree: screen 1's ring reads the same lfo_amt[i][WV_DEST_CUT] the table's K4 ring does.
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
+       "screen 2's K4 is the CUT amount, the same byte screen 1 calls DEPTH")
+    ck(expect("tap LFO\nturn K4 10\n", "lfo_depth", 40),
+       "and screen 1's K4 writes that same byte")
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 0),
+       "screen 2's K4 is NOT a route amount for SHAPE")
     # K3 is the position the two tables disagree about (player, 2026-11-04): PITCH on
     # LFO 1's table, because LFO 1's speed already has a knob on screen 1; RATE on LFO 2's,
     # because LFO 2 has no screen 1 and RATE is the one setting of its with no ring.
@@ -448,7 +455,7 @@ shot grn.png
        "SELECT is MORPH, which is the route the DSP gained")
     # PITCH left the table to pay for K3's RATE. The DSP still routes it -- only the ring
     # is gone -- so what is asserted is that nothing on this screen reaches it.
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_pitch", 0),
+    ck(expect("tap LFO\ntap LFO\nturn K1 10\n", "amt_pitch", 0),
        "and no knob on the table routes PITCH any more")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "bank", 0),
        "and turning SELECT there does not change the bank")
@@ -485,13 +492,13 @@ shot grn.png
            " twice" % name)
 
 
-    # The bottom row is cut / res / RATE / shape in every source: the two filter knobs stay
-    # where the other five pages put them, and the rate is in reach from the routes.
-    ck(expect("tap LFO\ntap LFO\n", "route2", 2),
-       "SYNTH slot 2 (K4) is SHAPE")
-    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route2", 2),
-       "SMPL's K4 is SHAPE too")
-    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route2", 2),
+    # The bottom row is SHAPE / res / RATE / DEPTH: DEPTH sits on K4 in every source and on
+    # both screens, which is the point of the swap -- one byte, one position, always.
+    ck(expect("tap LFO\ntap LFO\n", "route2", 0),
+       "SYNTH slot 2 (K4) is CUT, the DEPTH byte")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route2", 0),
+       "SMPL's K4 is the same CUT route")
+    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route2", 0),
        "and so is GRAN's")
     ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route4", 4),
        "GRAN's PRESET is GRAIN")
@@ -501,22 +508,23 @@ shot grn.png
     # it has CUT/RES/SHAPE/PITCH and THREE empty slots (SELECT, PRESET, ALGO). The assertion that matters is that a
     # slot with no route neither takes an amount nor reports one -- and each of these runs
     # in a fresh process, so nothing carries over from the lines above.
-    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route0", 0),
-       "SMPL slot 0 is CUT")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route2", 0),
+       "SMPL slot 2 (K4) is CUT, the same position as screen 1's DEPTH")
     ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route4", -1),
        "SMPL slot 4 (SELECT) has no destination and says so")
     ck(expect("tap SEL\ntap LFO\ntap LFO\nturn PRESET 10\n", "amt_pitch", 0),
        "and turning an empty slot's knob moves nothing")
-    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 40),
-       "SMPL's K4 is SHAPE, so the same knob turned there does move it")
-    ck(expect("turn K1 10\ntap LFO\ntap LFO\nturn K1 10\n", "amt_cut", 40),
-       "K1 is CUT's AMOUNT in every source")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn K1 10\n", "amt_shape", 40),
+       "SMPL's K1 is SHAPE, so the same knob turned there does move it")
+    ck(expect("turn K4 10\ntap LFO\ntap LFO\nturn K4 10\n", "amt_cut", 40),
+       "K4 is CUT's AMOUNT in every source, and the same byte screen 1's DEPTH writes")
     # The consequence of a seven-ring table, written down because it is a real trade: on
-    # this screen K1 is CUT's modulation amount, NOT the filter corner, so the corner is
+    # this screen K4 is CUT's modulation amount, NOT the filter corner, so the corner is
     # one press away on any other screen. That is rule 3 of the page model -- a page that
-    # covers the picture may borrow the knobs that were on it -- and the alternative (CUT
-    # the value here, CUT's amount nowhere) would leave the table with five rings.
-    ck(expect("turn K1 10\ntap LFO\ntap LFO\nturn K1 10\n", "cut", 127),
+    # covers the picture may borrow the knobs that were on it. The swap that put DEPTH on
+    # K4 here (player, 2026-11-04) also means the corner is the only thing that moved: it
+    # left K1 for SHAPE, and DEPTH is now in the position it occupies on screen 1.
+    ck(expect("turn K4 10\ntap LFO\ntap LFO\nturn K4 10\n", "cut", 127),
        "and the corner itself is not moved by that knob while the table is up")
     # KEY TRK left this page for GLO (it is the FILTER's setting, shared by all eight
     # voices, not one LFO's). So the assertion moves with it: K4 sets it there, and
@@ -579,8 +587,8 @@ shot grn.png
     # this page cannot show. These read what the DSP is actually holding.
     ck(expect("tap LFO\nturn K4 6\n", "dsp_amt_cut", 24),
        "screen 1's DEPTH arrives in the DSP as the CUT amount")
-    ck(expect("tap LFO\ntap LFO\nturn K1 5\n", "dsp_amt_cut", 20),
-       "and screen 2's K1 arrives in the same place")
+    ck(expect("tap LFO\ntap LFO\nturn K4 5\n", "dsp_amt_cut", 20),
+       "and screen 2's K4 arrives in the same place -- the same knob as screen 1's")
     ck(expect("tap LFO\ntap LFO\nturn K3 7\n", "dsp_amt_pitch", 28),
        "screen 2's K3 arrives as PITCH, not as RATE")
     ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 4\n", "dsp_rate1", 16),
@@ -589,8 +597,8 @@ shot grn.png
        "and does not overwrite PITCH on the way")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 3\n", "dsp_amt_morph", 12),
        "MORPH's route arrives too")
-    ck(expect("tap LFO\ntap LFO\nturn K4 3\n", "dsp_amt_shape", 12),
-       "and SHAPE's")
+    ck(expect("tap LFO\ntap LFO\nturn K1 3\n", "dsp_amt_shape", 12),
+       "and SHAPE's, from K1 where the swap put it")
     # ── MORPH is modulated: what is drawn must be what sounds ───────────────────
     # The readout and the rack both used to be built from k_morph, the knob. With a route
     # on MORPH the sound sweeps and they sat still (player, 2026-11-04: "material页面的morph
