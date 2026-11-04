@@ -406,8 +406,6 @@ static void test_render(void)
 }
 
 
-/* ─── the LFO ─────────────────────────────────────────────────────────────── */
-
 /* Off by default, and OFF MEANS BIT-IDENTICAL: a patch made before the LFO existed
  * must sound the same after it. That is asserted against a state with lfo_rate 0
  * against the same state with the field never touched, which is what wv_init gives. */
@@ -478,6 +476,211 @@ static double bright_of(const float *o, uint32_t n)
         a += (double)o[i] * o[i];
     return a > 0.0 ? sqrt(d / (double)(n - 1)) / sqrt(a / (double)n) : 0.0;
 }
+
+/* ─── MORPH as a modulation destination (spec 5c3) ────────────────────────── */
+
+/* The morph position the DSP actually used for a block. Recomputed here from the state,
+ * but from the SAME two inputs the DSP reads -- the knob and the LFO's phase -- so a test
+ * can say "it swept the whole travel" without reaching into the render. */
+static float morph_at(const wv_state *s)
+{
+    float m = (wv_sine(s) + 1.0f) * 0.5f;
+    float base = (float)s->morph * (float)(WV_FRAMES - 1u) / 127.0f;
+    float span = (float)s->morph_mod / 127.0f * (float)(WV_FRAMES - 1u);
+    float p = base + m * span;
+    return p < 0.0f ? 0.0f : (p > (float)(WV_FRAMES - 1u) ? (float)(WV_FRAMES - 1u) : p);
+}
+
+/* Off means OFF, asserted two ways -- because the first version of this test compared a
+ * state with no LFO against one whose LFO was sweeping CUT, which differ for a reason that
+ * has nothing to do with MORPH, and "fails" was the only honest result it could give.
+ *
+ * (a) at amount 0 the position is the knob EXACTLY, at every phase of the LFO;
+ * (b) at amount 0 and CUT depth 0 the whole render is bit-identical to a state with the
+ *     LFO switched off -- so an unused route costs nothing and changes nothing. */
+static void test_morph_mod_off_is_no_change(void)
+{
+    static wv_state a, b;
+    static float oa[256], ob[256];
+    wv_bank bk = { WV_BANKS[0] };
+    uint32_t k, i;
+    float worst = 0.0f, base;
+
+    wv_init(&a);
+    a.morph = 30;
+    a.lfo_rate = 100;
+    a.morph_mod = 0;
+    base = morph_at(&a);
+    for (k = 0; k < 400; k++) {
+        float p;
+        a.lfo_ph += wv_lfo_hz(a.lfo_rate) * 256.0f * (1.0f / 44100.0f);
+        a.lfo_ph -= floorf(a.lfo_ph);
+        p = morph_at(&a);
+        if (fabsf(p - base) > worst)
+            worst = fabsf(p - base);
+    }
+    ck(worst == 0.0f, "at amount 0 the position is the knob, at every phase");
+
+    /* And the render: amount 0, CUT depth 0, so the only difference is that b's LFO is
+     * running and moving nothing. */
+    wv_init(&a);
+    a.morph = 30;
+    a.lfo_rate = 0;
+    wv_init(&b);
+    b.morph = 30;
+    b.lfo_rate = 100;
+    b.lfo_depth = 0;
+    b.morph_mod = 0;
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
+    worst = 0.0f;
+    for (k = 0; k < 60; k++) {
+        for (i = 0; i < 256; i++) { oa[i] = 0.0f; ob[i] = 0.0f; }
+        wv_render(&a, &bk, oa, 256, 4096.0f);
+        wv_render(&b, &bk, ob, 256, 4096.0f);
+        for (i = 0; i < 256; i++)
+            if (fabsf(oa[i] - ob[i]) > worst)
+                worst = fabsf(oa[i] - ob[i]);
+    }
+    ck(worst == 0.0f, "a running LFO with nothing routed is bit-identical to no LFO");
+}
+
+/* The travel: the knob is the BOTTOM of the sweep, and the sweep reaches the top of the
+ * bank and no further.
+ *
+ * Unipolar is the design (spec 5c3): a bipolar sweep from a knob at 0 would spend half its
+ * cycle clamped at frame 0, which is a clipped half-cycle rather than a sweep. So the two
+ * assertions are that the position never goes below the knob and that it does reach the
+ * last frame when the amount is full. */
+static void test_morph_mod_travel(void)
+{
+    static wv_state a;
+    uint32_t k;
+    float lo = 99.0f, hi = -99.0f;
+
+    wv_init(&a);
+    a.morph = 0;                    /* the hardest case for a bipolar sweep */
+    a.lfo_rate = 95;
+    a.morph_mod = 127;              /* full travel: 0..7 frames */
+
+    /* Advance the phase the way smooth_step does, by hand: one LFO cycle over the note. */
+    for (k = 0; k < 400; k++) {
+        float p;
+        a.lfo_ph += wv_lfo_hz(a.lfo_rate) * 256.0f * (1.0f / 44100.0f);
+        a.lfo_ph -= floorf(a.lfo_ph);
+        p = morph_at(&a);
+        if (p < lo) lo = p;
+        if (p > hi) hi = p;
+    }
+    printf("  morph travel: %.3f .. %.3f frames (knob at frame 0, amount full)\n",
+           (double)lo, (double)hi);
+    ck(lo >= -1e-6f, "the sweep never goes below the knob");
+    ck(hi > 6.95f, "a full amount reaches the last frame");
+}
+
+/* The point of the route: it changes TIMBRE, not level. MORPH moves the frame pair, and
+ * the frames are different cycles, so the waveform's SHAPE changes while its RMS does not.
+ *
+ * This is what separates a working morph route from a working cut route: an LFO on CUT
+ * moves the level (the sweep test asserts that), and if the morph route were wired to the
+ * filter by mistake, or morph_mod were added to the wrong parameter, the level would move
+ * and the shape would not. Worst-sample-difference against the unmodulated note is the
+ * measure: same-level-different-shape gives a large difference with a flat RMS ratio. */
+static void test_morph_mod_changes_timbre_not_level(void)
+{
+    static wv_state a, b;
+    static float oa[256], ob[256];
+    wv_bank bk = { WV_BANKS[3] };   /* RESO: frames differ in harmonic content */
+    uint32_t k, i;
+    double ra = 0.0, rb = 0.0, worst_rel = 0.0;
+
+    wv_init(&a);
+    a.morph = 0;
+    a.cut = 127;                    /* filter wide open: nothing else can move the level */
+    a.res = 0;
+    wv_init(&b);
+    b.morph = 0;
+    b.cut = 127;
+    b.res = 0;
+    b.lfo_rate = 95;
+    b.morph_mod = 127;
+
+    wv_note_on(&a, 60, 127, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 127, 261.63f / 44100.0f);
+
+    for (k = 0; k < 200; k++) {
+        for (i = 0; i < 256; i++) { oa[i] = 0.0f; ob[i] = 0.0f; }
+        wv_render(&a, &bk, oa, 256, 4096.0f);
+        wv_render(&b, &bk, ob, 256, 4096.0f);
+        if (k > 40) {               /* past the attack and the first LFO cycle */
+            double la = rms_of(oa, 256), lb = rms_of(ob, 256);
+            double d = 0.0;
+            for (i = 0; i < 256; i++)
+                d += fabs((double)oa[i] - (double)ob[i]);
+            if (la > 1e-9) {
+                ra += la;
+                rb += lb;
+                if (d / 256.0 / la > worst_rel)
+                    worst_rel = d / 256.0 / la;
+            }
+        }
+    }
+    printf("  level ratio %.3f, worst mean |diff| / rms %.3f\n",
+           ra > 0.0 ? rb / ra : 0.0, worst_rel);
+    /* The frames are normalised to the same peak, so a pure morph moves the shape and
+     * leaves the level within a few dB -- the same property AMOUNT has (spec 5c). */
+    ck(ra > 0.0 && rb / ra > 0.75 && rb / ra < 1.33, "the level stays within 2.5 dB");
+    ck(worst_rel > 0.10, "but the waveform's shape really changes");
+}
+
+/* Two routes, two amounts: a MORPH amount with the CUT depth at zero must not sweep the
+ * filter, and a CUT depth with the MORPH amount at zero must not sweep the frames. This is
+ * the whole reason the amount is its own byte, and it is the assertion that would fail if
+ * someone "simplified" the two into one DEPTH. */
+static void test_morph_and_cut_amounts_are_independent(void)
+{
+    static wv_state cut_only, morph_only, neither;
+    static float o[256];
+    wv_bank bk = { WV_BANKS[0] };
+    double cut_lo = 1e9, cut_hi = 0.0, mor_lo = 1e9, mor_hi = 0.0;
+    uint32_t k, i;
+
+    wv_init(&neither);
+    neither.cut = 40;
+    neither.res = 90;
+    neither.morph = 0;
+
+    cut_only = neither;
+    cut_only.lfo_rate = 95;
+    cut_only.lfo_depth = 90;        /* CUT swept, MORPH not */
+
+    morph_only = neither;
+    morph_only.lfo_rate = 95;
+    morph_only.morph_mod = 127;     /* MORPH swept, CUT not */
+
+    wv_note_on(&neither, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&cut_only, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&morph_only, 60, 100, 261.63f / 44100.0f);
+
+    for (k = 0; k < 300; k++) {
+        double r;
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&cut_only, &bk, o, 256, 4096.0f);
+        if (k > 15) { r = rms_of(o, 256); if (r < cut_lo) cut_lo = r; if (r > cut_hi) cut_hi = r; }
+
+        for (i = 0; i < 256; i++) o[i] = 0.0f;
+        wv_render(&morph_only, &bk, o, 256, 4096.0f);
+        if (k > 15) { r = rms_of(o, 256); if (r < mor_lo) mor_lo = r; if (r > mor_hi) mor_hi = r; }
+    }
+    printf("  cut route level %.4f..%.4f, morph route level %.4f..%.4f\n",
+           cut_lo, cut_hi, mor_lo, mor_hi);
+    ck(cut_only.lfo_depth > 0 && (cut_hi - cut_lo) / cut_hi > 0.30,
+       "the CUT depth alone moves the level");
+    ck(morph_only.morph_mod > 0 && (mor_hi - mor_lo) / mor_hi < 0.15,
+       "the MORPH amount alone does not move the filter");
+}
+
+
 
 static void test_lfo_sweeps_cut(void)
 {
@@ -917,6 +1120,10 @@ int main(void)
     test_lfo_rate_map();
     test_lfo_sweeps_cut();
     test_lfo_sweeps_both_ways();
+    test_morph_mod_off_is_no_change();
+    test_morph_mod_travel();
+    test_morph_mod_changes_timbre_not_level();
+    test_morph_and_cut_amounts_are_independent();
     test_foff_matches_rotation();
     test_foff_spreads_the_morph();
     test_foff_reaches_the_renderer();

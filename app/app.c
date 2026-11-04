@@ -142,13 +142,14 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
  * is one line here plus its branch, and the button already knows how to walk to it. */
 #define lfo_main   (page == PAGE_LFO && page_no == 1)
 #define lfo_fx     (page == PAGE_LFO && page_no == 2)
+#define lfo_mod    (page == PAGE_LFO && page_no == 3)
 
 /* How many screens each page has. A page not listed here has one, which is what
  * PAGE_SCREENS falls back to -- ENV and ARP are one and will stay one. */
 static const uint8_t PAGE_SCREENS[] = {
     [PAGE_VOICE] = 1,  /* one screen until the second VCO exists, then it rounds */
     [PAGE_ENV]  = 1,
-    [PAGE_LFO]  = 2,   /* rate/depth, then the filter's tap and tracking */
+    [PAGE_LFO]  = 3,   /* rate/depth, the filter's tap and tracking, what else it moves */
     [PAGE_ARP]  = 1,
     [PAGE_FX]   = 1,   /* reserved: the effects page (reverb/delay/chorus) */
     [PAGE_EDIT] = 1,   /* per source; GRAN will add screens of its own */
@@ -254,6 +255,11 @@ static const uint8_t KT_VALUES[5] = { 0, 25, 50, 75, 100 };
 #define KT_STEPS 5
 static uint8_t kt_index(uint8_t pct); /* the detent for a setting, defined with the table */
 static uint8_t k_morph = 0;
+/* MORPH's modulation amount, from the same LFO. Its own byte rather than CUT's DEPTH:
+ * one LFO feeding two parameters from one amount makes a filter sweep add a wavetable
+ * sweep, and the page would have no way to say so. Lives on the LFO page's second
+ * screen, where the LFO's other per-route settings already are. */
+static uint8_t k_morph_mod = 0;
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
  * encoder) so that every other knob stays where it is in every mode. */
 static uint8_t k_grain = 64;      /* 0..127: 10..200 ms */
@@ -610,6 +616,7 @@ static void ui_apply(void)
     dsp.ftype = k_ftype;
     dsp.ktrack = k_ktrack;
     dsp.morph = k_morph;
+    dsp.morph_mod = k_morph_mod;
     dsp.grain_size = k_grain;
     dsp.spray = k_spray;
     dsp.eg_a = k_eg_a;
@@ -1336,6 +1343,9 @@ static void input(void)
             i = (uint8_t)((i + (e > 0 ? 1 : KT_STEPS - 1)) % KT_STEPS);
             k_ktrack = KT_VALUES[i];
         }
+        /* K4 on screen 3. Screen 1 already owns CUT's DEPTH on this same encoder, and the
+         * two are separate bytes so a filter sweep does not drag the wavetable with it. */
+        else if (lfo_mod)   k_morph_mod = (uint8_t)clamp((int32_t)k_morph_mod + e * 4, 0, 127);
         else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
@@ -1849,6 +1859,22 @@ static char *lfo_depth_text(uint8_t v)
     b[2] = '.';
     b[3] = (char)('0' + t % 10);
     b[4] = 0;
+    return b;
+}
+
+/* MORPH's modulation, in FRAMES rather than percent: the travel is 0..7 frames and the
+ * span is what the ear hears, so it is the number worth printing. One decimal, because a
+ * span of 3.5 frames is a real setting and 3 or 4 is not the same sweep. */
+static char *morph_mod_text(uint8_t v)
+{
+    static char ring[2][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 2];
+    int32_t t = (int32_t)((float)v / 127.0f * (float)(WV_FRAMES - 1u) * 10.0f + 0.5f);
+    b[0] = (char)('0' + t / 10);
+    b[1] = '.';
+    b[2] = (char)('0' + t % 10);
+    b[3] = 0;
     return b;
 }
 
@@ -4133,6 +4159,28 @@ void app_frame(void)
          * they were allowed to disagree. */
         knob(178, KNOB_TOP, 54, "KEY TRK", ktrack_text(k_ktrack),
              (int32_t)k_ktrack * 127 / 100, 1);
+    } else if (lfo_mod) {
+        /* The LFO's THIRD SCREEN: what else the same LFO moves.
+         *
+         * CUT and RES stay on K1 and K2 for the third time, for the reason screen 2
+         * already gives -- a screen that moved the filter would disagree with the other
+         * two about where the filter lives. The other two knobs are the routes the
+         * instrument has today: CUT's depth (which screen 1 owns and this one repeats,
+         * because a route page that hid the route it was building on would be odd) and
+         * MORPH's own amount.
+         *
+         * Both routes print their amount the way their destination is measured: DEPTH in
+         * octaves (the filter is exponential), MORPH in FRAMES (the travel is 0..7 frames,
+         * and "3.5" says more than "50 %" about the thing that will be heard).
+         *
+         * The labels are the destination's name, one word each, because screen 1 already
+         * establishes that a route's amount is called DEPTH and a 54 px cell holds six
+         * letters at this font ("MORPH MD" measured 51 of 54 px -- no slack for a second
+         * word, and an abbreviation is not a label). */
+        knob(4,   KNOB_TOP, 54, "CUT",     pct(k_cut), k_cut, 0);
+        knob(62,  KNOB_TOP, 54, "RES",     pct(k_res), k_res, 0);
+        knob(120, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
+        knob(178, KNOB_TOP, 54, "MORPH", morph_mod_text(k_morph_mod), k_morph_mod, 1);
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
@@ -4402,6 +4450,7 @@ int app_expect(const char *what, int *got)
     }
     if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
+    if (!strcmp(what, "morph_mod"))  { *got = k_morph_mod; return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
     /* The EDIT page's own numbers. A picture can be right about a region the engine
@@ -4649,6 +4698,7 @@ static void save_snapshot(save_rec *r)
     r->eg_r = k_eg_r;
     r->lfo_rate = k_lfo_rate;
     r->lfo_depth = k_lfo_depth;
+    r->morph_mod = k_morph_mod;
     r->ftype = k_ftype;
     r->ktrack = k_ktrack;
     r->arp_rate = k_arp_rate;
@@ -4696,6 +4746,7 @@ static void save_apply(const save_rec *r)
     k_eg_r = r->eg_r;
     k_lfo_rate = r->lfo_rate;
     k_lfo_depth = r->lfo_depth;
+    k_morph_mod = r->morph_mod;
     k_ftype = r->ftype;
     k_ktrack = r->ktrack;
     k_arp_rate = r->arp_rate;

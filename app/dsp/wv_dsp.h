@@ -118,6 +118,15 @@ typedef struct {
      */
     uint8_t  ktrack;       /* 0, 25, 50, 75, 100 */
     float    lfo_ph;       /* 0..1 */
+    /* MORPH's own modulation amount, 0..127, as a fraction of the bank's full travel in
+     * frames. It is a separate byte from the CUT depth above on purpose: the panel has
+     * one DEPTH knob and one LFO, and a modulation that moves the corner AND the wavetable
+     * position from a single amount is a knob doing something its label does not say.
+     * Separate amounts make the routes independent, and the panel can then give MORPH a
+     * screen of its own when it has one (spec 5c3).
+     *
+     * The sweep is UNIPOLAR -- the knob is the bottom of the travel (see morph_mod). */
+    uint8_t  morph_mod;    /* 0..127; 0 leaves MORPH exactly as the knob set it */
 } wv_state;
 
 /* ─── the VCA envelope ────────────────────────────────────────────────────── */
@@ -269,6 +278,12 @@ uint32_t wv_active(const wv_state *s);
 /* The LFO's rate in Hz for a panel value 0..127 (0 = off). Exposed so the panel can
  * print the rate instead of a percentage: "0.4 Hz" is a rate, "37" is not. */
 float wv_lfo_hz(uint32_t v127);
+/* The LFO's raw value for the current phase, in -1..1, and 0 when the rate is 0.
+ *
+ * Exposed because two routes now read the same waveform (CUT via lfo_cut_scale, MORPH via
+ * morph_mod) and a test that re-derived the sine itself would be asserting its own copy of
+ * the arithmetic rather than the DSP's. What is NOT exposed is how either route scales it. */
+float wv_sine(const wv_state *s);
 
 /* The filter's tap. LP is the default and the only one this app had; HP and BP are the
  * two the SVF was already computing and throwing away. */

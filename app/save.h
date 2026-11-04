@@ -11,7 +11,11 @@
 #include "plat.h"
 
 #define SAVE_MAGIC    0x57415645u          /* "WAVE", the same word APP_BACKUP_MAGIC uses */
-#define SAVE_VERSION  1u
+/* 2: the record gained `morph_mod` (spec 5c3), so a version-1 record's bytes would be read
+ * one field out of register and every knob after it would land on the wrong parameter.
+ * The version gate is what makes that a refused load with the defaults booting, instead of
+ * an instrument that comes back sounding wrong for no visible reason. */
+#define SAVE_VERSION  2u
 #define SAVE_SLOTS    8                    /* == SMP_MAX in app.c */
 #define SAVE_BANKS    8                    /* == WV_BANK_COUNT */
 
@@ -31,6 +35,10 @@ typedef struct {
     uint8_t  grain, spray;
     uint8_t  eg_a, eg_d, eg_s, eg_r;
     uint8_t  lfo_rate, lfo_depth;
+    /* MORPH's own modulation amount (spec 5c3). Its own byte rather than a share of
+     * lfo_depth: one LFO feeding two parameters from one amount makes a filter sweep add
+     * a wavetable sweep silently. Added in version 2 -- see SAVE_VERSION. */
+    uint8_t  morph_mod;
     /* the filter's tap and how far its corner follows the note. Both live in the
      * single-byte parameter run, so save_changes() counts each as one group without
      * being told. */

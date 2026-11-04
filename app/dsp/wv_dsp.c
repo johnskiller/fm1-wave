@@ -50,15 +50,67 @@ static float lfo_oct(uint32_t v127)
 
 /* The LFO's value for this block: a sine in -1..1, and 1.0 (no modulation) when it is
  * off. CUT is scaled by 2^(value * depth), so the depth is symmetric in octaves. */
-static float lfo_cut_scale(const wv_state *s)
+float wv_sine(const wv_state *s)
 {
-    if (s->lfo_rate == 0 || s->lfo_depth == 0)
-        return 1.0f;
+    if (s->lfo_rate == 0)
+        return 0.0f;
     /* fm_sin_pi takes RADIANS on [-pi, pi], not a 0..1 phase -- the same mistake
      * fixed at line 139 for the shaper. Without the 2*pi the LFO never leaves the
      * positive half: sin() only walks 0..1 rad, so the filter opened and closed on a
      * one-radian turn and the down-swing was missing entirely. */
-    return fm_exp2f(fm_sin_pi(s->lfo_ph * FM_TWO_PI) * lfo_oct(s->lfo_depth));
+    return fm_sin_pi(s->lfo_ph * FM_TWO_PI);
+}
+
+static float lfo_cut_scale(const wv_state *s)
+{
+    if (s->lfo_rate == 0 || s->lfo_depth == 0)
+        return 1.0f;
+    return fm_exp2f(wv_sine(s) * lfo_oct(s->lfo_depth));
+}
+
+/* MORPH's share of the same LFO, in frames, for this block.
+ *
+ * The bias makes the sweep UNIPOLAR: the knob's position is the BOTTOM of the sweep and
+ * the LFO only ever moves the morph upward, so the frame pair the player dialled in is
+ * always one of the two frames being heard. A bipolar sweep would reach below the knob,
+ * and since MORPH's travel is only 0..7 frames, a knob at 0 with any depth would spend
+ * half its cycle clamped at frame 0 -- the sweep would be a clipped half-cycle rather
+ * than a sweep. Unipolar costs nothing and is what the knob's own meaning suggests.
+ *
+ * The clamping to 0..WV_FRAMES-1 happens here so wv_frames_at does not have to (it
+ * clamps too, for the callers that pass a raw position).
+ *
+ * The amount comes from the page (§5c3): the panel has ONE DEPTH knob and CUT already
+ * owns it, so MORPH gets its own amount rather than a share of CUT's. Sharing would make
+ * dialling a filter sweep silently add a wavetable sweep, which is a control doing
+ * something its label does not say. */
+static float morph_mod(const wv_state *s)
+{
+    float m, span;
+
+    if (s->lfo_rate == 0 || s->morph_mod == 0)
+        return 0.0f;
+    m = (wv_sine(s) + 1.0f) * 0.5f;                  /* 0..1, unipolar */
+    span = u7_to_f(s->morph_mod) * (float)(WV_FRAMES - 1u);
+    return m * span;
+}
+
+/* The morph position a voice reads this block: the knob plus the modulation, clamped to
+ * the bank's travel.
+ *
+ * There is deliberately NO smoother on this. A one-pole here would make a direct write to
+ * s->morph lag by a block or two, and the existing contract -- MORPH does not move inside
+ * a block, so the frame pair is resolved once per block -- is what the block hoist above
+ * depends on. Modulation does not need one either: it is recomputed per block from a sine
+ * that is already continuous, so it cannot step. */
+static float morph_pos(const wv_state *s)
+{
+    float p = u7_to_f(s->morph) * (float)(WV_FRAMES - 1u) + morph_mod(s);
+    if (p < 0.0f)
+        return 0.0f;
+    if (p > (float)(WV_FRAMES - 1u))
+        return (float)(WV_FRAMES - 1u);
+    return p;
 }
 
 /* KEY TRACKING: the corner's multiplier for one note.
@@ -387,6 +439,8 @@ void wv_init(wv_state *s)
      * read, and 0 % tracking is the corner the CUT knob always meant. */
     s->ftype = WV_FTYPE_LP;
     s->ktrack = 0;
+    /* MORPH unmodulated: a patch made before the route existed sounds the same after it. */
+    s->morph_mod = 0;
 }
 
 /* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
@@ -672,7 +726,7 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
                        float master, uint32_t from, uint32_t to)
 {
     uint32_t i, k;
-    float mf = u7_to_f(s->morph) * (float)(WV_FRAMES - 1u);
+    float mf = morph_pos(s);
     /* The frame pair, resolved once per block instead of once per sample: MORPH does
      * not move inside a block, and recomputing the pair for every sample was 12-16% of
      * the read path (measured). wv_frames_at is the same arithmetic wv_table_read

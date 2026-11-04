@@ -156,6 +156,9 @@ tap LFO
 turn K3 7
 turn K4 5
 tap LFO
+tap LFO
+turn K4 3
+tap LFO
 tap ARP
 turn K1 2
 turn K2 1
@@ -172,6 +175,7 @@ expect eg_d 76
 expect eg_s 119
 expect lfo_rate 28
 expect lfo_depth 20
+expect morph_mod 12
 expect arp_rate 8
 expect arp_type 1
 expect arp_oct 2
@@ -179,7 +183,7 @@ expect arp_gate 52
 """, "all_knobs")
 for what, want in [("cut", 111), ("res", 24), ("shape", 1), ("amount", 8),
                    ("eg_d", 76), ("eg_s", 119), ("lfo_rate", 28), ("lfo_depth", 20),
-                   ("arp_rate", 8), ("arp_type", 1), ("arp_oct", 2), ("arp_gate", 52)]:
+                   ("morph_mod", 12), ("arp_rate", 8), ("arp_type", 1), ("arp_oct", 2), ("arp_gate", 52)]:
     ok(probe(out, what) == want, f"{what} survived the reboot")
 
 # ── 6. the region and its loop, per slot ────────────────────────────────────────
@@ -258,6 +262,16 @@ ok(probe(out, "cut") == 127, "and the defaults boot instead of that record's val
 
 out = run("""
 plant 1
+reboot
+expect saved 0
+expect cut 127
+""", "plant_v1_record")
+ok(probe(out, "saved") == 0,
+   "a version-1 record is refused: the layout gained morph_mod, so its bytes are off by one field")
+ok(probe(out, "cut") == 127, "and the defaults boot instead of that record's values")
+
+out = run("""
+plant 2
 reboot
 expect saved 1
 expect cut 3
