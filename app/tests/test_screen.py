@@ -415,10 +415,13 @@ shot grn.png
        "screen 1's K4 still sets DEPTH, not a route amount")
     ck(expect("tap LFO\ntap LFO\nturn ALGO 10\n", "amt_morph", 0),
        "ALGO has no route in SYNTH, so turning it moves nothing there")
-    ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
-       "SELECT is MORPH's amount, which is the route the DSP gained")
-    ck(expect("tap LFO\ntap LFO\nturn PRESET 10\n", "amt_pitch", 40),
-       "PRESET is PITCH")
+    # PITCH is SELECT in all three sources (player, this session: the one destination every
+    # source has must not be the one ring that moves when the source changes), so SYNTH's
+    # MORPH -- which only SYNTH and nothing else can route -- sits at PRESET.
+    ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_pitch", 40),
+       "SELECT is PITCH in SYNTH")
+    ck(expect("tap LFO\ntap LFO\nturn PRESET 10\n", "amt_morph", 40),
+       "and PRESET is MORPH, which is the route the DSP gained")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "bank", 0),
        "and turning SELECT there does not change the bank")
     # RATE on K3 is one byte across both screens: screen 2 repeats it so a player can dial
@@ -475,9 +478,9 @@ shot grn.png
        "and LFO 1's rate is still 0")
     ck(expect("tap LFO\nturn K3 8\ntap REC\n", "lfo_rate2", 0),
        "turning LFO 1's rate does not reach LFO 2")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
-       "the route table follows REC: SELECT is LFO 2's MORPH amount")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\ntap REC\n", "amt_morph", 0),
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_pitch", 40),
+       "the route table follows REC: SELECT is LFO 2's PITCH amount")
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\ntap REC\n", "amt_pitch", 0),
        "and the same knob on LFO 1's table is a different amount")
     # REC's lamp is the only panel signal for which LFO is selected, so it is asserted
     # rather than assumed: lit for LFO 2 and dark for LFO 1.

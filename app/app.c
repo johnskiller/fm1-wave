@@ -317,7 +317,13 @@ static uint8_t k_morph = 0;
  *
  *   SYNTH  wave + shaper + filter: no cloud, so no GRAIN/SPRAY
  *   SMPL   a sample reads no wavetable frame, so no MORPH, and has no cloud
- *   GRAN   a cloud never reaches wv_table_read, so no MORPH; everything else lives
+ *   GRAN   a cloud never reaches wv_table_read, so no MORPH
+ *
+ * PITCH IS AT THE SAME PLACE IN ALL THREE (SELECT). It was at PRESET on SYNTH and at ALGO on
+ * GRAN, which made the one destination every source has the one ring that moved when the
+ * source changed -- the opposite of what a table is for (player, this session). Fixing it at
+ * SELECT also puts the most-used route first in the row, in the encoder order a hand already
+ * knows from every other page.
  *
  * CUT, RES and SHAPE are at K1, K2 and K4 in every source -- the parameters the instrument
  * always has. SHAPE is at K4 rather than K3 because K3 is RATE here; the same three are at
@@ -327,10 +333,10 @@ static uint8_t k_morph = 0;
  * A slot the source does not have draws as a dim OFF ring, not an empty hole: a hole is a
  * knob that looks broken, and OFF says "not in this source". */
 static const uint8_t ROUTE_ORDER[3][ROUTE_SLOTS] = {
-    /* K1            K2             K4              SELECT          PRESET          ALGO */
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_PITCH, ROUTE_NONE },
+    /* K1            K2             K4              SELECT         PRESET         ALGO */
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, WV_DEST_MORPH, ROUTE_NONE },
     { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, ROUTE_NONE,    ROUTE_NONE },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_GRAIN, WV_DEST_SPRAY, WV_DEST_PITCH },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, WV_DEST_GRAIN, WV_DEST_SPRAY },
 };
 
 /* the slot's destination for a source, or ROUTE_NONE */
@@ -4082,15 +4088,64 @@ void app_frame(void)
      * ring's centre is an argument for knob_at and a constant for knob_c. */
     if (lfo_mod) {
         int32_t i;
+
+        /* HEADER: which LFO, and what these rings are.
+         *
+         * The first version put this in the page-caption row under the band, and the table's
+         * own full-band cover erased it -- so what the player saw was seven rings and no word
+         * saying which modulator they belonged to (player, this session). The scope's corner
+         * is where the debug rows live, so that is no place for it either. The band's own top
+         * left is: while this screen is up the band IS the page.
+         *
+         * "LFO 1" then "ROUTES": the second word is what tells a first-time player that the
+         * six rings are modulation AMOUNTS and not the destinations' own values. Dim, like
+         * the caption it replaces, so it does not compete with the rings. */
+        {
+            const char *cap = lfo_edit ? "LFO 2" : "LFO 1";
+            cv_text(MAT_X0 + 2, 1, &FONT_XS, cap, sk.ink);
+            cv_text(MAT_X0 + 2 + txt_w(cap) + 6, 1, &FONT_XS, "ROUTES", dim(sk.ink, 1, 4));
+        }
+
+        /* The three rings above the band get their ENCODER's name as well as their
+         * destination's, on one row: K1..K4 under the band need no such help, because the
+         * four rings there sit in the same four places every screen uses, so the position is
+         * the label (player, this session). SELECT / PRESET / ALGO have no such convention --
+         * nothing else draws a ring in those three places -- so each says which encoder it
+         * is. The two names share a row because the band is 92 px and three stacked lines
+         * plus a 41 px ring do not fit; "SELECT" at 32 px and the widest destination,
+         * "SHAPE", at 30, fit side by side inside one 76 px cell. */
+        {
+            static const char *const ENC_NAME[3] = { "SELECT", "PRESET", "ALGO" };
+            uint16_t encc = dim(sk.ink, 1, 4);
+
+            for (i = 0; i < 3; i++) {
+                int32_t cx = 44 + i * 76;
+                uint8_t d = route_dest(src, (uint8_t)(3 + i));
+                int32_t ew = txt_w(ENC_NAME[i]);
+                int32_t nw = (d == ROUTE_NONE) ? 0 : txt_w(DEST_NAME[d]);
+                /* centred as a pair: "SELECT MORPH" reads as one label */
+                int32_t x0 = cx - (ew + (nw ? nw + 4 : 0)) / 2;
+
+                cv_text(x0, 12, &FONT_XS, ENC_NAME[i], encc);
+                if (nw)
+                    cv_text(x0 + ew + 4, 12, &FONT_XS, DEST_NAME[d], sk.ink);
+            }
+        }
+
+        /* The rings sit at 52: 12 + 9 of text above them, then the ring's own name at 20,
+         * then 47 px of ring. 52 + 23 = 75, inside the band's 92. */
         for (i = 0; i < 3; i++) {
             uint8_t slot = (uint8_t)(3 + i);          /* 3 SELECT, 4 PRESET, 5 ALGO */
             uint8_t d = route_dest(src, slot);
             int32_t cx = 44 + i * 76;
 
+            /* knob_at draws the destination's name above the ring, which is where it belongs
+             * when there is no encoder name to carry; here the row above already says
+             * "SELECT MORPH", so the ring passes an empty name and the value does the work. */
             if (d == ROUTE_NONE)
-                route_absent(cx, 54);
+                route_absent(cx, 52);
             else
-                knob_at(cx, 54, DEST_NAME[d], dest_text(d, lfo_amt[lfo_edit][d]),
+                knob_at(cx, 52, "", dest_text(d, lfo_amt[lfo_edit][d]),
                         (int32_t)lfo_amt[lfo_edit][d], 1);
         }
         /* The band is its own blit and cv_blit ends it, so the rest of this block -- the
