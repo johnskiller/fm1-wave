@@ -390,8 +390,8 @@ shot grn.png
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "pressing LFO again goes to screen 2")
     # Round, not stop: the page button is the only way to walk a page's screens, so the
     # last one cannot be a dead end (player, this session).
-    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
-       "and a third press wraps 2 -> 1: the LFO page is two screens again")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3),
+       "and a third press is LFO 2's first screen, not a wrap")
     # ── the LFO's second screen: the route table (spec 5c3) ──────────────────
     # Screen 2 is seven rings: six destinations plus K3's RATE. K1 K2 K4 and
     # SELECT/PRESET/ALGO are the routes; which destination sits in a slot depends on the
@@ -484,20 +484,53 @@ shot grn.png
     # The player's own shape for this: a key that switches and a lamp that says which.
     # What must hold is that the two are INDEPENDENT -- a shared rate or a shared amount
     # would make the second LFO a copy, which is not modulation.
-    ck(expect("tap REC\n", "lfo_edit", 1), "REC selects LFO 2")
-    ck(expect("tap REC\ntap REC\n", "lfo_edit", 0), "and REC again goes back to LFO 1")
-    ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate2", 32),
-       "with LFO 2 selected, screen 1's K3 sets LFO 2's rate")
-    ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate1", 0),
-       "and LFO 1's rate is still 0")
-    ck(expect("tap LFO\nturn K3 8\ntap REC\n", "lfo_rate2", 0),
-       "turning LFO 1's rate does not reach LFO 2")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
-       "the route table follows REC: SELECT is LFO 2's MORPH amount")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\ntap REC\n", "amt_morph", 0),
-       "and the same knob on LFO 1's table is a different amount")
-    # REC's lamp is the only panel signal for which LFO is selected, so it is asserted
-    # rather than assumed: lit for LFO 2 and dark for LFO 1.
+    # ── the LFO page walks itself: four screens, two per LFO ───────────────────
+    # REC used to select LFO 1 / LFO 2 and that was a defect against the page model
+    # (player, 2026-11-04): a button's meaning belongs to the panel, not to the screen.
+    # B_LFO's own button now walks all four screens, so the same gesture reaches both LFOs
+    # and there is no hidden selector that can disagree with what is drawn.
+    ck(expect("tap LFO\n", "page_no", 1), "LFO opens on screen 1, LFO 1's rate")
+    ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "a second press is LFO 1's route table")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3), "a third is LFO 2's rate")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 4),
+       "a fourth is LFO 2's route table")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
+       "and a fifth rounds back to LFO 1")
+    # which LFO a screen writes follows from the screen, not from a stored byte
+    ck(expect("tap LFO\nturn K3 8\n", "lfo_rate1", 32), "screen 1's K3 is LFO 1's rate")
+    ck(expect("tap LFO\nturn K3 8\n", "lfo_rate2", 0), "and it does not touch LFO 2")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 8\n", "lfo_rate2", 32),
+       "screen 3's K3 is LFO 2's rate")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 8\n", "lfo_rate1", 0),
+       "and it does not touch LFO 1")
+    ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "screen 2's SELECT is LFO 1's MORPH amount")
+    ck(expect("tap LFO\ntap LFO\n\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "screen 4's SELECT is LFO 2's MORPH amount, same slot")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\nturn SELECT 10\ntap HOME\ntap LFO\ntap LFO\n",
+              "route3", 3),
+       "and screen 2 still points SELECT at MORPH after the round trip")
+    # REC is free: it must not change which LFO the page writes
+    ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate1", 32),
+       "REC no longer selects an LFO")
+    ck(expect("tap LFO\n", "lfo_edit", 0), "lfo_edit is a property of the screen, not a byte")
+    # ── B_SEL must mean the same thing on every screen of the page ──────────────
+    # It did not: the route table took the knobs and then `return`ed out of update(), which
+    # skipped every button handler below it -- B_SEL's among them. So the same key switched
+    # source on screen 1 and did nothing on screen 2 (player, 2026-11-04: "第一页可以用SEL切换
+    # source，但是第二页就不能切换了，动作不一致"). A screen may borrow the KNOBS, because it
+    # covers the picture they belong to; it may not borrow the BUTTONS, because a button's
+    # meaning is the panel's.
+    ck(expect("tap LFO\ntap SEL\n", "src", 1), "SEL switches source on screen 1")
+    ck(expect("tap LFO\ntap LFO\ntap SEL\n", "src", 1), "SEL switches source on screen 2")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap SEL\n", "src", 1),
+       "SEL switches source on LFO 2's first screen")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\ntap SEL\n", "src", 1),
+       "SEL switches source on LFO 2's route table")
+    ck(expect("tap LFO\ntap LFO\ntap SEL\ntap SEL\ntap SEL\n", "src", 0),
+       "and three presses round SYNTH -> SMPL -> GRAN -> SYNTH")
+    ck(expect("tap LFO\ntap LFO\ntap SEL\n", "page_no", 2),
+       "and switching source does not close the page under the player")
     def leds(script):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(script + "\nleds\n")
@@ -509,8 +542,8 @@ shot grn.png
             os.unlink(path)
         return r.stdout
 
-    ck("REC" in leds("tap REC\n"), "REC's lamp is lit while LFO 2 is selected")
-    ck("REC" not in leds(""), "and dark for LFO 1")
+    ck("REC" not in leds("tap LFO\ntap LFO\ntap LFO\n"),
+       "REC stays dark on LFO 2's screens too")
     ck("LFO" in leds("tap LFO\ntap LFO\n"), "B_LFO is solid on its own page")
     ck(expect("tap LFO\ntap LFO\ntap HOME\n", "lfo", 0),
        "HOME closes it from screen 2")

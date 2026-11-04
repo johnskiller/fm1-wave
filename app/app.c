@@ -145,8 +145,30 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
  * The filter's own settings (TYPE, KEY TRK) used to live on screen 2. They moved to
  * B_GLO's page, which is what they are: how the FILTER works, for every voice at once,
  * not one LFO's business. See PAGE_GLO below. */
-#define lfo_main   (page == PAGE_LFO && page_no == 1)
-#define lfo_mod    (page == PAGE_LFO && page_no == 2)
+/* The LFO page is FOUR screens: LFO 1's two, then LFO 2's two.
+ *
+ * It was two screens with B_REC as a selector between the two LFOs, and that was wrong for
+ * the reason the page model exists: a button's meaning belongs to the panel, not to
+ * whichever screen happens to be up (player, 2026-11-04: "用REC切换LFO1/LFO2，不符合我们的设计
+ * 原则，应该是再按一次B_LFO进入page3"). REC's own job is recording; lending it to a page made
+ * the same key mean two things depending on where you were.
+ *
+ * Walking the page with its own button is the rule every other page follows, and it needs
+ * no extra key: LFO's button already cycles 1 -> 2 -> 1. Now it cycles 1 -> 2 -> 3 -> 4 -> 1,
+ * which is the same gesture with the same hand, and each screen still says which LFO it is.
+ *
+ *   screen 1  LFO 1  rate/depth (the CUT route)
+ *   screen 2  LFO 1  the route table
+ *   screen 3  LFO 2  rate/depth
+ *   screen 4  LFO 2  the route table
+ *
+ * So lfo_edit is not a panel byte any more -- it is a function of which screen is up. That
+ * is the whole point: there is no hidden selector that can disagree with the screen, and no
+ * lamp that has to explain it. */
+#define lfo_page1  (page == PAGE_LFO && page_no == 1)
+#define lfo_page3  (page == PAGE_LFO && page_no == 3)
+#define lfo_main   (lfo_page1 || lfo_page3)
+#define lfo_mod    ((page == PAGE_LFO) && (page_no == 2 || page_no == 4))
 
 /* B_GLO's page: the settings that are true of the whole instrument.
  *
@@ -164,7 +186,7 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
 static const uint8_t PAGE_SCREENS[] = {
     [PAGE_VOICE] = 1,  /* one screen until the second VCO exists, then it rounds */
     [PAGE_ENV]  = 1,
-    [PAGE_LFO]  = 2,   /* rate/depth, then what it modulates */
+    [PAGE_LFO]  = 4,   /* LFO 1 rate, LFO 1 routes, LFO 2 rate, LFO 2 routes */
     [PAGE_ARP]  = 1,
     [PAGE_FX]   = 1,   /* reserved: the effects page (reverb/delay/chorus) */
     [PAGE_EDIT] = 1,   /* per source; GRAN will add screens of its own */
@@ -266,11 +288,9 @@ static uint8_t lfo_amt[WV_LFOS][WV_DESTS];
 static uint8_t lfo_shape[WV_LFOS];            /* WV_LFOSH_*, 0 (SINE) by default */
 static uint8_t lfo_sync[WV_LFOS];             /* 0 = Hz, 1 = note division */
 static uint8_t lfo_trig[WV_LFOS] = { WV_LFO_FREE, WV_LFO_FREE };
-/* Which LFO the page is showing. B_REC switches it, and REC's lamp says which one is up
- * (see the lights block): a red lamp is not available -- only PLAY has a second, green
- * LED and only PLAY can be told to go red -- so the page says LFO 1/LFO 2 in words and
- * REC is lit while LFO2 is selected. */
-static uint8_t lfo_edit = 0;
+/* Which LFO the page is showing, derived from the screen -- see the note on lfo_page1.
+ * Screens 1 and 2 are LFO 1, screens 3 and 4 are LFO 2. */
+#define lfo_edit   ((page_no >= 3) ? 1u : 0u)
 #define K_LFO_DEPTH(i)  (lfo_amt[i][WV_DEST_CUT])
 #define K_MORPH_MOD(i)  (lfo_amt[i][WV_DEST_MORPH])
 
@@ -362,7 +382,14 @@ static uint8_t route_dest(uint8_t source, uint8_t slot)
 /* the same, in the form the host probe prints: -1 for a slot the source does not have */
 static int route_or_minus1(uint8_t source, uint8_t slot)
 {
-    uint8_t d = route_dest(source, slot);
+    /* The host probe still offers route6 -- it did for one round when there were seven
+     * destinations -- so a slot past the table answers -1 rather than reading past the
+     * end. The probe is a test hook, but a test hook that reads out of bounds is a
+     * warning in every build and a real read of whatever follows the array. */
+    uint8_t d;
+    if (slot >= ROUTE_SLOTS)
+        return -1;
+    d = route_dest(source, slot);
     return d == ROUTE_NONE ? -1 : (int)d;
 }
 
@@ -1345,25 +1372,49 @@ static void input(void)
         page_press(PAGE_GLO);
     if (btn_pressed(btn, B_LFO))
         page_press(PAGE_LFO);
-    /* B_REC: which of the two LFOs the page shows.
+
+    /* SOURCE: SYNTH reads the wavetable, SMPL reads the sample pool, GRAN reads it as
+     * a cloud. This is the one switch that changes what a key does, so it lives next
+     * to the keys.
      *
-     * REC had no job -- the FM-1 has no recorder, and the panel map lists it among the free
-     * buttons -- so it became a selector rather than a page. It switches on every press,
-     * whether the LFO page is up or not, because both useful readings of "the other LFO"
-     * are the same state, and REC's lamp says which one it is. Pressing it with the page
-     * closed changes which LFO the next visit shows; that is not a hidden mode, it is a
-     * setting the lamp reports.
-     *
-     * A page of its own was the alternative and it is worse: the two LFOs are the same
-     * object with the same seven rings, so a second page would be this page twice, and the
-     * player's own proposal -- a key that switches, plus a lamp -- costs one button and no
-     * screen space. */
-    if (btn_pressed(btn, B_REC)) {
-        lfo_edit = (uint8_t)((lfo_edit + 1u) % WV_LFOS);
-        app_note(lfo_edit ? "LFO 2" : "LFO 1");
+     * It was on EN_SELECT as a detented stop in the spec, and moved here when the
+     * sample path needed a switch and B_ENV's page did not exist yet. Both are now
+     * true at once -- the page exists and SOURCE is on B_SEL -- and that is the
+     * better arrangement: a three-state switch on a button plus an on-screen
+     * indicator uses one button, while a detented encoder for the same thing spends
+     * a knob that GRAN needs for SPRAY. The screen, not the button's lamp, says which
+     * source is live; a lamp can only say on or off, and there are three. */
+    if (btn_pressed(btn, B_SEL)) {
+        src = (uint8_t)((src + 1u) % 3u);
+        /* Leaving SMPL leaves EDIT. THE PAGE BELONGS TO THE SOURCE, not to the panel.
+         *
+         * Without this, opening EDIT in SMPL and then switching SOURCE left `edit_page`
+         * set on a source that has no EDIT page at all, and the flag is read all over the
+         * screen: on GRAN the bottom-right corner printed ZOOM instead of GRAIN, the four
+         * knobs below became START / LOOP S / LOOP E / END instead of CUT / RES / SHAPE /
+         * AMOUNT, and the material band drew SMPL's region boundaries over a granular
+         * cloud that has none. On SYNTH it was the same with LOOP and MORPH replaced.
+         *
+         * Measured on the host: SMPL + EDIT, then `tap SEL` twice, `expect edit` stayed 1
+         * through GRAN and back to SYNTH.
+         *
+         * B_EDIT itself already refuses to act outside SMPL (see the comment there: a
+         * button that does nothing where it does not apply is quieter than one that
+         * changes the instrument). This is the other half of that rule -- the page cannot
+         * outlive the source that owns it. */
+        if (src != SRC_SMPL && src != SRC_SYNTH)
+            if (edit_page) page = PAGE_VOICE;
+        /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
+         * rather than reinterpreting the same flag as the other source's page. The flag
+         * means "this source's material editor", and the two editors edit different
+         * things with different knobs. */
+        if (edit_src != src)
+            if (edit_page) page = PAGE_VOICE;
     }
-    /* B_ARP: the same page mechanism. The panel has had the button since the
-     * beginning (plat.h's B_ARP) and nothing used it. */
+    /* REC is free again. It briefly selected LFO 1 / LFO 2, which this page no longer needs:
+     * B_LFO's own button walks all four screens now, so there is nothing left for REC to
+     * choose. It stays free rather than being spent on something, because the panel map has
+     * it marked free and the recorder it is named for does not exist on the FM-1. */
     if (btn_pressed(btn, B_ARP))
         page_press(PAGE_ARP);
     /* B_EDIT: edit THE CURRENT SOURCE's structure -- SMPL's region, SYNTH's frame rack,
@@ -1443,6 +1494,7 @@ static void input(void)
          * still clears its knob rather than banking the turn for the next screen. */
         if ((e = plat_enc(EN_K3)) != 0)
             lfo_rate[lfo_edit] = (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
+
         btn_prev = btn;
         ui_apply();
         return;
@@ -1551,45 +1603,6 @@ static void input(void)
         }
         else if (src == SRC_GRAN) k_grain = (uint8_t)clamp((int32_t)k_grain + e * 4, 0, 127);
         else                 k_morph = (uint8_t)clamp((int32_t)k_morph + e * 8, 0, 127);
-    }
-
-    /* SOURCE: SYNTH reads the wavetable, SMPL reads the sample pool, GRAN reads it as
-     * a cloud. This is the one switch that changes what a key does, so it lives next
-     * to the keys.
-     *
-     * It was on EN_SELECT as a detented stop in the spec, and moved here when the
-     * sample path needed a switch and B_ENV's page did not exist yet. Both are now
-     * true at once -- the page exists and SOURCE is on B_SEL -- and that is the
-     * better arrangement: a three-state switch on a button plus an on-screen
-     * indicator uses one button, while a detented encoder for the same thing spends
-     * a knob that GRAN needs for SPRAY. The screen, not the button's lamp, says which
-     * source is live; a lamp can only say on or off, and there are three. */
-    if (btn_pressed(btn, B_SEL)) {
-        src = (uint8_t)((src + 1u) % 3u);
-        /* Leaving SMPL leaves EDIT. THE PAGE BELONGS TO THE SOURCE, not to the panel.
-         *
-         * Without this, opening EDIT in SMPL and then switching SOURCE left `edit_page`
-         * set on a source that has no EDIT page at all, and the flag is read all over the
-         * screen: on GRAN the bottom-right corner printed ZOOM instead of GRAIN, the four
-         * knobs below became START / LOOP S / LOOP E / END instead of CUT / RES / SHAPE /
-         * AMOUNT, and the material band drew SMPL's region boundaries over a granular
-         * cloud that has none. On SYNTH it was the same with LOOP and MORPH replaced.
-         *
-         * Measured on the host: SMPL + EDIT, then `tap SEL` twice, `expect edit` stayed 1
-         * through GRAN and back to SYNTH.
-         *
-         * B_EDIT itself already refuses to act outside SMPL (see the comment there: a
-         * button that does nothing where it does not apply is quieter than one that
-         * changes the instrument). This is the other half of that rule -- the page cannot
-         * outlive the source that owns it. */
-        if (src != SRC_SMPL && src != SRC_SYNTH)
-            if (edit_page) page = PAGE_VOICE;
-        /* ...and a page is one source's, so switching from SMPL to SYNTH closes it too
-         * rather than reinterpreting the same flag as the other source's page. The flag
-         * means "this source's material editor", and the two editors edit different
-         * things with different knobs. */
-        if (edit_src != src)
-            if (edit_page) page = PAGE_VOICE;
     }
 
     /* B_SAVE: write the whole panel state to flash, now.
@@ -4421,9 +4434,10 @@ void app_frame(void)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ENV PAGE", sk.ink);
             else if (glo_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "GLO PAGE", sk.ink);
-            /* Both LFO screens name the LFO being shown: B_REC can change it from the panel
-             * and the only other signal is REC's lamp. "LFO PAGE" said nothing a player did
-             * not already know from having pressed LFO. */
+            /* Every LFO screen names the LFO being shown. It is worth a label even now that
+             * the screen decides: two screens per LFO means a player who walked in from
+             * another page does not know whether this is the first pair or the second, and
+             * the caption is one word. */
             else if (lfo_page || lfo_mod)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, lfo_edit ? "LFO 2" : "LFO 1", sk.ink);
             else if (arp_page)
@@ -4693,18 +4707,13 @@ void app_frame(void)
             lit |= 1u << B_LFO;
         else if ((lfo_running(0) || lfo_running(1)) && ((now >> 8) & 1u))
             lit |= 1u << B_LFO;
-        /* B_REC says which LFO the page is showing, and it says so whether the page is up
-         * or not -- that is the point of putting it on the panel instead of only in the
-         * caption. Solid while LFO2 is selected, dark for LFO1.
+        /* REC is not lit for anything: it selected the LFO for two rounds and the page walks
+         * itself now. A lamp that means "the other LFO" is exactly the kind of thing this page
+         * model exists to avoid.
          *
-         * The player asked for a RED lamp here and it cannot be done: the button matrix
-         * gives every button one bit and one colour, and only PLAY has a second, green LED
-         * and the platform's plat_play_red(). Lit versus unlit is the whole vocabulary this
-         * hardware has for a button that is not a page, so that is what distinguishes the
-         * two; the caption says LFO 1 / LFO 2 in words as well, so the lamp is a landmark
-         * and not the only signal. */
-        if (lfo_edit)
-            lit |= 1u << B_REC;
+         * (The player asked for a RED lamp here back when REC did select, and it cannot be
+         * done: the button matrix gives every button one bit and one colour, and only PLAY has
+         * a second, green LED and plat_play_red().) */
         /* B_ARP reads the same way B_LFO does, for the same reason: the page is a
          * view, the setting is a switch, and a closed page must not hide something
          * that is audibly working. Arpeggio is the worst case of the rule -- a player
@@ -5200,7 +5209,6 @@ static void save_snapshot(save_rec *r)
             for (d = 0; d < WV_DESTS; d++)
                 r->lfo_amt[i][d] = lfo_amt[i][d];
         }
-        r->lfo_edit = lfo_edit;
     }
     r->ftype = k_ftype;
     r->ktrack = k_ktrack;
@@ -5262,7 +5270,6 @@ static void save_apply(const save_rec *r)
             if (lfo_trig[i]  >= WV_LFO_TRIG_N) lfo_trig[i]  = WV_LFO_FREE;
             if (lfo_sync[i]  > 1)              lfo_sync[i]  = 0;
         }
-        lfo_edit = (uint8_t)(r->lfo_edit < WV_LFOS ? r->lfo_edit : 0);
     }
     k_ftype = r->ftype;
     k_ktrack = r->ktrack;

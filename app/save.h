@@ -46,8 +46,12 @@ typedef struct {
      * shorter record cannot be padded with zeroes and still mean the same thing -- which is
      * why this is version 3 and not version 2 plus slack.
      *
-     * lfo_edit is saved too: it is which LFO the page shows, and a patch that comes back
-     * with the other one on screen is not wrong, only confusing. */
+     * lfo_edit used to be saved here, as which LFO the page showed. It is not a panel byte
+     * any more: the screen decides (1 and 2 are LFO 1, 3 and 4 are LFO 2), so there is no
+     * way for it to disagree with what is drawn and nothing to restore. The FIELD IS LEFT
+     * IN PLACE, holding 0, rather than removed: this record is a fixed-layout image and
+     * deleting a byte here would shift every field after it. Version 3 is not released yet,
+     * so nothing on a device is reading the old layout either way. */
     uint8_t  lfo_rate[SAVE_LFOS];
     uint8_t  lfo_amt[SAVE_LFOS][SAVE_DESTS];
     uint8_t  lfo_shape[SAVE_LFOS];
