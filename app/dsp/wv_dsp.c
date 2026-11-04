@@ -189,6 +189,14 @@ static float lfo_pitch_scale(const wv_state *s)
     return fm_exp2f(lfo_route(s, WV_DEST_PITCH, 12.0f, 1) * (1.0f / 12.0f));
 }
 
+/* Exported for the panel: the same value the readers see, not a re-derivation of it.
+ * A second copy of this arithmetic in app.c is where the picture and the sound drift apart
+ * -- which is exactly what happened to the MORPH readout. */
+float wv_morph_pos(const wv_state *s)
+{
+    return morph_pos(s);
+}
+
 /* KEY TRACKING: the corner's multiplier for one note.
  *
  * One multiply and one exp2 per voice per block -- the same exp2 the LFO already pays

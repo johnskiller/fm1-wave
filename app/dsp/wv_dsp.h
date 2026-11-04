@@ -361,6 +361,17 @@ float wv_sine(const wv_state *s);
  * page happens to be editing". */
 float wv_lfo_value(const wv_state *s, uint32_t which);
 
+/* The morph position the readers are using this block, in frames 0..WV_FRAMES-1: the knob
+ * plus whatever the MORPH route is adding, clamped to the travel. Exported so the panel can
+ * draw what is SOUNDING instead of what the knob says -- with an LFO on MORPH the two are
+ * different numbers, and a readout showing the knob while the sound sweeps is a readout that
+ * disagrees with the ear.
+ *
+ * PURE: it reads the LFO phases and does not advance them. Calling this once per frame from
+ * the renderer therefore cannot change the modulation rate, which is the whole reason it is
+ * allowed out of the DSP at all. */
+float wv_morph_pos(const wv_state *s);
+
 /* The filter's tap. LP is the default and the only one this app had; HP and BP are the
  * two the SVF was already computing and throwing away. */
 enum { WV_FTYPE_LP, WV_FTYPE_HP, WV_FTYPE_BP, WV_FTYPE_N };

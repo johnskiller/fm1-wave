@@ -3000,10 +3000,44 @@ static void src_edit_map(const src_skin_t *k, const wv_sample *s,
 }
 
 
+/* ── the morph position the VOICES are on, not the one the knob is on ──────
+ *
+ * Every picture of MORPH in this file used to be built from k_morph, the knob. That was
+ * correct while MORPH was not a modulation destination, and the rack's own comment said so
+ * in as many words ("a STATIC highlight: morph is one number shared by all voices, not a
+ * modulation target"). WV_DEST_MORPH exists now, so the comment became false and so did
+ * every readout: with an LFO on MORPH the sound moves, the scope shows it moving, and the
+ * number and the rack sat still (player, 2026-11-04: "material页面的morph数值，和edit页面
+ * 的一组波形都是静态的没有变化").
+ *
+ * So ask the DSP. wv_morph_pos() returns exactly what morph_pos() gives the readers --
+ * knob plus the summed LFO route, clamped to the travel -- and it is a pure function of
+ * state: lfo_value() reads l->ph and never advances it, so calling this once per frame
+ * cannot speed the LFO up. That is the property that makes it safe to call from the
+ * renderer at all, and it is asserted rather than assumed (test_screen's
+ * "drawing does not advance the LFO").
+ *
+ * In frames, 0..WV_FRAMES-1: the unit the rack and the reader both use. */
+static float morph_live(void)
+{
+    return wv_morph_pos(&dsp);
+}
+
+/* The same, as the 0..127 the panel shows. Rounded, because the readout is a percentage
+ * and a value that flickers between two numbers while the knob is still is worse than a
+ * number that lands. */
+static uint8_t morph_live_u7(void)
+{
+    float f = morph_live() * (127.0f / (float)(WV_FRAMES - 1u));
+    if (f < 0.0f) return 0;
+    if (f > 127.0f) return 127;
+    return (uint8_t)(f + 0.5f);
+}
+
 static void src_shape(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int32_t h)
 {
     int32_t i, py = 0, mid = y0 + h / 2, amp = h / 2 - 1;
-    float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+    float mf = morph_live();
     float pk = 0.0f;
 
     /* Normalise by the frame's own peak, the same decision the scope's auto-gain makes
@@ -3057,10 +3091,16 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
  * a lie about what the reader is doing, and the pair is also the answer to the question
  * this page exists for ("which two waves am I turning against each other").
  *
- * It is a STATIC highlight: morph is one number shared by all voices (wv_dsp.h:81, and
- * app.c is its only writer), not a modulation target, so the lit pair changes when the
- * MORPH knob moves and at no other time. Drawing it per voice would draw the same pair
- * every frame. When morph becomes modulatable this is where a per-voice marker goes.
+ * The highlight MOVES when MORPH is modulated. This comment used to say the opposite -- "a
+ * STATIC highlight: morph is one number shared by all voices, not a modulation target" --
+ * and that was true until WV_DEST_MORPH existed. It is now drawn from morph_live(), the
+ * value the readers are on, so an LFO on MORPH walks the lit pair up and down the rack and
+ * the group brightens and dims with the sweep (player, 2026-11-04).
+ *
+ * It is still ONE pair for all eight voices, and that is not a shortcut: MORPH's route is
+ * a shared parameter and the LFO that moves it is shared too, so every voice is on the same
+ * pair at the same instant. Drawing it per voice would draw the same two frames eight
+ * times. (TRIG=voice LFOs would break that, and then this becomes eight markers.)
  *
  * The frame being EDITED (edit_frame) is a separate mark and must stay legible next to
  * the pair: it keeps the lift plus a bright index, and if it is one of the two sounding
@@ -3075,9 +3115,11 @@ static void src_rack(const src_skin_t *k, int32_t x0, int32_t y0, int32_t w, int
     const int32_t amp  = (h - 2 - 7 * STK_DY - RACK_LIFT) / 2;    /* 14 px at 172 x 80 */
     const int32_t base0 = y0 + h - 1 - amp;                       /* f0's zero line */
 
-    /* the pair the voices are mixing right now -- the same arithmetic wv_frames_at
-     * does, so the picture and the reader cannot disagree */
-    float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+    /* the pair the voices are mixing right now -- the same value the readers use, fetched
+     * rather than re-derived, so the picture and the reader cannot disagree. With an LFO on
+     * MORPH this is a moving pair, which is the point: the rack brightens and dims as the
+     * sweep goes through it. */
+    float mf = morph_live();
     int32_t m0, m1;
     if (mf < 0.0f) mf = 0.0f;
     if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
@@ -4435,8 +4477,12 @@ void app_frame(void)
                 nm = "ZOOM";
                 vv = zoom_text(edit_zoom);
             } else if (src == SRC_SYNTH) {
+                /* The LIVE position, not the knob: with a route on MORPH the two differ, and
+                 * the picture above is drawn from the live one. A readout that said 40 %
+                 * while the rack was sweeping would be the one thing on screen that
+                 * disagreed with the ear. */
                 nm = "MORPH";
-                vv = pct(k_morph);
+                vv = pct(morph_live_u7());
             } else {
                 nm = "GRAIN";
                 vv = sel_time(k_grain, 3);
@@ -4838,6 +4884,10 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "shape"))      { *got = k_shape;  return 1; }
     if (!strcmp(what, "amount"))     { *got = k_amount; return 1; }
     if (!strcmp(what, "morph"))      { *got = k_morph;  return 1; }
+    /* The knob and what the voices are on are different numbers once MORPH is routed, so
+     * they need different probes: `morph` is the knob (what the panel owns and saves),
+     * `morph_live` is where the sound is right now. */
+    if (!strcmp(what, "morph_live")) { *got = (int)morph_live_u7(); return 1; }
     if (!strcmp(what, "grain"))      { *got = k_grain;  return 1; }
     if (!strcmp(what, "spray"))      { *got = k_spray;  return 1; }
     if (!strcmp(what, "eg_a"))       { *got = k_eg_a;   return 1; }
@@ -4916,12 +4966,13 @@ int app_expect(const char *what, int *got)
      * that only checked one of them could not tell "the knob did nothing" from "the knob
      * edited the wrong frame". */
     if (!strcmp(what, "foff"))        { *got = foff_tab[bank_i][edit_frame]; return 1; }
-    /* The pair the rack lights. Computed the same way src_rack does it, from k_morph, so a
-     * test can assert WHICH frames the picture lights without reading pixels -- the curves
-     * of neighbouring frames overlap in an 80 px band and a pixel probe kept counting the
-     * frame above (measured: every low-MORPH reading came back "f0 f1 f2 HI"). */
+    /* The pair the rack lights. The same morph_live() the painter uses, so a test can assert
+     * WHICH frames the picture lights without reading pixels -- the curves of neighbouring
+     * frames overlap in an 80 px band and a pixel probe kept counting the frame above
+     * (measured: every low-MORPH reading came back "f0 f1 f2 HI"). Reading the knob here
+     * would make the probe deaf to the one thing it now has to catch. */
     if (!strcmp(what, "rack_pair")) {
-        float mf = (float)k_morph * ((float)(WV_FRAMES - 1u) / 127.0f);
+        float mf = morph_live();
         int32_t m0;
         if (mf < 0.0f) mf = 0.0f;
         if (mf > (float)(WV_FRAMES - 1u)) mf = (float)(WV_FRAMES - 1u);
@@ -4982,6 +5033,10 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "dsp_rate1"))     { *got = dsp.l[1].rate; return 1; }
     if (!strcmp(what, "dsp_cut"))       { *got = dsp.cut;       return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = lfo_rate[lfo_edit]; return 1; }
+    /* The LFO's own phase, x1000 as an int. Exists to prove that reading wv_morph_pos()
+     * from the renderer does not advance the modulation: the same script with and without
+     * the world being drawn must land on the same phase. */
+    if (!strcmp(what, "lfo_phase0")) { *got = (int)(dsp.l[0].ph * 1000.0f); return 1; }
     if (!strcmp(what, "lfo_rate1"))  { *got = lfo_rate[0]; return 1; }
     if (!strcmp(what, "lfo_rate2"))  { *got = lfo_rate[1]; return 1; }
     if (!strcmp(what, "lfo_depth"))  { *got = K_LFO_DEPTH(lfo_edit); return 1; }

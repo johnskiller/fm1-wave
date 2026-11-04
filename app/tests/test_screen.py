@@ -362,6 +362,21 @@ shot grn.png
     # (app_expect, driven by the host's `expect <name> <value>`), not by reading the
     # bitmap: the label text is a font table away, but "K3 turned RATE and not SHAPE"
     # is a fact about the app, and that is the part that can drift.
+    def show_val(script, name):
+        """The probe's value as an int, for assertions about change rather than equality."""
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(script + "\nshow %s\n" % name)
+            path = f.name
+        try:
+            r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                               timeout=120, cwd=out)
+        finally:
+            os.unlink(path)
+        for line in r.stdout.splitlines():
+            if line.startswith("show %s " % name):
+                return int(line.split()[-1])
+        return None
+
     def expect(script, name, val):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             f.write(script + "\nexpect %s %s\n" % (name, val))
@@ -543,6 +558,36 @@ shot grn.png
        "MORPH's route arrives too")
     ck(expect("tap LFO\ntap LFO\nturn K4 3\n", "dsp_amt_shape", 12),
        "and SHAPE's")
+    # ── MORPH is modulated: what is drawn must be what sounds ───────────────────
+    # The readout and the rack both used to be built from k_morph, the knob. With a route
+    # on MORPH the sound sweeps and they sat still (player, 2026-11-04: "material页面的morph
+    # 数值，和edit页面的一组波形都是静态的没有变化"). They are drawn from wv_morph_pos() now.
+    play = "tap LFO\nturn K3 20\ntap LFO\nturn SELECT 40\nkey 14 down\n"
+    ck(expect(play + "master 300\nmaster 500\n", "amt_morph", 127),
+       "the MORPH route is at full amount")
+    ck(expect(play + "master 300\nmaster 500\n", "morph", 0),
+       "and the knob itself has not moved")
+    ck(expect(play + "master 300\nmaster 500\n", "morph_live", 11),
+       "but the position the voices are on has moved off the knob")
+    # the sweep is what proves it is modulation and not a one-off offset
+    a = show_val(play + "master 200\nmaster 200\nmaster 200\n", "morph_live")
+    b = show_val(play + "".join("master 200\n" for _ in range(6)), "morph_live")
+    c = show_val(play + "".join("master 200\n" for _ in range(10)), "morph_live")
+    ck(len({a, b, c}) == 3, "and it keeps moving: three moments, three positions (%r)" % ([a, b, c],))
+    # the rack follows the same number
+    ck(expect(play + "master 200\nmaster 200\n", "rack_pair", 1),
+       "the rack lights frame 0/1 at the bottom of the sweep")
+    ck(expect(play + "".join("master 200\n" for _ in range(6)), "rack_pair", 86),
+       "and frame 5/6 further up it")
+    # ── drawing must not advance the LFO ────────────────────────────────────────
+    # wv_morph_pos() reads the phase. If it advanced it, the panel's refresh rate would
+    # change the modulation rate -- a bug that only shows up on hardware, where the frame
+    # rate is not the host's. Same script, same phase, with and without a probe that
+    # forces the value to be computed: 814 / 4 / 247 were measured without it.
+    for n, ph in ((3, 814), (6, 4), (10, 247)):
+        ck(expect("tap LFO\nturn K3 20\nkey 14 down\n" + "".join("master 200\n" for _ in range(n)),
+                  "lfo_phase0", ph),
+           "drawing does not advance the LFO: %d steps -> phase %d/1000" % (n, ph))
     # ── B_SEL must mean the same thing on every screen of the page ──────────────
     # It did not: the route table took the knobs and then `return`ed out of update(), which
     # skipped every button handler below it -- B_SEL's among them. So the same key switched
