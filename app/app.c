@@ -405,9 +405,22 @@ static int route_or_minus1(uint8_t lfo, uint8_t source, uint8_t slot)
 }
 
 /* The name in the ring: as short as a 54 px cell allows and no shorter. All seven fit --
- * "SHAPE" is 30 px at FONT_XS and "SPRAY" 33 -- so none is abbreviated. */
+ * "SHAPE" is 30 px at FONT_XS and "SPRAY" 33 -- so none is abbreviated.
+ *
+ * CUT IS "DEPTH" HERE, and only here. A ring on this table is an AMOUNT, never the
+ * destination's own value -- the whole screen is one modulator's amounts. So a ring labelled
+ * CUT read as the filter's corner, which is the knob above it on screen 1 and a completely
+ * different number. The player caught the collision: screen 1 called the same byte DEPTH
+ * (K4) and screens 2 and 3 called it CUT (K1), and only one of those can be right, because
+ * it is one byte (`lfo_amt[i][WV_DEST_CUT]`).
+ *
+ * DEPTH is the word that says "how much", and it is the word screen 1 already used. So this
+ * table can carry it for CUT without inventing a second name: the SELECT/PRESET/ALGO row
+ * above the band reads this same table, and CUT is not in that row -- it is slots 3..5, which
+ * are MORPH, GRAIN and SPRAY only (ROUTE_ORDER). A row that never names CUT cannot disagree
+ * with it, so one table is enough and there is no second spelling to keep in step. */
 static const char *const DEST_NAME[WV_DESTS] = {
-    "CUT", "RES", "SHAPE", "MORPH", "GRAIN", "SPRAY", "PITCH",
+    "DEPTH", "RES", "SHAPE", "MORPH", "GRAIN", "SPRAY", "PITCH",
 };
 
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
@@ -2068,13 +2081,15 @@ static char *lfo_depth_text(uint8_t v)
     static char ring[2][8];
     static uint8_t turn;
     char *b = ring[turn++ % 2];
-    /* 0..4 octaves, one decimal */
-    int32_t t = (int32_t)(4.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
-    b[0] = '+';
-    b[1] = (char)('0' + t / 10);
-    b[2] = '.';
-    b[3] = (char)('0' + t % 10);
-    b[4] = 0;
+    /* 0..4 octaves, one decimal, NO SIGN -- the same byte and the same number as the CUT
+     * route ring on screens 2 and 3, so it also has to look the same. A "+" here and not
+     * there would read as two different settings (player, this session: the same parameter
+     * was called DEPTH on one screen and CUT on the others). */
+    int32_t t = (int32_t)(WV_CUT_SPAN * ((float)v / 127.0f) * 10.0f + 0.5f);
+    b[0] = (char)('0' + t / 10);
+    b[1] = '.';
+    b[2] = (char)('0' + t % 10);
+    b[3] = 0;
     return b;
 }
 
@@ -2096,7 +2111,8 @@ static char *morph_mod_text(uint8_t v)
 
 /* Each destination's amount, in its OWN unit, because that is what the amount means:
  *
- *   CUT    octaves      +2.0  the filter's span, exponential like the corner
+ *   CUT    octaves       2.0  the filter's span, exponential like the corner;
+ *                              no sign -- it swings either side (see the case below)
  *   RES    percent            what the damping is being moved by
  *   SHAPE  percent            the drive
  *   MORPH  frames        3.5  the travel is 0..7 frames; "3.5" says more than "50 %"
@@ -2125,8 +2141,14 @@ static char *dest_text(uint8_t dest, uint8_t v)
     }
     switch (dest) {
     case WV_DEST_CUT:
+        /* NO SIGN. This route is a symmetric swing around the knob's own corner, so a lone
+         * "+" would say the opposite of what it does -- the player's point: "depth 的确有
+         * 正负". The font has no glyph for +-, and he decided that a sign that cannot be
+         * written is better not written at all: "无法表示双向就不表示了吧，连+号都不要。
+         * 单向的用+". So the one route whose direction matters, PITCH, keeps its "+", and
+         * every other one reads as a plain amount. */
         t = (int32_t)(WV_CUT_SPAN * ((float)v / 127.0f) * 10.0f + 0.5f);
-        b[0] = '+'; b[1] = (char)('0' + t / 10); b[2] = '.'; b[3] = (char)('0' + t % 10); b[4] = 0;
+        b[0] = (char)('0' + t / 10); b[1] = '.'; b[2] = (char)('0' + t % 10); b[3] = 0;
         return b;
     case WV_DEST_MORPH:
         t = (int32_t)((float)v / 127.0f * WV_MORPH_SPAN * 10.0f + 0.5f);

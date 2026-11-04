@@ -720,9 +720,24 @@ The LFO page reaches this in **three screens**:
 
 | screen | LFO | K1 | K2 | K3 | K4 | SELECT | PRESET | ALGO |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 1 | CUT | RES | RATE | DEPTH | — | — | — |
-| 2 | 1 | CUT | RES | **PITCH** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
-| 3 | 2 | CUT | RES | **RATE** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+| 1 | 1 | CUT | RES | RATE | **DEPTH** | — | — | — |
+| 2 | 1 | **DEPTH** | RES | **PITCH** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+| 3 | 2 | **DEPTH** | RES | **RATE** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+
+**One word per byte.** `K4` on screen 1 and `K1` on screens 2 and 3 are the same byte,
+`lfo_amt[i][WV_DEST_CUT]`, so they carry the same name: **DEPTH**. They used to be called
+"DEPTH" and "CUT", which collided with screen 1's `K1` -- the corner itself, 30 Hz..16 kHz --
+and gave two different numbers one word (player, 2026-11-04: *"P1 还有一个 K1-CUT，指的就是
+真正的 CUT 频率…而且此处无法统一成 CUT"*). A ring on this table is always an AMOUNT, so
+`DEST_NAME[]` says DEPTH for that destination. The SELECT/PRESET/ALGO row above the band reads
+the same table and needs no second spelling: it holds only MORPH, GRAIN and SPRAY (`ROUTE_ORDER`
+slots 3..5), so it can never name CUT and cannot disagree with it.
+
+**Signs: bipolar prints none, unipolar that matters prints `+`.** The panels have no glyph
+above ASCII 126, so `±` cannot be drawn. A route that swings either side of its destination
+(CUT's DEPTH) therefore prints a bare number -- a lone `+` would claim it goes up only. PITCH
+is the one amount whose direction carries meaning (0..+6 semitones, up from the note) and keeps
+its `+`. The player's rule: *"无法表示双向就不表示了吧，连+号都不要。单向的用+"*.
 
 `B_LFO`'s own button walks all three, which is the page rule (§4): a page's button cycles its
 screens and never closes it, and a button's meaning belongs to the panel rather than to
