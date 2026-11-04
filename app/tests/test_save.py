@@ -159,7 +159,7 @@ tap GLO
 turn K4 3
 tap LFO
 tap LFO
-turn PRESET 3
+turn SELECT 3
 tap ARP
 turn K1 2
 turn K2 1

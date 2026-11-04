@@ -691,25 +691,40 @@ could have added was never the constraint. Only `double` falls back to `__divdf3
 The reference note is C4, so turning tracking on never moves the note a patch was voiced
 on. Measured: C4's output is bit-identical at 0 % and 100 %.
 
-### 5c3. Modulation: more destinations, a second LFO, a second ENV — **NOT BUILT**
+### 5c3. Modulation — **BUILT** (LFO half) / **NOT BUILT** (second ENV)
 
 *Recorded 2026-11-04 because it was being mistaken for a gap in the design. It is not: it
 is the next stage of it, and the panel was built to take it.*
 
 The player's plan, stated 2026-11-04: **MORPH as a modulation destination, multiple LFO
-targets, a second LFO, a second ENV.** None of it is built. This section records what the
-code already has room for, so the work is a schedule rather than a redesign.
+targets, a second LFO, a second ENV.**
 
-#### What exists, exactly
+**Now built** (`41a1f40` DSP, `8e3f32f` + `b317ec6` + the K3 change UI): multiple LFO
+destinations, seven of them, and a second LFO. **Not built:** the second ENV — that half of
+this section is still a schedule, and the tables below keep their `NOT BUILT` reading for it.
 
-| | today | in `wv_state` |
+#### What exists, exactly (as built)
+
+| | now | in `wv_state` |
 |---|---|---|
-| LFOs | **1**, one per instrument, not per voice | `lfo_rate`, `lfo_depth`, `lfo_ph` |
-| LFO destinations | **1, hard-wired: CUT** | `lfo_cut_scale()` multiplies the corner |
-| LFO shape | sine only | `fm_sin_pi(lfo_ph * TWO_PI)` |
+| LFOs | **2**, each per instrument, not per voice | `lfo[2]`, each with `rate`, `phase`, `shape`, `trig`, `sync_div` |
+| LFO destinations | **7, each with its own amount per LFO** | `lfo[2].amt[WV_DESTS]`: CUT, RES, SHAPE, MORPH, GRAIN, SPRAY, PITCH |
+| LFO shape | SINE / TRI / S&H | `lfo[i].shape` (`WV_LFOSH_*`) |
+| LFO retrigger | free-running or note-on reset | `lfo[i].trig` (`WV_LFO_FREE` / `WV_LFO_TRIG`) |
+| LFO rate | Hz, or a note division when synced | `lfo[i].rate` + `lfo[i].sync_div`, `wv_lfo_hz_for()` |
 | ENVs | **1** (the VCA's ADSR) | `eg_a`, `eg_d`, `eg_s`, `eg_r` |
 | ENV destinations | **1: the VCA level** | `level`/`target` |
-| MORPH destinations | none — `s->morph` is a knob byte | read once per block in `voice_block` |
+| MORPH destinations | LFO 1 and 2, via `WV_DEST_MORPH` | one add in the block hoist (`morph_pos()`) |
+
+The LFO page reaches all of this in two screens: screen 1 is CUT/RES/RATE/DEPTH, screen 2
+is the seven-ring route table. `B_REC` selects which LFO both screens edit, and its lamp
+shows which — the button matrix gives each button one bit and one colour, and only PLAY has
+a second LED, so lit/unlit is the vocabulary this hardware has.
+
+#### What the second ENV still costs — **NOT BUILT**
+
+Everything below is about the ENV half only. The LFO costs it once listed here are now
+measured rather than estimated, and they came out at what this section predicted.
 
 Three facts that matter for the schedule:
 
@@ -725,7 +740,12 @@ Three facts that matter for the schedule:
   symmetric in octaves, see `lfo_oct`). A destination that is not a frequency cannot use
   that scale. PANEL: `DEPTH` therefore has to mean *"of this destination's own range"*,
   not octaves, the moment there is more than one destination — or the page needs one more
-  number than it has knobs.
+  number than it has knobs. **How it was resolved:** DEPTH stayed octaves because it stayed
+  CUT's amount, and every other destination got its own amount on the route table, each
+  printed in its own unit (`dest_text()`: octaves for CUT, percent for RES and SHAPE,
+  frames for MORPH, semitones for PITCH, milliseconds for GRAIN, percent for SPRAY). The
+  page did not need one more number than it has knobs; it needed a second screen, which it
+  had.
 
 #### What each addition costs, before anything is designed
 
@@ -740,7 +760,11 @@ Three facts that matter for the schedule:
   (`rate`, `depth`, `ph` ≈ 6 B); the cost is that the page, the lamp rule and the save
   record all have to learn about it. The save record is **190 B with `PLAT_STORE_MAX`
   3840** (§8), so a second LFO and a second ENV fit with room to spare; what does not fit
-  is unbounded growth of the (destination, amount) table.
+  is unbounded growth of the (destination, amount) table. **Measured after building it:**
+  the record went from 190 B to **v3**, which carries two full LFO field sets, and the
+  seven-amount table is 2 × 7 bytes. It fits. The real cost was not storage but the page:
+  two screens, a selector key, and a record version bump that refuses v2 rather than
+  reinterpreting it.
 - **A second ENV: per-voice state.** The VCA envelope is per-voice already — `level`,
   `target` (4 B each), `estage` plus 3 B of padding = **12 B per voice**, so a second one
   is **96 B at 8 voices** plus four shared stage bytes in `wv_state` where `eg_a..eg_r`
@@ -749,17 +773,18 @@ Three facts that matter for the schedule:
   `B_ENV` (which the page model already supports — `PAGE_SCREENS[]`) or a `B_HOME`-style
   selector.
 
-#### Order that the code suggests
+#### Order that the code suggested, and how it went
 
-1. **MORPH as a destination, from the existing LFO.** One add, one panel decision (what
-   DEPTH means). It is the one that makes the instrument sound like its lineage.
-2. **A destination table** — because step 1 creates the second destination that exposes
-   the one-DEPTH-knob problem.
-3. **Second ENV**, then **second LFO** — both are state, and state is cheap; both are
-   page work, and page work is what this instrument is careful about.
-
-Steps 1 and 2 are the ones that change how it sounds. Steps 3 and 4 change how deep a
-patch can be. Nothing here is scheduled, and none of it should be reported as built.
+1. **MORPH as a destination, from the existing LFO.** — **done** (`7f157ef`). One add in
+   the block hoist, exactly as this section said it would be.
+2. **A destination table** — **done** (`41a1f40`). The one-DEPTH-knob problem resolved the
+   way the section predicted: the model became a (destination, amount) table that a page
+   edits one row at a time, and the page model (§3) expressed it as a second screen.
+3. **Second LFO** — **done** (`41a1f40`). This went before the second ENV, which is not the
+   order written here; the reason is that the route table was being drawn and needed a
+   second LFO to be worth drawing, whereas a second ENV changes no picture.
+4. **Second ENV** — **NOT BUILT.** The cost estimate below still stands and has not been
+   re-measured, because nothing has been built against it.
 
 ### 5d. EDIT — what a deeper edit can actually reach
 
