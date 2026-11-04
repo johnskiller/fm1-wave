@@ -2102,10 +2102,15 @@ static char *morph_mod_text(uint8_t v)
  *   MORPH  frames        3.5  the travel is 0..7 frames; "3.5" says more than "50 %"
  *   GRAIN  percent
  *   SPRAY  percent
- *   PITCH  semitones    +12.0 at full it is an octave either way
+ *   PITCH  semitones    +6.0  at full it is half an octave UP, one way (unipolar)
  *
  * The spans have to match lfo_route()'s own span arguments in wv_dsp.c or the ring would
- * promise a sweep the DSP does not make: CUT 4 octaves, MORPH 7 frames, PITCH 12 semitones.
+ * promise a sweep the DSP does not make: CUT 4 octaves, MORPH 7 frames, PITCH 6 semitones.
+ * PITCH is UNIPOLAR (lfo_route's fourth argument is 1): a route at full amount sweeps the
+ * note UP to half an octave and back, never below its own pitch. Measured on the render:
+ * C4 with amount 127 read -0.08 .. +5.97 semitones. That is what makes it a vibrato
+ * control rather than a pitch-shifter; the player asked for half the span so one detent is
+ * 5 cents ("pitch 范围太大，不实用了，细微的 pitch 抖动才是有用的").
  * A zero amount prints "-" rather than "+0.0": a route that is off says so. */
 static char *dest_text(uint8_t dest, uint8_t v)
 {
@@ -2120,15 +2125,15 @@ static char *dest_text(uint8_t dest, uint8_t v)
     }
     switch (dest) {
     case WV_DEST_CUT:
-        t = (int32_t)(4.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
+        t = (int32_t)(WV_CUT_SPAN * ((float)v / 127.0f) * 10.0f + 0.5f);
         b[0] = '+'; b[1] = (char)('0' + t / 10); b[2] = '.'; b[3] = (char)('0' + t % 10); b[4] = 0;
         return b;
     case WV_DEST_MORPH:
-        t = (int32_t)((float)v / 127.0f * (float)(WV_FRAMES - 1u) * 10.0f + 0.5f);
+        t = (int32_t)((float)v / 127.0f * WV_MORPH_SPAN * 10.0f + 0.5f);
         b[0] = (char)('0' + t / 10); b[1] = '.'; b[2] = (char)('0' + t % 10); b[3] = 0;
         return b;
     case WV_DEST_PITCH:
-        t = (int32_t)(12.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
+        t = (int32_t)(WV_PITCH_SPAN * ((float)v / 127.0f) * 10.0f + 0.5f);
         b[0] = '+';
         if (t >= 100) {
             b[1] = (char)('0' + t / 100); b[2] = (char)('0' + (t / 10) % 10);

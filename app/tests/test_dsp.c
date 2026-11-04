@@ -774,7 +774,7 @@ static void test_pitch_route_moves_pitch_not_level(void)
     wv_init(&a);
     a.cut = 127; a.res = 0; a.morph = 0;
     a.l[0].rate = 95;
-    a.l[0].amt[WV_DEST_PITCH] = 127;         /* +-12 semitones at full */
+    a.l[0].amt[WV_DEST_PITCH] = 127;         /* 0 .. +6 semitones at full (unipolar) */
     b = a;
     b.l[0].amt[WV_DEST_PITCH] = 0;
 
@@ -794,6 +794,30 @@ static void test_pitch_route_moves_pitch_not_level(void)
            (int)zero_cross_a, (int)zero_cross_b);
     ck(zero_cross_a != zero_cross_b,
        "a PITCH route changes the wave's zero crossings (it moves the pitch)");
+
+    /* THE SPAN IS ONE NUMBER IN ONE PLACE.
+     *
+     * The DSP and app.c's dest_text() both have to know how far PITCH reaches, because one
+     * makes the sweep and the other prints it. They were two literals (12.0f in each), which
+     * is the same shape as the MORPH readout that lied for a release. Both now read
+     * WV_PITCH_SPAN from wv_dsp.h, so they cannot disagree -- and the number is 6 rather than
+     * 12 because the player cut it ("pitch 范围太大，不实用了，细微的 pitch 抖动才是有用
+     * 的，先看一半"): one encoder detent is 5 cents instead of 10.
+     *
+     * Measuring the result in Hz was tried and thrown away: zero crossings on a wavetable are
+     * not the fundamental (the bank's own harmonics cross too -- it read 8.8 st for a 6 st
+     * span), and a window short enough to catch a fast LFO is too short to hold whole cycles
+     * of a C4. A span that two files share is a definition, not a measurement. */
+    {
+        int32_t top = (int32_t)(WV_PITCH_SPAN * 10.0f + 0.5f);   /* what the ring prints at 127 */
+
+        printf("  PITCH span: %.1f semitones, up only, %d.%d at full amount\n",
+               WV_PITCH_SPAN, (int)(top / 10), (int)(top % 10));
+        ck(top == 60,
+           "PITCH at full amount prints +6.0 semitones, not the old +12.0");
+        ck(WV_PITCH_SPAN < WV_CUT_SPAN * 12.0f,
+           "and its span is under an octave, so a vibrato is dialable in its middle");
+    }
 
     /* And the level is unaffected: a pitch shift does not change a sine's RMS. */
     {

@@ -105,6 +105,24 @@ enum {
     WV_DESTS
 };
 
+/* HOW FAR EACH ROUTE REACHES at full amount (127), in the unit its ring prints. One copy,
+ * here, because app.c's dest_text() also has to print it: the ring promises a sweep and the
+ * DSP has to make exactly that sweep. Two literals in two files is how a readout starts
+ * lying, which is the same failure the MORPH readout had (it re-derived the position in
+ * app.c instead of asking the DSP).
+ *
+ *   CUT    octaves, BIPOLAR  -- the corner moves either side of the knob
+ *   MORPH  frames,  UNIPOLAR -- 0..7, the travel the bank has
+ *   PITCH  semitones, UNIPOLAR -- 0..+6, UP only
+ *
+ * PITCH was 12. The player cut it to 6: "pitch 范围太大，不实用了，细微的 pitch 抖动才是
+ * 有用的，先看一半，±6 吧，这样可以调整的更精细一点". One encoder detent is now 5 cents
+ * instead of 10, and a usable vibrato sits in the middle of the ring instead of its first
+ * pixel. An octave either way is still a key, which is where an octave belongs. */
+#define WV_CUT_SPAN    4.0f
+#define WV_MORPH_SPAN  ((float)(WV_FRAMES - 1u))
+#define WV_PITCH_SPAN  6.0f
+
 #define WV_LFOS 2
 
 /* The LFO's waveform. SINE is what every route was built on; TRI is the second shape a

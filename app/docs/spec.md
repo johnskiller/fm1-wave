@@ -792,7 +792,14 @@ Three facts that matter for the schedule:
   number than it has knobs. **How it was resolved:** DEPTH stayed octaves because it stayed
   CUT's amount, and every other destination got its own amount on the route table, each
   printed in its own unit (`dest_text()`: octaves for CUT, percent for RES and SHAPE,
-  frames for MORPH, semitones for PITCH, milliseconds for GRAIN, percent for SPRAY). The
+  frames for MORPH, semitones for PITCH, milliseconds for GRAIN, percent for SPRAY).
+  **The span itself lives in `wv_dsp.h`** (`WV_CUT_SPAN`, `WV_MORPH_SPAN`, `WV_PITCH_SPAN`),
+  one copy for both the DSP and the ring: the ring promises a sweep and the DSP has to make
+  exactly that sweep, and two literals is how a readout starts lying (the MORPH readout did,
+  for a release). PITCH's span is **6 semitones, unipolar** -- up only, half an octave at full
+  amount, one encoder detent per 5 cents -- cut from 12 on 2026-11-04 because an octave either
+  way made the control unusable for the vibrato it is for: *"pitch 范围太大，不实用了，
+  细微的 pitch 抖动才是有用的，先看一半"*. The
   page did not need one more number than it has knobs; it needed a second screen, which it
   had.
 

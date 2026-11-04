@@ -153,7 +153,7 @@ static float lfo_route(const wv_state *s, uint32_t dest, float span, int unipola
 /* CUT's share: a multiplier on the corner, symmetric in octaves. */
 static float lfo_cut_scale(const wv_state *s)
 {
-    return fm_exp2f(lfo_route(s, WV_DEST_CUT, 4.0f, 0));
+    return fm_exp2f(lfo_route(s, WV_DEST_CUT, WV_CUT_SPAN, 0));
 }
 
 /* MORPH's share, in frames. UNIPOLAR -- the knob is the bottom of the travel (see the
@@ -179,14 +179,22 @@ static float morph_pos(const wv_state *s)
     return p;
 }
 
-/* PITCH's share, as a frequency multiplier. A semitone span of 12 at full amount.
+/* PITCH's share, as a frequency multiplier. A semitone span of SIX at full amount.
+ *
+ * It was 12, and 12 was the wrong number for what this destination is for: the whole span
+ * runs -6 .. +6 semitones, so one detent of the encoder is 0.05 semitones (5 cents) instead
+ * of 0.1, and a vibrato that is worth having (a few cents to a few tens) now lives in the
+ * middle of the ring rather than in its first pixel. The player asked for it: "pitch 范围
+ * 太大，不实用了，细微的 pitch 抖动才是有用的，先看一半，±6 吧，这样可以调整的更精细
+ * 一点". An octave either way stays reachable - not here, but as a whole-semitone interval
+ * on the keyboard, which is where an octave belongs.
  *
  * This is the one destination that could not be a multiply at an existing read site:
  * a table voice's pitch is `v->inc`, written once at note-on. It is now re-derived per
  * block from a stored base (see voice_begin). */
 static float lfo_pitch_scale(const wv_state *s)
 {
-    return fm_exp2f(lfo_route(s, WV_DEST_PITCH, 12.0f, 1) * (1.0f / 12.0f));
+    return fm_exp2f(lfo_route(s, WV_DEST_PITCH, WV_PITCH_SPAN, 1) * (1.0f / 12.0f));
 }
 
 /* Exported for the panel: the same value the readers see, not a re-derivation of it.
