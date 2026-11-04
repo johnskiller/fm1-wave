@@ -716,9 +716,25 @@ this section is still a schedule, and the tables below keep their `NOT BUILT` re
 | ENV destinations | **1: the VCA level** | `level`/`target` |
 | MORPH destinations | LFO 1 and 2, via `WV_DEST_MORPH` | one add in the block hoist (`morph_pos()`) |
 
-The LFO page reaches this in two screens: screen 1 is CUT/RES/RATE/DEPTH, screen 2 is the
-seven-ring table — **six destinations plus K3's RATE**. A ring there has three states, and
-they are told apart by shape and not only by brightness, because amount zero and a slot the
+The LFO page reaches this in **four screens — two per LFO**: screen 1 is LFO 1's
+CUT/RES/RATE/DEPTH, screen 2 is LFO 1's route table, screen 3 is LFO 2's CUT/RES/RATE/DEPTH,
+screen 4 is LFO 2's table. `B_LFO`'s own button walks all four, which is the page rule
+(§4): a page's button cycles its screens and never closes it, and a button's meaning belongs
+to the panel rather than to whichever screen is up.
+
+It was two screens plus `B_REC` as a selector between the two LFOs, and that was a defect
+against the same rule: the same key did two different things depending on where you were,
+and the selector could disagree with the caption. **`lfo_edit` is not a stored byte any
+more** — it follows from `page_no` (1–2 = LFO 1, 3–4 = LFO 2), so there is nothing that can
+fall out of sync and nothing to save.
+
+The same rule fixed a second defect on screen 2: `B_SEL` switched source on screen 1 and did
+nothing on screen 2, because the route table `return`ed out of `update()` after taking its
+six knobs and skipped the button handlers further down. A screen may borrow the **knobs**
+(it covers the picture they are drawn on); it may never borrow the **buttons**.
+
+Each table is **six destinations plus K3's RATE.** A ring there has three states, and they
+are told apart by shape and not only by brightness, because amount zero and a slot the
 source does not have read identically when both were a dim ring:
 
 | state | drawing |
@@ -783,8 +799,9 @@ Three facts that matter for the schedule:
   is unbounded growth of the (destination, amount) table. **Measured after building it:**
   the record went from 190 B to **v3**, which carries two full LFO field sets, and the
   seven-amount table is 2 × 7 bytes. It fits. The real cost was not storage but the page:
-  two screens, a selector key, and a record version bump that refuses v2 rather than
-  reinterpreting it.
+  four screens and a record version bump that refuses v2 rather than reinterpreting it.
+  A selector key turned out not to be needed — the page's own button walks the four
+  screens, and the first attempt (REC) was reverted because it broke the page rule.
 - **A second ENV: per-voice state.** The VCA envelope is per-voice already — `level`,
   `target` (4 B each), `estage` plus 3 B of padding = **12 B per voice**, so a second one
   is **96 B at 8 voices** plus four shared stage bytes in `wv_state` where `eg_a..eg_r`
