@@ -716,16 +716,29 @@ this section is still a schedule, and the tables below keep their `NOT BUILT` re
 | ENV destinations | **1: the VCA level** | `level`/`target` |
 | MORPH destinations | LFO 1 and 2, via `WV_DEST_MORPH` | one add in the block hoist (`morph_pos()`) |
 
-The LFO page reaches this in **four screens — two per LFO**: screen 1 is LFO 1's
-CUT/RES/RATE/DEPTH, screen 2 is LFO 1's route table, screen 3 is LFO 2's CUT/RES/RATE/DEPTH,
-screen 4 is LFO 2's table. `B_LFO`'s own button walks all four, which is the page rule
-(§4): a page's button cycles its screens and never closes it, and a button's meaning belongs
-to the panel rather than to whichever screen is up.
+The LFO page reaches this in **three screens**:
+
+| screen | LFO | K1 | K2 | K3 | K4 | SELECT | PRESET | ALGO |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | CUT | RES | RATE | DEPTH | — | — | — |
+| 2 | 1 | CUT | RES | **PITCH** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+| 3 | 2 | CUT | RES | **RATE** | SHAPE | MORPH | (GRAIN) | (SPRAY) |
+
+`B_LFO`'s own button walks all three, which is the page rule (§4): a page's button cycles its
+screens and never closes it, and a button's meaning belongs to the panel rather than to
+whichever screen is up.
+
+**LFO 2 gets no picture screen, and that is the correct shape, not a saving.** The only thing
+on screen 1 that belongs to LFO 1 alone is DEPTH — which *is* the CUT route's amount, and
+routes live on the table. RATE is the one LFO setting that has no ring anywhere, because RATE
+is not a destination and cannot be one. So LFO 2's table spends K3 on RATE and gives up
+PITCH; LFO 1's table spends K3 on PITCH and gives up nothing, because its speed already has a
+knob on screen 1.
 
 It was two screens plus `B_REC` as a selector between the two LFOs, and that was a defect
 against the same rule: the same key did two different things depending on where you were,
 and the selector could disagree with the caption. **`lfo_edit` is not a stored byte any
-more** — it follows from `page_no` (1–2 = LFO 1, 3–4 = LFO 2), so there is nothing that can
+more** — it follows from `page_no` (1–2 = LFO 1, 3 = LFO 2), so there is nothing that can
 fall out of sync and nothing to save.
 
 The same rule fixed a second defect on screen 2: `B_SEL` switched source on screen 1 and did
@@ -799,8 +812,8 @@ Three facts that matter for the schedule:
   is unbounded growth of the (destination, amount) table. **Measured after building it:**
   the record went from 190 B to **v3**, which carries two full LFO field sets, and the
   seven-amount table is 2 × 7 bytes. It fits. The real cost was not storage but the page:
-  four screens and a record version bump that refuses v2 rather than reinterpreting it.
-  A selector key turned out not to be needed — the page's own button walks the four
+  three screens and a record version bump that refuses v2 rather than reinterpreting it.
+  A selector key turned out not to be needed — the page's own button walks the three
   screens, and the first attempt (REC) was reverted because it broke the page rule.
 - **A second ENV: per-voice state.** The VCA envelope is per-voice already — `level`,
   `target` (4 B each), `estage` plus 3 B of padding = **12 B per voice**, so a second one

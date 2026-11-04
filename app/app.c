@@ -145,7 +145,20 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
  * The filter's own settings (TYPE, KEY TRK) used to live on screen 2. They moved to
  * B_GLO's page, which is what they are: how the FILTER works, for every voice at once,
  * not one LFO's business. See PAGE_GLO below. */
-/* The LFO page is FOUR screens: LFO 1's two, then LFO 2's two.
+/* The LFO page is THREE screens: LFO 1's picture, LFO 1's routes, LFO 2's routes.
+ *
+ *   screen 1  LFO 1  CUT / RES / RATE / DEPTH
+ *   screen 2  LFO 1  the route table, K3 = PITCH
+ *   screen 3  LFO 2  the route table, K3 = RATE
+ *
+ * LFO 2 gets no picture screen, and that is not a saving, it is the correct shape. The only
+ * thing on screen 1 that is LFO 1's alone is DEPTH -- which IS the CUT route's amount, a
+ * route, and routes live on the table. RATE is the one LFO-2 setting that has no ring
+ * anywhere, because RATE is not a destination and cannot be one; it is a property of the
+ * modulator. So screen 3's K3 is RATE, and LFO 2 has nothing left to put on a picture
+ * screen: a screen showing CUT, RES and DEPTH for LFO 2 would be showing three knobs that
+ * belong to the filter and to LFO 1's route, labelled as if they were LFO 2's.
+ * (player, 2026-11-04: "LFO2没有CUT，RES，DEPTH…只有RATE是需要的")
  *
  * It was two screens with B_REC as a selector between the two LFOs, and that was wrong for
  * the reason the page model exists: a button's meaning belongs to the panel, not to
@@ -154,21 +167,13 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
  * the same key mean two things depending on where you were.
  *
  * Walking the page with its own button is the rule every other page follows, and it needs
- * no extra key: LFO's button already cycles 1 -> 2 -> 1. Now it cycles 1 -> 2 -> 3 -> 4 -> 1,
- * which is the same gesture with the same hand, and each screen still says which LFO it is.
- *
- *   screen 1  LFO 1  rate/depth (the CUT route)
- *   screen 2  LFO 1  the route table
- *   screen 3  LFO 2  rate/depth
- *   screen 4  LFO 2  the route table
+ * no extra key: the button already cycles 1 -> 2 -> 1. Now it cycles 1 -> 2 -> 3 -> 1.
  *
  * So lfo_edit is not a panel byte any more -- it is a function of which screen is up. That
  * is the whole point: there is no hidden selector that can disagree with the screen, and no
  * lamp that has to explain it. */
-#define lfo_page1  (page == PAGE_LFO && page_no == 1)
-#define lfo_page3  (page == PAGE_LFO && page_no == 3)
-#define lfo_main   (lfo_page1 || lfo_page3)
-#define lfo_mod    ((page == PAGE_LFO) && (page_no == 2 || page_no == 4))
+#define lfo_main   (page == PAGE_LFO && page_no == 1)
+#define lfo_mod    ((page == PAGE_LFO) && (page_no == 2 || page_no == 3))
 
 /* B_GLO's page: the settings that are true of the whole instrument.
  *
@@ -186,7 +191,7 @@ static uint8_t page_no = 1;         /* 1-based screen within the page */
 static const uint8_t PAGE_SCREENS[] = {
     [PAGE_VOICE] = 1,  /* one screen until the second VCO exists, then it rounds */
     [PAGE_ENV]  = 1,
-    [PAGE_LFO]  = 4,   /* LFO 1 rate, LFO 1 routes, LFO 2 rate, LFO 2 routes */
+    [PAGE_LFO]  = 3,   /* LFO 1 picture, LFO 1 routes, LFO 2 routes */
     [PAGE_ARP]  = 1,
     [PAGE_FX]   = 1,   /* reserved: the effects page (reverb/delay/chorus) */
     [PAGE_EDIT] = 1,   /* per source; GRAN will add screens of its own */
@@ -288,8 +293,8 @@ static uint8_t lfo_amt[WV_LFOS][WV_DESTS];
 static uint8_t lfo_shape[WV_LFOS];            /* WV_LFOSH_*, 0 (SINE) by default */
 static uint8_t lfo_sync[WV_LFOS];             /* 0 = Hz, 1 = note division */
 static uint8_t lfo_trig[WV_LFOS] = { WV_LFO_FREE, WV_LFO_FREE };
-/* Which LFO the page is showing, derived from the screen -- see the note on lfo_page1.
- * Screens 1 and 2 are LFO 1, screens 3 and 4 are LFO 2. */
+/* Which LFO the page is showing, derived from the screen -- see the note on lfo_main.
+ * Screens 1 and 2 are LFO 1's, screen 3 is LFO 2's. */
 #define lfo_edit   ((page_no >= 3) ? 1u : 0u)
 #define K_LFO_DEPTH(i)  (lfo_amt[i][WV_DEST_CUT])
 #define K_MORPH_MOD(i)  (lfo_amt[i][WV_DEST_MORPH])
@@ -301,7 +306,7 @@ static uint8_t lfo_trig[WV_LFOS] = { WV_LFO_FREE, WV_LFO_FREE };
  * and screen 2 is where a player dials routes; sending them back to screen 1 to change the
  * speed of the modulator they are routing is the kind of trip a page should not force
  * (player, 2026-11-04: "第二页切换到LFO后，RATE没地方调"). */
-#define ROUTE_SLOTS 6
+#define ROUTE_SLOTS 6    /* the six encoders that carry a ring; K3 is separate */
 #define ROUTE_NONE  0xFF
 /* The FX page's two controls: the filter's tap and key tracking.
  *
@@ -366,30 +371,36 @@ static uint8_t k_morph = 0;
  *
  * A slot the source does not have draws as a dim OFF ring, not an empty hole: a hole is a
  * knob that looks broken, and OFF says "not in this source". */
-static const uint8_t ROUTE_ORDER[3][ROUTE_SLOTS] = {
-    /* K1            K2             K4              SELECT         PRESET         ALGO */
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, ROUTE_NONE,    ROUTE_NONE },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, ROUTE_NONE,    ROUTE_NONE,    ROUTE_NONE },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE },
+/* Indexed [lfo][slot]. Slot 6 is K3, which is the position the two tables disagree about:
+ * PITCH on LFO 1's table, RATE on LFO 2's. RATE is not a destination, so LFO 2's slot 6 is
+ * ROUTE_NONE and the drawing handles it separately -- see the note at BOTTOM_SLOT. Keeping
+ * one table indexed by LFO rather than by screen is what makes "which LFO am I editing"
+ * the only thing the code has to ask. */
+#define ROUTE_RINGS 7    /* six encoders plus K3 */
+static const uint8_t ROUTE_ORDER[2][ROUTE_RINGS] = {
+    /* K1            K2             K4              SELECT         PRESET        ALGO          K3 */
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, WV_DEST_PITCH },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE     },
 };
 
-/* the slot's destination for a source, or ROUTE_NONE */
-static uint8_t route_dest(uint8_t source, uint8_t slot)
+/* GRAIN and SPRAY only exist on a cloud, so they are the two routes a source can lack
+ * beyond LFO 2's missing PITCH. Folded in here rather than into the table because they
+ * depend on the SOURCE while the table depends on the LFO -- two axes, two places. */
+static uint8_t route_dest(uint8_t lfo, uint8_t source, uint8_t slot)
 {
-    return ROUTE_ORDER[source][slot];
+    uint8_t d = ROUTE_ORDER[lfo][slot];
+    if ((d == WV_DEST_GRAIN || d == WV_DEST_SPRAY) && source != SRC_GRAN)
+        return ROUTE_NONE;
+    return d;
 }
 
 /* the same, in the form the host probe prints: -1 for a slot the source does not have */
-static int route_or_minus1(uint8_t source, uint8_t slot)
+static int route_or_minus1(uint8_t lfo, uint8_t source, uint8_t slot)
 {
-    /* The host probe still offers route6 -- it did for one round when there were seven
-     * destinations -- so a slot past the table answers -1 rather than reading past the
-     * end. The probe is a test hook, but a test hook that reads out of bounds is a
-     * warning in every build and a real read of whatever follows the array. */
     uint8_t d;
-    if (slot >= ROUTE_SLOTS)
+    if (slot >= ROUTE_RINGS)
         return -1;
-    d = route_dest(source, slot);
+    d = route_dest(lfo, source, slot);
     return d == ROUTE_NONE ? -1 : (int)d;
 }
 
@@ -1476,24 +1487,32 @@ static void input(void)
         static const uint8_t ROUTE_ENC[ROUTE_SLOTS] = { EN_K1, EN_K2, EN_K4, EN_SELECT,
                                                        EN_PRESET, EN_ALGO };
         uint8_t slot;
+        uint8_t d;
+        int32_t t;
 
         for (slot = 0; slot < ROUTE_SLOTS; slot++) {
-            uint8_t d = route_dest(src, slot);
-            int32_t t = plat_enc(ROUTE_ENC[slot]);
+            d = route_dest(lfo_edit, src, slot);
+            t = plat_enc(ROUTE_ENC[slot]);
             if (d == ROUTE_NONE || t == 0)
                 continue;
             lfo_amt[lfo_edit][d] =
                 (uint8_t)clamp((int32_t)lfo_amt[lfo_edit][d] + t * 4, 0, 127);
         }
-        /* K3 is RATE here, and it is the SAME byte screen 1 writes: one LFO, one rate,
-         * two places to reach it. Read after the six slots so a turn of K3 can never be
-         * mistaken for a route amount.
+        /* K3 is the one position the two tables disagree about: PITCH on LFO 1's table,
+         * RATE on LFO 2's. Which one it is comes out of the same ROUTE_ORDER row the ring is
+         * drawn from, so the knob and the ring cannot drift apart -- if slot 6 has a
+         * destination, K3 is that route's amount; if it does not, K3 is this LFO's RATE.
          *
-         * No drain pass needed: plat_enc() takes the detent as it reads it, and the loop
-         * reads all six before it decides to skip any of them -- so a slot with no route
-         * still clears its knob rather than banking the turn for the next screen. */
-        if ((e = plat_enc(EN_K3)) != 0)
-            lfo_rate[lfo_edit] = (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
+         * Read after the six slots so a turn of K3 can never be mistaken for a route amount. */
+        d = route_dest(lfo_edit, src, 6);
+        if ((e = plat_enc(EN_K3)) != 0) {
+            if (d != ROUTE_NONE)
+                lfo_amt[lfo_edit][d] =
+                    (uint8_t)clamp((int32_t)lfo_amt[lfo_edit][d] + e * 4, 0, 127);
+            else
+                lfo_rate[lfo_edit] =
+                    (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
+        }
 
         btn_prev = btn;
         ui_apply();
@@ -4181,7 +4200,7 @@ void app_frame(void)
 
             for (i = 0; i < 3; i++) {
                 int32_t cx = 44 + i * 76;
-                uint8_t d = route_dest(src, (uint8_t)(3 + i));
+                uint8_t d = route_dest(lfo_edit, src, (uint8_t)(3 + i));
                 int32_t ew = txt_w(ENC_NAME[i]);
                 int32_t nw = (d == ROUTE_NONE) ? 0 : txt_w(DEST_NAME[d]);
                 /* centred as a pair: "SELECT MORPH" reads as one label */
@@ -4197,7 +4216,7 @@ void app_frame(void)
          * then 47 px of ring. 52 + 23 = 75, inside the band's 92. */
         for (i = 0; i < 3; i++) {
             uint8_t slot = (uint8_t)(3 + i);          /* 3 SELECT, 4 PRESET, 5 ALGO */
-            uint8_t d = route_dest(src, slot);
+            uint8_t d = route_dest(lfo_edit, src, slot);
             int32_t cx = 44 + i * 76;
 
             /* knob_at draws the destination's name above the ring, which is where it belongs
@@ -4603,15 +4622,20 @@ void app_frame(void)
          * establishes that a route's amount is called DEPTH and a 54 px cell holds six
          * letters at this font ("MORPH MD" measured 51 of 54 px -- no slack for a second
          * word, and an abbreviation is not a label). */
-        /* Screen 2 is the route table: six destinations and K3's RATE. The three above the
-         * picture are drawn in the material band this screen covers; these are the four
-         * under it. K3 is RATE in the same place it is on screen 1 -- so a player routing
-         * LFO 2 can still change its speed -- and that is why the table is six destinations
-         * and not seven.
+        /* The bottom row is four positions, and K3 is the one that is not always a table
+         * slot:
          *
-         * BOTTOM_SLOT maps a screen position to a table slot, written out rather than
-         * derived because K3 interrupts the run: the four positions are slots 0, 1, RATE
-         * and 2. */
+         *   screen 2  K1 CUT  K2 RES  K3 PITCH  K4 SHAPE
+         *   screen 3  K1 CUT  K2 RES  K3 RATE   K4 SHAPE
+         *
+         * BOTTOM_SLOT holds the table slot for K1, K2 and K4; K3 is ROUTE_SLOTS as a marker
+         * meaning "this position is not a slot", and what it draws depends on the screen.
+         * Written out rather than derived because K3 interrupts the run.
+         *
+         * On screen 2 K3 is PITCH, the fourth destination: LFO 1's speed already has a knob
+         * on screen 1, so its table can afford to spend the position on a route. On screen 3
+         * it is RATE, because LFO 2 has no screen 1 and RATE is the one setting of its that
+         * has no ring to live in. PITCH is what screen 3 gives up. */
         {
             static const uint8_t BOTTOM_SLOT[4] = { 0, 1, ROUTE_SLOTS, 2 };
             int32_t p;
@@ -4621,9 +4645,21 @@ void app_frame(void)
                 uint8_t d;
 
                 if (slot == ROUTE_SLOTS) {
-                    /* RATE gets the same three shapes as a route: an LFO at 0 Hz is a
-                     * route that exists and is turned down, not a knob this source lacks. */
-                    if (lfo_rate[lfo_edit] == 0) {
+                    /* K3, read from the same table the knob handler reads, so the ring and
+                     * the knob cannot disagree about what this position is. */
+                    d = route_dest(lfo_edit, src, ROUTE_SLOTS);
+                    if (d != ROUTE_NONE) {
+                        if (lfo_amt[lfo_edit][d] == 0) {
+                            cv_text(x, KNOB_TOP, &FONT_XS, DEST_NAME[d], sk.ink_hi);
+                            route_zero(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
+                        } else {
+                            knob(x, KNOB_TOP, 54, DEST_NAME[d],
+                                 dest_text(d, lfo_amt[lfo_edit][d]),
+                                 (int32_t)lfo_amt[lfo_edit][d], 1);
+                        }
+                    } else if (lfo_rate[lfo_edit] == 0) {
+                        /* RATE: not a route, so never absent -- but 0 Hz is "here, turned
+                         * down", which is the same distinction the other two shapes make. */
                         cv_text(x, KNOB_TOP, &FONT_XS, "RATE", sk.ink_hi);
                         route_zero(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
                     } else {
@@ -4632,7 +4668,7 @@ void app_frame(void)
                     }
                     continue;
                 }
-                d = route_dest(src, slot);
+                d = route_dest(lfo_edit, src, slot);
                 if (d == ROUTE_NONE) {
                     route_absent(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
                     continue;
@@ -4947,13 +4983,13 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "amt_grain"))  { *got = lfo_amt[lfo_edit][WV_DEST_GRAIN]; return 1; }
     if (!strcmp(what, "amt_spray"))  { *got = lfo_amt[lfo_edit][WV_DEST_SPRAY]; return 1; }
     if (!strcmp(what, "amt_pitch"))  { *got = lfo_amt[lfo_edit][WV_DEST_PITCH]; return 1; }
-    if (!strcmp(what, "route0"))     { *got = route_or_minus1(src, 0); return 1; }
-    if (!strcmp(what, "route1"))     { *got = route_or_minus1(src, 1); return 1; }
-    if (!strcmp(what, "route2"))     { *got = route_or_minus1(src, 2); return 1; }
-    if (!strcmp(what, "route3"))     { *got = route_or_minus1(src, 3); return 1; }
-    if (!strcmp(what, "route4"))     { *got = route_or_minus1(src, 4); return 1; }
-    if (!strcmp(what, "route5"))     { *got = route_or_minus1(src, 5); return 1; }
-    if (!strcmp(what, "route6"))     { *got = route_or_minus1(src, 6); return 1; }
+    if (!strcmp(what, "route0"))     { *got = route_or_minus1(lfo_edit, src, 0); return 1; }
+    if (!strcmp(what, "route1"))     { *got = route_or_minus1(lfo_edit, src, 1); return 1; }
+    if (!strcmp(what, "route2"))     { *got = route_or_minus1(lfo_edit, src, 2); return 1; }
+    if (!strcmp(what, "route3"))     { *got = route_or_minus1(lfo_edit, src, 3); return 1; }
+    if (!strcmp(what, "route4"))     { *got = route_or_minus1(lfo_edit, src, 4); return 1; }
+    if (!strcmp(what, "route5"))     { *got = route_or_minus1(lfo_edit, src, 5); return 1; }
+    if (!strcmp(what, "route6"))     { *got = route_or_minus1(lfo_edit, src, 6); return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
     /* The EDIT page's own numbers. A picture can be right about a region the engine

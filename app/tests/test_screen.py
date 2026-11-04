@@ -417,12 +417,15 @@ shot grn.png
        "and it does NOT set CUT's depth")
     ck(expect("tap LFO\nturn K4 10\n", "amt_shape", 0),
        "screen 1's K4 is still DEPTH, not a route amount")
-    # K3 is RATE on BOTH screens and it is one byte, which is what makes it worth
-    # repeating: the second LFO's speed has to be reachable from where its routes are.
-    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "lfo_rate", 40),
-       "screen 2's K3 is RATE")
+    # K3 is the position the two tables disagree about (player, 2026-11-04): PITCH on
+    # LFO 1's table, because LFO 1's speed already has a knob on screen 1; RATE on LFO 2's,
+    # because LFO 2 has no screen 1 and RATE is the one setting of its with no ring.
+    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "amt_pitch", 40),
+       "screen 2's K3 is PITCH's amount")
     ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "amt_shape", 0),
-       "and it is NOT SHAPE's amount: RATE and the routes are different bytes")
+       "and it is NOT SHAPE's amount: PITCH and the routes are different bytes")
+    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "lfo_rate", 0),
+       "and it does not move LFO 1's rate either")
     ck(expect("tap LFO\ntap LFO\nturn ALGO 10\n", "amt_morph", 0),
        "ALGO has no route in SYNTH, so turning it moves nothing there")
     # The top row carries the routes that exist only in one source: MORPH is SYNTH's.
@@ -442,8 +445,10 @@ shot grn.png
        "SMPL's K4 is SHAPE too")
     ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route2", 2),
        "and so is GRAN's")
-    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route4", 5),
-       "GRAN's PRESET is SPRAY, the last route it has")
+    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route4", 4),
+       "GRAN's PRESET is GRAIN")
+    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route5", 5),
+       "and its ALGO is SPRAY, the last route it has")
     # A source with fewer destinations: SMPL reads no wavetable frame and has no cloud, so
     # it has CUT/RES/SHAPE/PITCH and THREE empty slots (SELECT, PRESET, ALGO). The assertion that matters is that a
     # slot with no route neither takes an amount nor reports one -- and each of these runs
@@ -478,35 +483,41 @@ shot grn.png
     # Screen 2 does NOT keep CUT's value on K1 -- the table borrows every knob including
     # that one, and the line above asserts the corner does not move. What wraps is the
     # page: a third press returns to screen 1, where K4 is DEPTH again.
-    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
-       "a third press is back on screen 1, where K4 is DEPTH again")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
+       "a fourth press is back on screen 1, where K4 is DEPTH again")
     # ── two LFOs, one page: REC is the selector ─────────────────────────────
     # The player's own shape for this: a key that switches and a lamp that says which.
     # What must hold is that the two are INDEPENDENT -- a shared rate or a shared amount
     # would make the second LFO a copy, which is not modulation.
-    # ── the LFO page walks itself: four screens, two per LFO ───────────────────
+    # ── the LFO page walks itself: three screens ──────────────────────────────
     # REC used to select LFO 1 / LFO 2 and that was a defect against the page model
     # (player, 2026-11-04): a button's meaning belongs to the panel, not to the screen.
-    # B_LFO's own button now walks all four screens, so the same gesture reaches both LFOs
-    # and there is no hidden selector that can disagree with what is drawn.
-    ck(expect("tap LFO\n", "page_no", 1), "LFO opens on screen 1, LFO 1's rate")
+    # B_LFO's own button walks the three screens, so the same gesture reaches both LFOs and
+    # there is no hidden selector that can disagree with what is drawn.
+    #
+    # Three and not four: LFO 2 has no picture screen to have. CUT, RES and DEPTH are the
+    # filter's and LFO 1's route's; the only LFO 2 setting with no ring is RATE, and RATE
+    # has a knob on LFO 2's table (player, 2026-11-04: "LFO2没有CUT，RES，DEPTH…只有RATE是需要的").
+    ck(expect("tap LFO\n", "page_no", 1), "LFO opens on screen 1, LFO 1's picture")
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "a second press is LFO 1's route table")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3), "a third is LFO 2's rate")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 4),
-       "a fourth is LFO 2's route table")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
-       "and a fifth rounds back to LFO 1")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3), "a third is LFO 2's route table")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
+       "and a fourth rounds back to LFO 1's picture")
     # which LFO a screen writes follows from the screen, not from a stored byte
     ck(expect("tap LFO\nturn K3 8\n", "lfo_rate1", 32), "screen 1's K3 is LFO 1's rate")
     ck(expect("tap LFO\nturn K3 8\n", "lfo_rate2", 0), "and it does not touch LFO 2")
     ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 8\n", "lfo_rate2", 32),
        "screen 3's K3 is LFO 2's rate")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 8\n", "amt_pitch", 0),
+       "and it is RATE there, not PITCH: the same position, a different meaning per screen")
+    ck(expect("tap LFO\ntap LFO\nturn K3 8\n", "lfo_rate2", 0),
+       "and LFO 1's table does not touch LFO 2's rate")
     ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 8\n", "lfo_rate1", 0),
        "and it does not touch LFO 1")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
        "screen 2's SELECT is LFO 1's MORPH amount")
-    ck(expect("tap LFO\ntap LFO\n\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
-       "screen 4's SELECT is LFO 2's MORPH amount, same slot")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "screen 3's SELECT is LFO 2's MORPH amount, same slot")
     ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\nturn SELECT 10\ntap HOME\ntap LFO\ntap LFO\n",
               "route3", 3),
        "and screen 2 still points SELECT at MORPH after the round trip")
