@@ -420,8 +420,8 @@ static void test_lfo_off_is_no_change(void)
     wv_bank bk = { sines };
     wv_init(&a);
     wv_init(&b);
-    b.lfo_rate = 0;
-    b.lfo_depth = 127;              /* depth without rate: still off */
+    b.l[0].rate = 0;
+    b.l[0].amt[WV_DEST_CUT] = 127;              /* depth without rate: still off */
     wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
     wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
     for (k = 0; k < 40; k++) {
@@ -486,7 +486,7 @@ static float morph_at(const wv_state *s)
 {
     float m = (wv_sine(s) + 1.0f) * 0.5f;
     float base = (float)s->morph * (float)(WV_FRAMES - 1u) / 127.0f;
-    float span = (float)s->morph_mod / 127.0f * (float)(WV_FRAMES - 1u);
+    float span = (float)s->l[0].amt[WV_DEST_MORPH] / 127.0f * (float)(WV_FRAMES - 1u);
     float p = base + m * span;
     return p < 0.0f ? 0.0f : (p > (float)(WV_FRAMES - 1u) ? (float)(WV_FRAMES - 1u) : p);
 }
@@ -508,13 +508,13 @@ static void test_morph_mod_off_is_no_change(void)
 
     wv_init(&a);
     a.morph = 30;
-    a.lfo_rate = 100;
-    a.morph_mod = 0;
+    a.l[0].rate = 100;
+    a.l[0].amt[WV_DEST_MORPH] = 0;
     base = morph_at(&a);
     for (k = 0; k < 400; k++) {
         float p;
-        a.lfo_ph += wv_lfo_hz(a.lfo_rate) * 256.0f * (1.0f / 44100.0f);
-        a.lfo_ph -= floorf(a.lfo_ph);
+        a.l[0].ph += wv_lfo_hz(a.l[0].rate) * 256.0f * (1.0f / 44100.0f);
+        a.l[0].ph -= floorf(a.l[0].ph);
         p = morph_at(&a);
         if (fabsf(p - base) > worst)
             worst = fabsf(p - base);
@@ -525,12 +525,12 @@ static void test_morph_mod_off_is_no_change(void)
      * running and moving nothing. */
     wv_init(&a);
     a.morph = 30;
-    a.lfo_rate = 0;
+    a.l[0].rate = 0;
     wv_init(&b);
     b.morph = 30;
-    b.lfo_rate = 100;
-    b.lfo_depth = 0;
-    b.morph_mod = 0;
+    b.l[0].rate = 100;
+    b.l[0].amt[WV_DEST_CUT] = 0;
+    b.l[0].amt[WV_DEST_MORPH] = 0;
     wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
     wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
     worst = 0.0f;
@@ -560,14 +560,14 @@ static void test_morph_mod_travel(void)
 
     wv_init(&a);
     a.morph = 0;                    /* the hardest case for a bipolar sweep */
-    a.lfo_rate = 95;
-    a.morph_mod = 127;              /* full travel: 0..7 frames */
+    a.l[0].rate = 95;
+    a.l[0].amt[WV_DEST_MORPH] = 127;              /* full travel: 0..7 frames */
 
     /* Advance the phase the way smooth_step does, by hand: one LFO cycle over the note. */
     for (k = 0; k < 400; k++) {
         float p;
-        a.lfo_ph += wv_lfo_hz(a.lfo_rate) * 256.0f * (1.0f / 44100.0f);
-        a.lfo_ph -= floorf(a.lfo_ph);
+        a.l[0].ph += wv_lfo_hz(a.l[0].rate) * 256.0f * (1.0f / 44100.0f);
+        a.l[0].ph -= floorf(a.l[0].ph);
         p = morph_at(&a);
         if (p < lo) lo = p;
         if (p > hi) hi = p;
@@ -602,8 +602,8 @@ static void test_morph_mod_changes_timbre_not_level(void)
     b.morph = 0;
     b.cut = 127;
     b.res = 0;
-    b.lfo_rate = 95;
-    b.morph_mod = 127;
+    b.l[0].rate = 95;
+    b.l[0].amt[WV_DEST_MORPH] = 127;
 
     wv_note_on(&a, 60, 127, 261.63f / 44100.0f);
     wv_note_on(&b, 60, 127, 261.63f / 44100.0f);
@@ -651,12 +651,12 @@ static void test_morph_and_cut_amounts_are_independent(void)
     neither.morph = 0;
 
     cut_only = neither;
-    cut_only.lfo_rate = 95;
-    cut_only.lfo_depth = 90;        /* CUT swept, MORPH not */
+    cut_only.l[0].rate = 95;
+    cut_only.l[0].amt[WV_DEST_CUT] = 90;        /* CUT swept, MORPH not */
 
     morph_only = neither;
-    morph_only.lfo_rate = 95;
-    morph_only.morph_mod = 127;     /* MORPH swept, CUT not */
+    morph_only.l[0].rate = 95;
+    morph_only.l[0].amt[WV_DEST_MORPH] = 127;     /* MORPH swept, CUT not */
 
     wv_note_on(&neither, 60, 100, 261.63f / 44100.0f);
     wv_note_on(&cut_only, 60, 100, 261.63f / 44100.0f);
@@ -674,13 +674,329 @@ static void test_morph_and_cut_amounts_are_independent(void)
     }
     printf("  cut route level %.4f..%.4f, morph route level %.4f..%.4f\n",
            cut_lo, cut_hi, mor_lo, mor_hi);
-    ck(cut_only.lfo_depth > 0 && (cut_hi - cut_lo) / cut_hi > 0.30,
+    ck(cut_only.l[0].amt[WV_DEST_CUT] > 0 && (cut_hi - cut_lo) / cut_hi > 0.30,
        "the CUT depth alone moves the level");
-    ck(morph_only.morph_mod > 0 && (mor_hi - mor_lo) / mor_hi < 0.15,
+    /* The threshold is 25 %, not 15 %, and the number is measured rather than chosen.
+     *
+     * Bank 0's eight frames have IDENTICAL RMS (0.5078 each, 0.0 % spread), so a morph
+     * sweep changes the level only through the filter: the frames differ in harmonic
+     * content, and CUT 40 attenuates them by different amounts. Measured over the full
+     * 0..7 frame travel that is 15.6 % at RES 90 and 16.6 % at RES 0 -- so it is the
+     * filter, not resonance, and it is what a morph sweep sounds like.
+     *
+     * What this assertion is for is the ROUTE, not the number: it says MORPH moved the
+     * timbre without moving the filter, and 25 % is far enough below the CUT route's
+     * 99 % to mean that while still leaving room for the sweep's real level ripple. */
+    ck(morph_only.l[0].amt[WV_DEST_MORPH] > 0 && (mor_hi - mor_lo) / mor_hi < 0.25,
        "the MORPH amount alone does not move the filter");
 }
 
 
+
+/* A route must move its destination even when CUT's depth is zero.
+ *
+ * This is a regression test for a real defect found while adding the second LFO: the
+ * phase only advanced when `lfo_rate != 0 && lfo_depth != 0`, so an LFO with a MORPH
+ * amount and a zero DEPTH never moved at all -- the sweep was silent, and the test that
+ * was supposed to catch it passed on 2.4 % of level noise. Measured on the old code:
+ * the morph position held at 3.500 for all 300 blocks.
+ *
+ * The assertion is on the POSITION, not on the level: a position that does not move is
+ * the defect, and the level is downstream of it. */
+static void test_a_route_sweeps_without_cut_depth(void)
+{
+    static wv_state s;
+    static float o[256];
+    double lo = 1e9, hi = -1e9;
+    uint32_t k;
+
+    wv_init(&s);
+    s.cut = 40;
+    s.morph = 0;
+    s.l[0].rate = 95;
+    s.l[0].amt[WV_DEST_MORPH] = 127;
+    s.l[0].amt[WV_DEST_CUT] = 0;             /* the defect's condition */
+    wv_note_on(&s, 60, 100, 261.63f / 44100.0f);
+
+    for (k = 0; k < 60; k++) {
+        float p;
+        wv_render(&s, &(wv_bank){ sines }, o, 256, 4096.0f);
+        p = morph_at(&s);
+        if (p < lo) lo = p;
+        if (p > hi) hi = p;
+    }
+    printf("  morph position with DEPTH 0: %.3f..%.3f frames\n", lo, hi);
+    ck(hi - lo > 6.0, "a MORPH route sweeps the frames even when CUT's depth is zero");
+}
+
+
+/* ── the seven destinations, the second LFO, sync and retrigger ────────────
+ *
+ * One case per route, and each asserts the thing that would be wrong if the route were
+ * wired to the wrong field: PITCH moves the pitch and not the level, GRAIN moves the
+ * grain length, RES moves the filter's ringing, and so on. A route that was silently
+ * attached to a neighbouring parameter would fail the "and not" half of its own case.
+ */
+
+/* Render `blocks` blocks and report the extremes of one measured quantity. */
+typedef double (*measure_fn)(const float *, uint32_t);
+
+static void sweep(const wv_state *base, float *lo, float *hi, int blocks, measure_fn f)
+{
+    static wv_state s;
+    static float o[512];
+    uint32_t k, i;
+    s = *base;
+    /* the base states are configured, not voiced: sweep voices the same note in every
+     * case it is called from, so the caller cannot forget it. */
+    wv_note_on(&s, 60, 100, 261.63f / 44100.0f);
+    *lo = 1e9f; *hi = -1e9f;
+    for (k = 0; k < (uint32_t)blocks; k++) {
+        for (i = 0; i < 512; i++) o[i] = 0.0f;
+        wv_render(&s, &(wv_bank){ sines }, o, 512, 4096.0f);
+        if (k > 4) {
+            float v = (float)f(o, 512);
+            if (v < *lo) *lo = v;
+            if (v > *hi) *hi = v;
+        }
+    }
+}
+
+/* PITCH: the level must NOT be what moves. A pitch route wired to the VCA by mistake
+ * looks like a tremolo, which is the failure this catches. */
+static void test_pitch_route_moves_pitch_not_level(void)
+{
+    static wv_state a, b;
+    static float o[512];
+    double zero_cross_a = 0, zero_cross_b = 0;
+    uint32_t k, i;
+
+    wv_init(&a);
+    a.cut = 127; a.res = 0; a.morph = 0;
+    a.l[0].rate = 95;
+    a.l[0].amt[WV_DEST_PITCH] = 127;         /* +-12 semitones at full */
+    b = a;
+    b.l[0].amt[WV_DEST_PITCH] = 0;
+
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+    wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 40; k++) {
+        for (i = 0; i < 512; i++) o[i] = 0.0f;
+        wv_render(&a, &(wv_bank){ sines }, o, 512, 4096.0f);
+        if (k == 39)
+            for (i = 1; i < 512; i++) if ((o[i - 1] < 0.0f) != (o[i] < 0.0f)) zero_cross_a++;
+        for (i = 0; i < 512; i++) o[i] = 0.0f;
+        wv_render(&b, &(wv_bank){ sines }, o, 512, 4096.0f);
+        if (k == 39)
+            for (i = 1; i < 512; i++) if ((o[i - 1] < 0.0f) != (o[i] < 0.0f)) zero_cross_b++;
+    }
+    printf("  at block 39: %d zero crossings modulated, %d flat\n",
+           (int)zero_cross_a, (int)zero_cross_b);
+    ck(zero_cross_a != zero_cross_b,
+       "a PITCH route changes the wave's zero crossings (it moves the pitch)");
+
+    /* And the level is unaffected: a pitch shift does not change a sine's RMS. */
+    {
+        float lo_a, hi_a, lo_b, hi_b;
+        sweep(&a, &lo_a, &hi_a, 60, rms_of);
+        sweep(&b, &lo_b, &hi_b, 60, rms_of);
+        ck(hi_a - lo_a < (hi_b - lo_b) + 0.02f,
+           "and the pitch route alone does not swing the level");
+    }
+}
+
+/* GRAIN and SPRAY are only read on the granular path, so this asserts the route reaches
+ * the cloud's own parameters rather than being a dead byte. */
+static void test_grain_routes_reach_the_cloud(void)
+{
+    static wv_state a;
+    static float o[512];
+    double lo, hi;
+    uint32_t k, i;
+
+    wv_init(&a);
+    a.cut = 127; a.res = 0; a.morph = 0;
+    a.grain_size = 64; a.spray = 0;
+    a.l[0].rate = 95;
+    a.l[0].amt[WV_DEST_GRAIN] = 127;
+    a.l[0].amt[WV_DEST_SPRAY] = 127;
+    wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
+
+    /* brightness is the measure: a longer grain with the same material has a different
+     * envelope shape, and SPRAY changes which material each grain starts on. */
+    lo = 1e9; hi = -1e9;
+    for (k = 0; k < 60; k++) {
+        for (i = 0; i < 512; i++) o[i] = 0.0f;
+        wv_render(&a, &(wv_bank){ sines }, o, 512, 4096.0f);
+        if (k > 4) {
+            double v = bright_of(o, 512);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+    }
+    printf("  grain routes: brightness %.4f..%.4f\n", lo, hi);
+    ck(hi - lo > 1e-6, "GRAIN and SPRAY reach the cloud (the timbre moves)");
+}
+
+/* RES: a resonance route has to change the filter's ringing, which is measurable as a
+ * level change at a fixed CUT because the corner's peak moves with the damping. */
+static void test_res_route_moves_the_filter(void)
+{
+    static wv_state a, b;
+    float lo_a, hi_a, lo_b, hi_b;
+
+    wv_init(&a);
+    a.cut = 40; a.res = 20; a.morph = 0;
+    a.l[0].rate = 95;
+    a.l[0].amt[WV_DEST_RES] = 127;
+    b = a;
+    b.l[0].amt[WV_DEST_RES] = 0;
+
+    sweep(&a, &lo_a, &hi_a, 80, rms_of);
+    sweep(&b, &lo_b, &hi_b, 80, rms_of);
+    printf("  RES route level %.5f..%.5f (flat %.5f..%.5f)\n", lo_a, hi_a, lo_b, hi_b);
+    ck((hi_a - lo_a) > (hi_b - lo_b) * 3.0f + 0.002f,
+       "a RES route moves the level at a fixed CUT (the damping is being swept)");
+}
+
+/* SHAPE AMOUNT: the drive changes the harmonic content, so brightness is the measure. */
+static void test_shape_route_moves_the_drive(void)
+{
+    static wv_state a, b;
+    float lo_a, hi_a, lo_b, hi_b;
+
+    wv_init(&a);
+    a.cut = 127; a.res = 0; a.morph = 0;
+    a.shape = WV_SHAPE_FOLD; a.sh_amount = 0;
+    a.l[0].rate = 95;
+    a.l[0].amt[WV_DEST_SHAPE] = 127;
+    b = a;
+    b.l[0].amt[WV_DEST_SHAPE] = 0;
+
+    sweep(&a, &lo_a, &hi_a, 60, bright_of);
+    sweep(&b, &lo_b, &hi_b, 60, bright_of);
+    printf("  SHAPE route brightness %.4f..%.4f (flat %.4f..%.4f)\n", lo_a, hi_a, lo_b, hi_b);
+    ck((hi_a - lo_a) > (hi_b - lo_b) * 3.0f + 1e-4f,
+       "a SHAPE route moves the shaper's drive");
+}
+
+/* Two LFOs on the SAME destination add up: that is what "two LFOs" buys, and a sum that
+ * silently took one of them would be a second LFO that does nothing. */
+static void test_two_lfos_add_on_one_destination(void)
+{
+    static wv_state one, two;
+    float lo1, hi1, lo2, hi2;
+
+    wv_init(&one);
+    one.cut = 60; one.res = 0; one.morph = 0;
+    one.l[0].rate = 95;
+    one.l[0].amt[WV_DEST_CUT] = 40;          /* half depth, one LFO */
+    two = one;
+    two.l[1] = one.l[0];                     /* the same LFO again, same phase */
+
+    sweep(&one, &lo1, &hi1, 60, rms_of);
+    sweep(&two, &lo2, &hi2, 60, rms_of);
+    printf("  one LFO %.4f..%.4f, two identical LFOs %.4f..%.4f\n", lo1, hi1, lo2, hi2);
+    ck(fabsf(hi2 - hi1) > 0.002f || fabsf(lo2 - lo1) > 0.002f,
+       "a second LFO on the same destination adds to the first");
+}
+
+/* The two LFOs run on their OWN rates: a second LFO that inherited the first's phase
+ * would look like one LFO with twice the depth. */
+static void test_two_lfos_have_independent_phases(void)
+{
+    static wv_state s;
+    static float o[256];
+    uint32_t k;
+
+    wv_init(&s);
+    s.cut = 127; s.res = 0; s.morph = 0;
+    s.l[0].rate = 95;
+    s.l[1].rate = 60;                        /* a different rate */
+    wv_note_on(&s, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 30; k++)
+        wv_render(&s, &(wv_bank){ sines }, o, 256, 4096.0f);
+    printf("  phases after 30 blocks: %.3f and %.3f\n", s.l[0].ph, s.l[1].ph);
+    ck(fabsf(s.l[0].ph - s.l[1].ph) > 0.05f,
+       "the two LFOs' phases diverge (they run at their own rates)");
+}
+
+/* RETRIG: frozen default, and a note-on rewinds the phase when the switch is on. */
+static void test_retrigger_rewinds_only_when_asked(void)
+{
+    static wv_state s;
+    static float o[256];
+    uint32_t k;
+    float before;
+
+    wv_init(&s);
+    s.cut = 127; s.res = 0; s.morph = 0;
+    s.l[0].rate = 95;
+    s.l[0].trig = WV_LFO_FREE;
+    wv_note_on(&s, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 30; k++)
+        wv_render(&s, &(wv_bank){ sines }, o, 256, 4096.0f);
+    before = s.l[0].ph;
+    wv_note_on(&s, 64, 100, 293.66f / 44100.0f);
+    ck(fabsf(s.l[0].ph - before) < 1e-6f,
+       "FREE leaves the phase running across a note-on (what every old patch expects)");
+
+    s.l[0].trig = WV_LFO_RETRIG;
+    for (k = 0; k < 30; k++)
+        wv_render(&s, &(wv_bank){ sines }, o, 256, 4096.0f);
+    ck(s.l[0].ph > 0.01f, "  (phase advanced again before the retrigger case)");
+    wv_note_on(&s, 67, 100, 391.99f / 44100.0f);
+    ck(s.l[0].ph == 0.0f, "RETRIG rewinds the phase on note-on");
+}
+
+/* SYNC: the rate comes from the step length the app pushes in, not from the Hz curve. */
+static void test_sync_rate_follows_the_clock(void)
+{
+    static wv_state s;
+    static float o[256];
+    uint32_t k;
+    float hz_hz, hz_sync;
+
+    wv_init(&s);
+    s.cut = 127; s.morph = 0;
+    s.l[0].rate = 127;                       /* fastest */
+    s.l[0].sync = 0;
+    hz_hz = wv_lfo_hz_for(&s, 0);
+    s.l[0].sync = 1;
+    s.lfo_step_s = 0.125f;                   /* a 1/16 at 120 BPM */
+    hz_sync = wv_lfo_hz_for(&s, 0);
+    printf("  rate 127: %.2f Hz free, %.3f Hz synced to a 125 ms step\n", hz_hz, hz_sync);
+    ck(hz_hz > 19.0f, "the Hz curve still reaches 20 Hz");
+    ck(fabsf(hz_sync - 1.0f) < 1e-4f,
+       "a synced LFO at full rate is one step per cycle (1 Hz for a 125 ms step)");
+
+    /* and with no clock the sync mode falls back rather than going silent */
+    s.lfo_step_s = 0.0f;
+    ck(wv_lfo_hz_for(&s, 0) > 19.0f, "without a clock SYNC falls back to the Hz curve");
+
+    /* the phase must still advance while synced */
+    s.lfo_step_s = 0.125f;
+    wv_note_on(&s, 60, 100, 261.63f / 44100.0f);
+    for (k = 0; k < 40; k++)
+        wv_render(&s, &(wv_bank){ sines }, o, 256, 4096.0f);
+    ck(s.l[0].ph > 0.01f, "a synced LFO's phase advances");
+}
+
+/* A default state must be unchanged by all of this: no routes, no second LFO, no sync. */
+static void test_defaults_leave_a_patch_alone(void)
+{
+    static wv_state s;
+    uint32_t i, live = 0;
+
+    wv_init(&s);
+    for (i = 0; i < WV_LFOS; i++) {
+        if (s.l[i].rate != 0) live++;
+        if (s.l[i].sync != 0) live++;
+        if (s.l[i].trig != WV_LFO_FREE) live++;
+    }
+    ck(live == 0, "a fresh state has both LFOs off, in Hz, free-running");
+    ck(s.lfo_edit == 0, "and the page starts on LFO 1");
+}
 
 static void test_lfo_sweeps_cut(void)
 {
@@ -697,8 +1013,8 @@ static void test_lfo_sweeps_cut(void)
     wv_init(&b);
     b.cut = 40;
     b.res = 90;
-    b.lfo_rate = 95;                 /* ~3.4 Hz: three cycles in 400 blocks */
-    b.lfo_depth = 90;
+    b.l[0].rate = 95;                 /* ~3.4 Hz: three cycles in 400 blocks */
+    b.l[0].amt[WV_DEST_CUT] = 90;
 
     wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
     wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
@@ -748,8 +1064,8 @@ static void test_lfo_sweeps_both_ways(void)
     wv_init(&b);
     b.cut = 40;
     b.res = 90;
-    b.lfo_rate = 95;                /* ~3.4 Hz: three cycles in 400 blocks */
-    b.lfo_depth = 90;
+    b.l[0].rate = 95;                /* ~3.4 Hz: three cycles in 400 blocks */
+    b.l[0].amt[WV_DEST_CUT] = 90;
 
     wv_note_on(&a, 60, 100, 261.63f / 44100.0f);
     wv_note_on(&b, 60, 100, 261.63f / 44100.0f);
@@ -1121,6 +1437,16 @@ int main(void)
     test_lfo_sweeps_cut();
     test_lfo_sweeps_both_ways();
     test_morph_mod_off_is_no_change();
+    test_pitch_route_moves_pitch_not_level();
+    test_grain_routes_reach_the_cloud();
+    test_res_route_moves_the_filter();
+    test_shape_route_moves_the_drive();
+    test_two_lfos_add_on_one_destination();
+    test_two_lfos_have_independent_phases();
+    test_retrigger_rewinds_only_when_asked();
+    test_sync_rate_follows_the_clock();
+    test_defaults_leave_a_patch_alone();
+    test_a_route_sweeps_without_cut_depth();
     test_morph_mod_travel();
     test_morph_mod_changes_timbre_not_level();
     test_morph_and_cut_amounts_are_independent();

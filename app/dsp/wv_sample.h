@@ -62,6 +62,10 @@ float wv_smp_inc(const wv_sample *s, float note);
 typedef struct {
     float pos;                     /* in samples, fractional */
     float inc;
+    /* The rate this reader was STARTED at, before any pitch modulation. A chop's inc is
+     * the slot's rate divided down (a 44.1 k sample played at 11.025 k advances 0.25), so
+     * the base is per reader and not the note's pitch -- see voice_block's PITCH route. */
+    float inc_base;
     int32_t end;                   /* one past the last sample this reader may read; -1: the slot's end */
     int32_t loop_start, loop_end;  /* -1: no loop (a slice plays once) */
     int8_t  dir;                   /* +1 forward; granular reverses grains with -1 */

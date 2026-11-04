@@ -40,6 +40,32 @@ float wv_lfo_hz(uint32_t v127)
     return 0.02f * fm_exp2f(9.9658f * u7_to_f(v127));
 }
 
+/* The rate one LFO is actually running at, whichever mode it is in.
+ *
+ * SYNC divides the step length the APP already computed. That direction matters: the
+ * arpeggiator owns the clock (app.c's ARP_STEP_MS + the tempo it is running at), and a
+ * second copy of a note-division table inside the DSP would be a second thing to keep
+ * in step with the first -- the failure mode this codebase has paid for more than once.
+ * So the app passes in one number, `step_s`: the seconds one step of the CURRENT
+ * division lasts, or 0 when no clock is running. The DSP then makes the LFO's period
+ * that many steps long.
+ *
+ * rate 1..127 maps to 1..8 steps (one step to a whole bar of 16ths at the arp's own
+ * scalings), and the mapping is a division, not a table, so it cannot disagree with
+ * anything. */
+float wv_lfo_hz_for(const wv_state *s, uint32_t which)
+{
+    const wv_lfo *l = &s->l[which < WV_LFOS ? which : 0];
+    if (l->rate == 0)
+        return 0.0f;
+    if (l->sync && s->lfo_step_s > 0.0f) {
+        /* 1..8 steps per LFO cycle: rate 127 is the fastest the sync mode goes. */
+        float steps = 1.0f + 7.0f * u7_to_f(l->rate);
+        return 1.0f / (steps * s->lfo_step_s);
+    }
+    return wv_lfo_hz(l->rate);
+}
+
 /* Depth: 0..4 octaves either side. Octaves, not Hz, because CUT is exponential over
  * nine octaves and a sweep that is linear in Hz spends most of its travel in the top
  * two octaves where nothing is happening. */
@@ -48,61 +74,101 @@ static float lfo_oct(uint32_t v127)
     return 4.0f * u7_to_f(v127);
 }
 
-/* The LFO's value for this block: a sine in -1..1, and 1.0 (no modulation) when it is
- * off. CUT is scaled by 2^(value * depth), so the depth is symmetric in octaves. */
+/* The LFO's value for this block, in -1..1, and 0 when that LFO is off.
+ *
+ * Per LFO, not per state: two of them run at once off two phases, and a route reads
+ * whichever LFO owns it. */
+static float lfo_value(const wv_lfo *l)
+{
+    if (l->rate == 0)
+        return 0.0f;
+    if (l->shape == WV_LFOSH_TRI) {
+        /* A triangle from the same phase: 0 -> +1 -> 0 -> -1 -> 0 with no ease, which is
+         * what makes a slow sweep read as movement rather than as breathing. */
+        float t = l->ph < 0.5f ? (l->ph * 4.0f - 1.0f)      /* -1..1 over the first half */
+                               : (3.0f - l->ph * 4.0f);     /* 1..-1 over the second */
+        return t;
+    }
+    if (l->shape == WV_LFOSH_SH) {
+        /* Sample and hold: one random value per CYCLE, held for the whole cycle.
+         *
+         * The value is a hash of the cycle COUNT, which is a state variable per LFO --
+         * but a one-word one, not a random generator: a hash of the count means the same
+         * cycle always gives the same value, so the two cores agree and a test can
+         * predict it. A held value that changed its own state could do neither. */
+        uint32_t h = l->cycle * 2654435761u;
+        return (float)(h >> 8) * (2.0f / 16777216.0f) - 1.0f;
+    }
+    /* fm_sin_pi takes RADIANS on [-pi, pi], not a 0..1 phase. */
+    return fm_sin_pi(l->ph * FM_TWO_PI);
+}
+
+/* The public one: the waveform of the LFO the page is editing.
+ *
+ * Exposed because the tests assert the DSP's own waveform rather than a copy of the
+ * arithmetic. Callers that care WHICH LFO ask for it by index (wv_lfo_value). */
 float wv_sine(const wv_state *s)
 {
-    if (s->lfo_rate == 0)
-        return 0.0f;
-    /* fm_sin_pi takes RADIANS on [-pi, pi], not a 0..1 phase -- the same mistake
-     * fixed at line 139 for the shaper. Without the 2*pi the LFO never leaves the
-     * positive half: sin() only walks 0..1 rad, so the filter opened and closed on a
-     * one-radian turn and the down-swing was missing entirely. */
-    return fm_sin_pi(s->lfo_ph * FM_TWO_PI);
+    return lfo_value(&s->l[s->lfo_edit < WV_LFOS ? s->lfo_edit : 0]);
 }
 
+float wv_lfo_value(const wv_state *s, uint32_t which)
+{
+    return lfo_value(&s->l[which < WV_LFOS ? which : 0]);
+}
+
+/* One route's depth, as a multiplier on the destination's own units.
+ *
+ * Every destination takes the same shape -- a bipolar sine times its amount -- and the
+ * amount's MEANING is per destination, which is what the header's table records. Doing
+ * it in one function rather than seven is the reason adding an eighth destination is a
+ * line in the enum and a line here, not a new code path.
+ *
+ * `unipolar` is for destinations whose knob is the BOTTOM of a travel: MORPH cannot go
+ * below frame 0, so a bipolar sweep from a knob at 0 would be a clipped half-cycle.
+ */
+static float lfo_route(const wv_state *s, uint32_t dest, float span, int unipolar)
+{
+    uint32_t which;
+    float v;
+    int i;
+
+    /* Sum over BOTH LFOs: two LFOs on one destination is the reason to have two. The
+     * amounts are added before the span is applied, so two half-depths reach one full
+     * depth -- additive, which is what "two LFOs" means in a modulation matrix. */
+    float sum = 0.0f;
+    for (which = 0; which < WV_LFOS; which++) {
+        const wv_lfo *l = &s->l[which];
+        if (l->rate == 0 || l->amt[dest] == 0)
+            continue;
+        v = lfo_value(l);
+        if (unipolar)
+            v = (v + 1.0f) * 0.5f;
+        sum += v * u7_to_f(l->amt[dest]);
+    }
+    (void)i;
+    return sum * span;
+}
+
+/* CUT's share: a multiplier on the corner, symmetric in octaves. */
 static float lfo_cut_scale(const wv_state *s)
 {
-    if (s->lfo_rate == 0 || s->lfo_depth == 0)
-        return 1.0f;
-    return fm_exp2f(wv_sine(s) * lfo_oct(s->lfo_depth));
+    return fm_exp2f(lfo_route(s, WV_DEST_CUT, 4.0f, 0));
 }
 
-/* MORPH's share of the same LFO, in frames, for this block.
- *
- * The bias makes the sweep UNIPOLAR: the knob's position is the BOTTOM of the sweep and
- * the LFO only ever moves the morph upward, so the frame pair the player dialled in is
- * always one of the two frames being heard. A bipolar sweep would reach below the knob,
- * and since MORPH's travel is only 0..7 frames, a knob at 0 with any depth would spend
- * half its cycle clamped at frame 0 -- the sweep would be a clipped half-cycle rather
- * than a sweep. Unipolar costs nothing and is what the knob's own meaning suggests.
- *
- * The clamping to 0..WV_FRAMES-1 happens here so wv_frames_at does not have to (it
- * clamps too, for the callers that pass a raw position).
- *
- * The amount comes from the page (§5c3): the panel has ONE DEPTH knob and CUT already
- * owns it, so MORPH gets its own amount rather than a share of CUT's. Sharing would make
- * dialling a filter sweep silently add a wavetable sweep, which is a control doing
- * something its label does not say. */
+/* MORPH's share, in frames. UNIPOLAR -- the knob is the bottom of the travel (see the
+ * comment this function replaced): a bipolar sweep would spend half its cycle clamped at
+ * frame 0 whenever the knob was low, which is a clipped half-cycle rather than a sweep. */
 static float morph_mod(const wv_state *s)
 {
-    float m, span;
-
-    if (s->lfo_rate == 0 || s->morph_mod == 0)
-        return 0.0f;
-    m = (wv_sine(s) + 1.0f) * 0.5f;                  /* 0..1, unipolar */
-    span = u7_to_f(s->morph_mod) * (float)(WV_FRAMES - 1u);
-    return m * span;
+    return lfo_route(s, WV_DEST_MORPH, (float)(WV_FRAMES - 1u), 1);
 }
 
 /* The morph position a voice reads this block: the knob plus the modulation, clamped to
- * the bank's travel.
- *
- * There is deliberately NO smoother on this. A one-pole here would make a direct write to
- * s->morph lag by a block or two, and the existing contract -- MORPH does not move inside
- * a block, so the frame pair is resolved once per block -- is what the block hoist above
- * depends on. Modulation does not need one either: it is recomputed per block from a sine
- * that is already continuous, so it cannot step. */
+ * the bank's travel. There is deliberately NO smoother on this -- a one-pole here would
+ * make a direct write to s->morph lag by a block or two, and the existing contract
+ * (MORPH does not move inside a block, so the frame pair resolves once per block) is
+ * what the block hoist depends on. */
 static float morph_pos(const wv_state *s)
 {
     float p = u7_to_f(s->morph) * (float)(WV_FRAMES - 1u) + morph_mod(s);
@@ -111,6 +177,16 @@ static float morph_pos(const wv_state *s)
     if (p > (float)(WV_FRAMES - 1u))
         return (float)(WV_FRAMES - 1u);
     return p;
+}
+
+/* PITCH's share, as a frequency multiplier. A semitone span of 12 at full amount.
+ *
+ * This is the one destination that could not be a multiply at an existing read site:
+ * a table voice's pitch is `v->inc`, written once at note-on. It is now re-derived per
+ * block from a stored base (see voice_begin). */
+static float lfo_pitch_scale(const wv_state *s)
+{
+    return fm_exp2f(lfo_route(s, WV_DEST_PITCH, 12.0f, 1) * (1.0f / 12.0f));
 }
 
 /* KEY TRACKING: the corner's multiplier for one note.
@@ -420,6 +496,7 @@ void wv_init(wv_state *s)
     s->shape = WV_SHAPE_SOFT;
     s->sh_amount = 0;
     s->cut_z = cut_hz(s->cut);
+    s->res_z = u7_to_f(s->res);
     s->amount_z = 0.0f;
     /* The envelope's defaults are the old hardcoded behaviour: a ~1 ms attack, full
      * sustain (so decay has nowhere to go), and a release of about the 30 ms the
@@ -430,17 +507,31 @@ void wv_init(wv_state *s)
     s->eg_d = 64;
     s->eg_s = 127;
     s->eg_r = 32;
-    /* LFO off, so a patch made before it existed sounds the same after it */
-    s->lfo_rate = 0;
-    s->lfo_depth = 0;
-    s->lfo_ph = 0.0f;
+    /* Both LFOs off, so a patch made before any of this existed sounds the same after it.
+     * Every amount is 0, which is the "route does not exist" state for all seven --
+     * the same rule the single morph_mod followed. */
+    {
+        int li, di;
+        for (li = 0; li < WV_LFOS; li++) {
+            s->l[li].rate = 0;
+            s->l[li].sync = 0;
+            s->l[li].trig = WV_LFO_FREE;
+            s->l[li].shape = WV_LFOSH_SINE;
+            s->l[li].ph = 0.0f;
+            s->l[li].cycle = 0;
+            for (di = 0; di < WV_DESTS; di++)
+                s->l[li].amt[di] = 0;
+        }
+        /* LFO 1 is the one the page starts on: it is the LFO the panel had before there
+         * were two, so a player who never touches REC finds everything where it was. */
+        s->lfo_edit = 0;
+    }
     /* Filter type LP and no key tracking: a patch made before either existed sounds the
      * same after them. Both defaults are the "off" state -- LP is what the voice always
      * read, and 0 % tracking is the corner the CUT knob always meant. */
     s->ftype = WV_FTYPE_LP;
     s->ktrack = 0;
-    /* MORPH unmodulated: a patch made before the route existed sounds the same after it. */
-    s->morph_mod = 0;
+
 }
 
 /* Pick a voice: a free one, or the oldest note when all eight are busy. Shared by
@@ -466,11 +557,29 @@ static void voice_begin(wv_state *s, uint32_t pick, uint8_t note, uint8_t vel, f
     wv_voice *v = &s->v[pick];
     int was = v->active;
 
+    /* RETRIGGER, once per note-on and per LFO that asks for it.
+     *
+     * The phase is per LFO, not per voice, so this restarts the sweep for every voice
+     * already sounding as well as the new one. That is the documented consequence (see
+     * WV_LFO_RETRIG in the header): a per-voice LFO would need eight phases and eight
+     * sines, and this instrument's LFO is one sweep for the whole keyboard.
+     *
+     * Done here rather than in the render because "a note started" is exactly the event
+     * the setting names, and voice_begin is where a note starts. */
+    {
+        int li;
+        for (li = 0; li < WV_LFOS; li++)
+            if (s->l[li].trig == WV_LFO_RETRIG) {
+                s->l[li].ph = 0.0f;
+                s->l[li].cycle = 0;
+            }
+    }
     /* a fresh voice starts its phase a third of a cycle apart, so two voices of the
      * same note do not sum to a 6 dB peak on sample 0 */
     if (!was)
         v->phase = (float)pick * (1.0f / 3.0f);
     v->inc = inc;
+    v->inc_base = inc;
     v->note = note;
     /* A zero velocity is not a quiet note, it is a missing reading. Velocity is a
      * control input (the touch sensor), not the sample's amplitude, so a missing one
@@ -773,9 +882,17 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
     uint32_t kti;
     for (kti = 0; kti < WV_VOICES; kti++)
         kt_scale[kti] = kt_on ? wv_ktrack_scale(s->v[kti].note, s->ktrack) : 1.0f;
-    float amt_t = u7_to_f(s->sh_amount);
-    /* the SVF's damping: RES 0 is a plain low-pass, RES 127 rings hard */
-    float damp = 2.0f - 1.85f * u7_to_f(s->res);
+    /* SHAPE's own target, exactly as cut_t is CUT's: the knob plus this block's route.
+     * voice_block glides its own copy toward it without writing back, so the two cores
+     * see the same ramp. */
+    float amt_t = u7_to_f(s->sh_amount) + lfo_route(s, WV_DEST_SHAPE, 1.0f, 1);
+    if (amt_t < 0.0f) amt_t = 0.0f;
+    if (amt_t > 1.0f) amt_t = 1.0f;
+    /* the SVF's damping: RES 0 is a plain low-pass, RES 127 rings hard.
+     *
+     * res_z, not s->res: resonance is a modulation destination now, and a route that
+     * stepped on every block boundary would click on a fast LFO. */
+    float damp = 2.0f - 1.85f * s->res_z;
     /* The parameter smoothing per sample, to reach the target in ~2 ms at 44.1 k.
      *
      * These are LOCAL copies of the smoothed values, and voice_block does not write
@@ -788,6 +905,45 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
     const float zc = 0.0113f;
     float cut_z = s->cut_z;
     float amount_z = s->amount_z;
+    /* PITCH, once per block for every voice in this range.
+     *
+     * It cannot be a multiply at a read site the way the others are: a table voice's
+     * pitch is `v->inc`, consumed by `v->phase += v->inc` and nowhere else. So the block
+     * re-derives inc from the note's own base times the route, which also means a route
+     * at zero restores the struck pitch exactly rather than drifting toward it. */
+    {
+        float ps = lfo_pitch_scale(s);
+        uint32_t vi;
+        /* At scale 1.0 there is no route, and this loop must not run: a sample voice's
+         * rd.inc is NOT inc_base. wv_reader_range sets it for a chop (a 44.1 k sample
+         * played at 11.025 k advances 0.25, not the note's 1.0), and overwriting it with
+         * the note's pitch turned every chop back into a full-rate sample -- measured as
+         * two failures in test_sample ("the reader reaches the end of the slot").
+         *
+         * So the route SCALES whatever rate the voice already had rather than
+         * recomputing it from a base. That also means the base cannot drift: it is never
+         * read back. */
+        if (ps != 1.0f) {
+            for (vi = from; vi < to; vi++) {
+                wv_voice *vv = &s->v[vi];
+                if (!vv->active)
+                    continue;
+                vv->inc = vv->inc_base * ps;
+                /* The other two sources read their own rate fields, not inc: a sample
+                 * voice advances rd.inc and a cloud advances gr.rate. */
+                if (vv->src == WV_SRC_TABLE) {
+                    /* inc is the one this source reads */
+                } else if (vv->src == WV_SRC_GRAIN) {
+                    /* the cloud's rate, at the pitch the note was struck at */
+                    if (!vv->gr.rate_base) vv->gr.rate_base = vv->gr.rate;
+                    vv->gr.rate = vv->gr.rate_base * ps;
+                } else {
+                    if (!vv->rd.inc_base) vv->rd.inc_base = vv->rd.inc;
+                    vv->rd.inc = vv->rd.inc_base * ps;
+                }
+            }
+        }
+    }
 
     for (k = 0; k < n; k++) {
         float g, sh, env, amp;
@@ -829,8 +985,21 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
                  * parameter, not the voice's, because the panel can change it while a
                  * note is held (a held cloud re-tiles at the new length, which is the
                  * point of being able to turn it). */
-                osel = wv_grains_next(&v->gr, v->smp, wv_grain_len(s->grain_size),
-                                      (float)s->spray);
+                /* GRAIN SIZE and SPRAY are modulation destinations, and both are read
+                 * here because this is the only place a cloud's spawn is decided. The
+                 * grain length is clamped to the knob's own range so a route cannot ask
+                 * for a grain the table cannot deliver. */
+                {
+                    float g = u7_to_f(s->grain_size) + lfo_route(s, WV_DEST_GRAIN, 1.0f, 1);
+                    float sp = u7_to_f(s->spray) + lfo_route(s, WV_DEST_SPRAY, 1.0f, 1);
+                    if (g < 0.0f) g = 0.0f;
+                    if (g > 1.0f) g = 1.0f;
+                    if (sp < 0.0f) sp = 0.0f;
+                    if (sp > 1.0f) sp = 1.0f;
+                    osel = wv_grains_next(&v->gr, v->smp,
+                                          wv_grain_len((uint8_t)(g * 127.0f + 0.5f)),
+                                          sp);
+                }
             } else {
                 int fin = 0;
                 osel = wv_reader_next(&v->rd, v->smp, &fin);
@@ -942,11 +1111,22 @@ static void smooth_step(wv_state *s, uint32_t n)
     float cut_t = cut_hz(s->cut) * lfo_cut_scale(s);
     if (cut_t > 18000.0f)
         cut_t = 18000.0f;                    /* same clamp voice_block applies */
-    float amt_t = u7_to_f(s->sh_amount);
+    /* SHAPE's drive and RES, both modulated on the same block boundary as CUT.
+     *
+     * Both are clamped where the destination lives: the shaper's drive is a 0..1 gain and
+     * resonance is an index into the SVF's damping, so a route that pushed either past its
+     * end would be a route that silently stops moving instead of one that sounds wrong. */
+    float amt_t = u7_to_f(s->sh_amount) + lfo_route(s, WV_DEST_SHAPE, 1.0f, 1);
+    if (amt_t < 0.0f) amt_t = 0.0f;
+    if (amt_t > 1.0f) amt_t = 1.0f;
+    float res_t = u7_to_f(s->res) + lfo_route(s, WV_DEST_RES, 1.0f, 1);
+    if (res_t < 0.0f) res_t = 0.0f;
+    if (res_t > 1.0f) res_t = 1.0f;
     uint32_t k;
     for (k = 0; k < n; k++) {
         s->cut_z += (cut_t - s->cut_z) * zc;
         s->amount_z += (amt_t - s->amount_z) * zc;
+        s->res_z += (res_t - s->res_z) * zc;
     }
     /* The LFO's phase advances ONCE per block, here, and not in voice_block.
      *
@@ -959,9 +1139,26 @@ static void smooth_step(wv_state *s, uint32_t n)
      * A block is all one LFO value: 5.8 ms per step is not a stair the ear hears, and
      * a per-sample phase would cost a sine per voice per sample for a value every
      * voice shares. */
-    if (s->lfo_rate != 0 && s->lfo_depth != 0) {
-        s->lfo_ph += wv_lfo_hz(s->lfo_rate) * (float)n * (1.0f / 44100.0f);
-        s->lfo_ph -= fm_floorf(s->lfo_ph);
+    /* Both LFOs advance here, in the one function that runs once per block (voice_block
+     * runs twice per block, once per core, so a phase advanced there would run at double
+     * rate whenever the second core came up -- the same trap the smoothers above record).
+     *
+     * An LFO with every route at zero still advances: it may simply not be heard until a
+     * route opens, and stopping it would make the first note after opening a route land
+     * on a stale phase. */
+    {
+        int li;
+        for (li = 0; li < WV_LFOS; li++) {
+            float hz;
+            if (s->l[li].rate == 0)
+                continue;
+            hz = wv_lfo_hz_for(s, (uint32_t)li);
+            s->l[li].ph += hz * (float)n * (1.0f / 44100.0f);
+            while (s->l[li].ph >= 1.0f) {
+                s->l[li].ph -= 1.0f;
+                s->l[li].cycle++;
+            }
+        }
     }
 }
 

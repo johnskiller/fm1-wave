@@ -81,6 +81,7 @@ typedef struct {
     wv_grain g[WV_GRAINS];
     float    play;      /* the playhead grains are spawned at, in the slot's samples */
     float    rate;      /* the source advance per output sample */
+    float    rate_base; /* rate before the PITCH route: per cloud, not per grain */
     float    loop_start;
     float    loop_end;  /* where the playhead wraps: loop_end_k less one window */
     float    loop_end_k;/* the range as configured. Kept apart from loop_end because the

@@ -120,6 +120,7 @@ void wv_grains_start(wv_grains *gr, const wv_sample *smp, uint32_t start, uint32
     gr->loop_end_k = (float)(end - 1u);
     gr->loop_end = gr->loop_end_k;
     gr->rate = rate;
+    gr->rate_base = rate;
     gr->left = 0;
     gr->next = 0;
     gr->seed = seed ? seed : 0x9E3779B9u;

@@ -94,6 +94,7 @@ void wv_reader_start(wv_reader *r, const wv_sample *s, uint32_t offset, float in
 {
     r->pos = (float)(offset < s->len ? offset : 0u);
     r->inc = inc;
+    r->inc_base = inc;
     r->dir = 1;
     r->end = -1;
     r->loop_start = -1;

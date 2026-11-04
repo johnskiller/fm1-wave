@@ -51,7 +51,12 @@ enum { WV_SHAPE_SOFT, WV_SHAPE_HARD, WV_SHAPE_FOLD, WV_SHAPE_SINE, WV_SHAPE_N };
  * once at note-on keeps exp2 out of the render. */
 typedef struct {
     float    phase;        /* 0..1, one cycle (the table source) */
-    float    inc;          /* pitch: turns per sample */
+    float    inc;          /* pitch: turns per sample, INCLUDING this block's PITCH route */
+    /* The pitch the note was struck at, before modulation. PITCH is a destination, so
+     * inc has to be re-derived every block from something; keeping the base here is what
+     * lets a route return to concert pitch exactly when its amount returns to zero,
+     * instead of accumulating rounding. */
+    float    inc_base;
     float    level;        /* VCA, 0..1 — the envelope's output */
     float    target;       /* the level the current envelope stage heads for */
     uint8_t  estage;       /* WV_EG_*: the stage `level` is travelling through */
@@ -74,6 +79,71 @@ typedef struct {
     uint32_t age;          /* for oldest-note stealing */
 } wv_voice;
 
+/* ─── modulation destinations ───────────────────────────────────────────────
+ *
+ * One LFO, seven slots. Which slots are LIVE depends on the source, and that is a
+ * fact about wv_dsp.c's read sites, not a policy: MORPH is read only on the table
+ * path (wv_dsp.c:729 resolves the frame pair for WV_SRC_TABLE voices), GRAIN SIZE and
+ * SPRAY only on the granular path (:832), PITCH/RES/CUT/SHAPE AMT everywhere.
+ *
+ *   SYNTH  CUT RES SHAPE MORPH PITCH        (5)
+ *   SMPL   CUT RES SHAPE PITCH              (4)
+ *   GRAN   CUT RES SHAPE GRAIN SPRAY PITCH  (6)   <- the most any source needs
+ *
+ * Six is why seven slots is enough for two LFOs to share one page: the seventh is
+ * RATE, so both LFOs always have their rate in reach without going back to screen 1
+ * (the player's objection, 2026-11-04: "第二页切换到LFO后，RATE没地方调").
+ */
+enum {
+    WV_DEST_CUT = 0,   /* the filter's corner, in octaves: 0..4 either side */
+    WV_DEST_RES,       /* resonance, in the same units */
+    WV_DEST_SHAPE,     /* the shaper's drive */
+    WV_DEST_MORPH,     /* the wavetable position, in frames (UNIPOLAR, see morph_mod) */
+    WV_DEST_GRAIN,     /* grain length */
+    WV_DEST_SPRAY,     /* grain scatter */
+    WV_DEST_PITCH,     /* the voice's pitch, in semitones */
+    WV_DESTS
+};
+
+#define WV_LFOS 2
+
+/* The LFO's waveform. SINE is what every route was built on; TRI is the second shape a
+ * slow sweep wants (a linear rise is easier to hear as movement than a sine's ease-in),
+ * and S&H is the one a sample-and-hold step is. The step holds its value for a whole
+ * period, which for a slow LFO is a sequence of pitches rather than a sweep. */
+enum { WV_LFOSH_SINE, WV_LFOSH_TRI, WV_LFOSH_SH, WV_LFOSH_N };
+
+/* Retrigger: does a note-on reset this LFO's phase?
+ *
+ *   FREE     no. The LFO has been running since boot and every note lands wherever it is.
+ *            This is what the LFO did before the switch existed, so the default keeps
+ *            every existing patch sounding the same.
+ *   RETRIG   yes, on every note-on. Because the phase is per LFO and not per voice
+ *            (eight copies of one sine would be eight times the cost for one sine), a
+ *            new note moves the sweep for the voices already sounding too -- a chord
+ *            played one finger at a time restarts the sweep on each finger. That is the
+ *            audible difference between this and a per-voice LFO, and it is the reason
+ *            the switch is worth having rather than a detail.
+ */
+enum { WV_LFO_FREE, WV_LFO_RETRIG, WV_LFO_TRIG_N };
+
+/* One LFO. Two of these in wv_state, each with its own rate, phase, shape and its own
+ * seven amounts -- an LFO that shared amounts with another would not be a second LFO,
+ * it would be a second phase for the first one. */
+typedef struct {
+    uint8_t rate;                 /* 0..127; 0 = this LFO is off */
+    /* The rate's mode. In Hz the knob is the exponential 0.02..20 Hz curve it always
+     * was; in SYNC it snaps to the eight clock divisions the arpeggiator already uses
+     * (ARP_STEP_MS), at the tempo the transport is running at. Same knob, two scales:
+     * 0.02..20 Hz is the right range for a free sweep and 1/4..1/64 is the right one
+     * for a sweep that has to sit on the beat, and neither range contains the other. */
+    uint8_t sync;                 /* 0 = Hz, 1 = clock division */
+    uint8_t trig;                 /* WV_LFO_FREE / WV_LFO_RETRIG */
+    uint8_t shape;                /* WV_LFOSH_* */
+    uint8_t amt[WV_DESTS];        /* 0..127 per destination, 0 = route off */
+    float   ph;                   /* 0..1 */
+    uint32_t cycle;              /* whole cycles elapsed: S&H's value index */} wv_lfo;
+
 typedef struct {
     wv_voice v[WV_VOICES];
     uint32_t age;          /* the counter note-on hands out */
@@ -93,13 +163,23 @@ typedef struct {
     /* the block's smoothed values; turning a knob must not click */
     float    cut_z;
     float    amount_z;
-    /* The LFO. One for every voice, not one per voice: an LFO is not a voice
-     * property, and eight copies of the same sine is eight times the cost for one
-     * sine. Its phase advances once per block, in wv_lfo_step, and what the voices
-     * see is CUT modulated by it (`cut_eff`), so every voice is swept together --
-     * which is also what a player expects from a filter LFO. */
-    uint8_t  lfo_rate;     /* 0..127; 0 turns the LFO off (and is the default) */
-    uint8_t  lfo_depth;    /* 0..127: 0..4 octaves either side of CUT */
+    float    res_z;      /* RES is a modulation destination, so it smooths like CUT */
+    /* The LFOs. TWO of them, each one for every voice rather than one per voice: an
+     * LFO is not a voice property, and eight copies of the same sine is eight times the
+     * cost for one sine. A phase advances once per block, in wv_lfo_step, so every voice
+     * is swept together -- which is what a player expects from a filter LFO.
+     *
+     * Two is the number the panel can present: the LFO page holds one set of seven
+     * destination slots and the REC button swaps which LFO owns them (the player's call,
+     * 2026-11-04). A third would need a second slot set, not a third struct. */
+    wv_lfo   l[WV_LFOS];
+    /* Seconds one clock step lasts, pushed in by the app once per block (0 = no clock).
+     * The arpeggiator owns the tempo; the DSP only divides what it is handed, so there is
+     * one note-division table in the firmware and it is the app's. */
+    float    lfo_step_s;
+    /* Which LFO the PAGE is editing. The DSP needs it only for wv_sine(), the waveform
+     * the panel draws and the tests assert; every route reads its own LFO by index. */
+    uint8_t  lfo_edit;
     /* The filter's output: which of the SVF's three taps the VCA reads.
      *
      * This costs nothing to offer. Zavalishin's topology-preserving SVF computes lp, bp
@@ -117,16 +197,6 @@ typedef struct {
      * five; the DSP just multiplies.
      */
     uint8_t  ktrack;       /* 0, 25, 50, 75, 100 */
-    float    lfo_ph;       /* 0..1 */
-    /* MORPH's own modulation amount, 0..127, as a fraction of the bank's full travel in
-     * frames. It is a separate byte from the CUT depth above on purpose: the panel has
-     * one DEPTH knob and one LFO, and a modulation that moves the corner AND the wavetable
-     * position from a single amount is a knob doing something its label does not say.
-     * Separate amounts make the routes independent, and the panel can then give MORPH a
-     * screen of its own when it has one (spec 5c3).
-     *
-     * The sweep is UNIPOLAR -- the knob is the bottom of the travel (see morph_mod). */
-    uint8_t  morph_mod;    /* 0..127; 0 leaves MORPH exactly as the knob set it */
 } wv_state;
 
 /* ─── the VCA envelope ────────────────────────────────────────────────────── */
@@ -278,12 +348,18 @@ uint32_t wv_active(const wv_state *s);
 /* The LFO's rate in Hz for a panel value 0..127 (0 = off). Exposed so the panel can
  * print the rate instead of a percentage: "0.4 Hz" is a rate, "37" is not. */
 float wv_lfo_hz(uint32_t v127);
+/* The rate one LFO is running at now, honouring its Hz/SYNC mode. */
+float wv_lfo_hz_for(const wv_state *s, uint32_t which);
 /* The LFO's raw value for the current phase, in -1..1, and 0 when the rate is 0.
  *
  * Exposed because two routes now read the same waveform (CUT via lfo_cut_scale, MORPH via
  * morph_mod) and a test that re-derived the sine itself would be asserting its own copy of
  * the arithmetic rather than the DSP's. What is NOT exposed is how either route scales it. */
 float wv_sine(const wv_state *s);
+/* The same waveform for a NAMED LFO. Two of them run at once and a route reads its own,
+ * so the panel and the tests need to ask for one by index rather than by "the one the
+ * page happens to be editing". */
+float wv_lfo_value(const wv_state *s, uint32_t which);
 
 /* The filter's tap. LP is the default and the only one this app had; HP and BP are the
  * two the SVF was already computing and throwing away. */

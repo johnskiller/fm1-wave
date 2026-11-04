@@ -627,12 +627,19 @@ static void ui_apply(void)
     dsp.res = k_res;
     dsp.shape = k_shape;
     dsp.sh_amount = k_amount;
-    dsp.lfo_rate = k_lfo_rate;
-    dsp.lfo_depth = k_lfo_depth;
+    /* The LFO page's knobs drive LFO 1 only, until screen 2's route table (and the REC
+     * LFO 1/2 switch) exists: the page shows one LFO at a time and it starts on the one
+     * the panel had before there were two. The rate and the CUT amount are the two routes
+     * the page still presents, so they map to l[0]; the other five amounts stay at the
+     * wv_init value (0 = route off) and l[1] is left alone because nothing on the panel
+     * writes it yet. Mapping only what the panel owns is the point -- ui_apply runs every
+     * frame, and a write to l[1] here would stomp whatever the page eventually sets it to. */
+    dsp.l[0].rate = k_lfo_rate;
+    dsp.l[0].amt[WV_DEST_CUT]   = k_lfo_depth;
+    dsp.l[0].amt[WV_DEST_MORPH] = k_morph_mod;
     dsp.ftype = k_ftype;
     dsp.ktrack = k_ktrack;
     dsp.morph = k_morph;
-    dsp.morph_mod = k_morph_mod;
     dsp.grain_size = k_grain;
     dsp.spray = k_spray;
     dsp.eg_a = k_eg_a;
