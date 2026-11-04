@@ -708,7 +708,7 @@ this section is still a schedule, and the tables below keep their `NOT BUILT` re
 | | now | in `wv_state` |
 |---|---|---|
 | LFOs | **2**, each per instrument, not per voice | `lfo[2]`, each with `rate`, `phase`, `shape`, `trig`, `sync_div` |
-| LFO destinations | **7, each with its own amount per LFO** | `lfo[2].amt[WV_DESTS]`: CUT, RES, SHAPE, MORPH, GRAIN, SPRAY, PITCH |
+| LFO destinations | **7 in the DSP, 6 reachable from the table** | `lfo[2].amt[WV_DESTS]`: CUT, RES, SHAPE, MORPH, GRAIN, SPRAY, PITCH — PITCH has no ring, see below |
 | LFO shape | SINE / TRI / S&H | `lfo[i].shape` (`WV_LFOSH_*`) |
 | LFO retrigger | free-running or note-on reset | `lfo[i].trig` (`WV_LFO_FREE` / `WV_LFO_TRIG`) |
 | LFO rate | Hz, or a note division when synced | `lfo[i].rate` + `lfo[i].sync_div`, `wv_lfo_hz_for()` |
@@ -716,10 +716,18 @@ this section is still a schedule, and the tables below keep their `NOT BUILT` re
 | ENV destinations | **1: the VCA level** | `level`/`target` |
 | MORPH destinations | LFO 1 and 2, via `WV_DEST_MORPH` | one add in the block hoist (`morph_pos()`) |
 
-The LFO page reaches all of this in two screens: screen 1 is CUT/RES/RATE/DEPTH, screen 2
-is the seven-ring route table. `B_REC` selects which LFO both screens edit, and its lamp
-shows which — the button matrix gives each button one bit and one colour, and only PLAY has
-a second LED, so lit/unlit is the vocabulary this hardware has.
+The LFO page reaches this in two screens: screen 1 is CUT/RES/RATE/DEPTH, screen 2 is the
+seven-ring table — **six destinations plus K3's RATE**. `B_REC` selects which LFO both
+screens edit, and its lamp shows which — the button matrix gives each button one bit and
+one colour, and only PLAY has a second LED, so lit/unlit is the vocabulary this hardware has.
+
+**PITCH is the one destination with no ring.** The table is seven positions wide and there
+are seven destinations, but K3 holds RATE instead, and the player chose which one to drop
+(2026-11-04): PITCH is the only route whose value is already reachable two other ways —
+its own encoder, and pitch bend — so it is the least load-bearing of the seven. The DSP
+still routes it (`wv_pitch_scale`, `inc_base`/`rate_base`); only the panel ring is gone,
+so a patch saved with a PITCH amount keeps it. That asymmetry is deliberate and is the kind
+of thing that reads as a bug later, hence this paragraph.
 
 #### What the second ENV still costs — **NOT BUILT**
 

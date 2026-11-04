@@ -274,12 +274,14 @@ static uint8_t lfo_edit = 0;
 #define K_LFO_DEPTH(i)  (lfo_amt[i][WV_DEST_CUT])
 #define K_MORPH_MOD(i)  (lfo_amt[i][WV_DEST_MORPH])
 
-/* The LFO page's route table: SEVEN destination rings -- K1 K2 K3 K4 under the band and
- * SELECT PRESET ALGO above it -- and ROUTE_NONE for a ring this source has no destination
- * for. K3 is a destination here and not RATE: RATE is already K3 on screen 1, and a second
- * copy of a knob a player can reach by pressing the page button again was spending one of
- * the seven positions on nothing (player, this session: "K3 调制对象是什么?"). */
-#define ROUTE_SLOTS 7
+/* The LFO page's route table: SIX destination slots beside K3's RATE, and ROUTE_NONE for a
+ * slot this source has no destination for.
+ *
+ * Seven rings, six routes and one rate. The rate is there because the page edits TWO LFOs
+ * and screen 2 is where a player dials routes; sending them back to screen 1 to change the
+ * speed of the modulator they are routing is the kind of trip a page should not force
+ * (player, 2026-11-04: "第二页切换到LFO后，RATE没地方调"). */
+#define ROUTE_SLOTS 6
 #define ROUTE_NONE  0xFF
 /* The FX page's two controls: the filter's tap and key tracking.
  *
@@ -305,20 +307,25 @@ static uint8_t k_morph = 0;
 
 /* ── the route table: which destination each ring carries ────────────────────
  *
- * Seven rings on the page and seven destinations, so every ring is a route:
+ * Seven rings on the page, six destinations and one rate:
  *
- *   K1  K2  K3  K4             the bottom row (the four knobs under the screen)
+ *   K1  K2  K3=RATE  K4        the bottom row (the four knobs under the screen)
  *   SELECT  PRESET  ALGO       the row above, in the encoders' physical order
  *
- * SLOTS ARE POSITIONS, NOT PRIORITIES. Slot 0 is K1, 1 is K2, 2 is K3, 3 is K4, 4 is
- * SELECT, 5 is PRESET, 6 is ALGO. The drawing and the knob handling both index this table,
- * so there is no second place that could disagree about which ring is which.
+ * SLOTS ARE POSITIONS, NOT PRIORITIES. Slot 0 is K1, 1 is K2, 2 is K4, 3 is SELECT,
+ * 4 is PRESET, 5 is ALGO. The drawing and the knob handling both index this table, so
+ * there is no second place that could disagree about which ring is which.
  *
- * K3 USED TO BE RATE, holding the LFO's own rate as the seventh ring's tenant. That was
- * wrong twice: RATE is not a destination, and it is already K3 on screen 1, one press of
- * the page button away. A table that answers "what does this LFO modulate" cannot spend one
- * of its seven answers on a knob that modulates nothing.
- *
+ * K3 IS RATE, NOT A DESTINATION, and it took one wrong turn to get here. It started as
+ * RATE (right); then, with the table drawn and a spare slot showing, it became a
+ * destination to make seven rings of seven destinations (wrong); now it is RATE again.
+ * The reason it is right is specific to this page editing TWO LFOs: screen 2 is where the
+ * routes are dialled, and a player setting up LFO 2's routes has to be able to change
+ * LFO 2's speed without leaving -- otherwise they press the page button, change RATE,
+ * press it again, and the selector has moved under them. The cost is one destination, and
+ * PITCH is the one to give up: it is the only route the value can already reach two other
+ * ways (its own encoder, and the pitch bend), so it is the least load-bearing of the seven
+ * (player, 2026-11-04: "PITCH已经可以通过LFO调制了，还可以通过pitchband手工调").
  * WHICH destination a slot carries depends on the source, because a route to a parameter
  * the source does not read is a knob that does nothing:
  *
@@ -326,12 +333,11 @@ static uint8_t k_morph = 0;
  *   SMPL   a sample reads no wavetable frame, so no MORPH, and has no cloud
  *   GRAN   a cloud never reaches wv_table_read, so no MORPH
  *
- * THE BOTTOM ROW IS THE SAME IN ALL THREE, and it is the row every other page draws: CUT,
- * RES, SHAPE on K1-K3. That was impossible while K3 held RATE; with K3 free the three
- * parameters the instrument always has are back where the other five pages put them, so the
- * bottom row needs no reading. PITCH takes K4 -- also the same place in all three, which is
- * what the player asked for: the one destination every source has must not be the ring that
- * moves when the source changes.
+ * THE BOTTOM ROW HAS CUT, RES AND SHAPE IN EVERY SOURCE, on K1, K2 and K4. SHAPE is at K4
+ * rather than K3 because K3 is RATE, and K3 is RATE because of the argument above; the
+ * filter's two knobs stay at K1/K2 so this page agrees with the five others about where the
+ * filter lives. K4 being SHAPE instead of K3 is the one place this page differs from the
+ * rest, and it is a real cost, paid deliberately.
  *
  * So the TOP row is the row that varies, and it is the row that carries the extension
  * routes: MORPH on SYNTH, GRAIN and SPRAY on GRAN, nothing on SMPL. That is also why the top
@@ -341,10 +347,10 @@ static uint8_t k_morph = 0;
  * A slot the source does not have draws as a dim OFF ring, not an empty hole: a hole is a
  * knob that looks broken, and OFF says "not in this source". */
 static const uint8_t ROUTE_ORDER[3][ROUTE_SLOTS] = {
-    /* K1            K2             K3             K4             SELECT         PRESET         ALGO */
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, WV_DEST_MORPH, ROUTE_NONE,    ROUTE_NONE },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, ROUTE_NONE,    ROUTE_NONE,    ROUTE_NONE },
-    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE },
+    /* K1            K2             K4              SELECT         PRESET         ALGO */
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, ROUTE_NONE,    ROUTE_NONE },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, ROUTE_NONE,    ROUTE_NONE,    ROUTE_NONE },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_GRAIN, WV_DEST_SPRAY, ROUTE_NONE },
 };
 
 /* the slot's destination for a source, or ROUTE_NONE */
@@ -1416,8 +1422,8 @@ static void input(void)
      * The detents are drained unconditionally further down (see the note at EN_PRESET), so
      * nothing accumulates while the table is not showing. */
     if (lfo_mod) {
-        static const uint8_t ROUTE_ENC[ROUTE_SLOTS] = { EN_K1, EN_K2, EN_K3, EN_K4,
-                                                       EN_SELECT, EN_PRESET, EN_ALGO };
+        static const uint8_t ROUTE_ENC[ROUTE_SLOTS] = { EN_K1, EN_K2, EN_K4, EN_SELECT,
+                                                       EN_PRESET, EN_ALGO };
         uint8_t slot;
 
         for (slot = 0; slot < ROUTE_SLOTS; slot++) {
@@ -1428,11 +1434,15 @@ static void input(void)
             lfo_amt[lfo_edit][d] =
                 (uint8_t)clamp((int32_t)lfo_amt[lfo_edit][d] + t * 4, 0, 127);
         }
-        /* No drain pass needed: plat_enc() takes the detent as it reads it, and the loop
-         * reads all seven before it decides to skip any of them -- so a slot with no route
-         * still clears its knob rather than banking the turn for the next screen. RATE is
-         * not read here at all: on this screen K3 is a destination, and screen 1 is where
-         * the rate lives. */
+        /* K3 is RATE here, and it is the SAME byte screen 1 writes: one LFO, one rate,
+         * two places to reach it. Read after the six slots so a turn of K3 can never be
+         * mistaken for a route amount.
+         *
+         * No drain pass needed: plat_enc() takes the detent as it reads it, and the loop
+         * reads all six before it decides to skip any of them -- so a slot with no route
+         * still clears its knob rather than banking the turn for the next screen. */
+        if ((e = plat_enc(EN_K3)) != 0)
+            lfo_rate[lfo_edit] = (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
         btn_prev = btn;
         ui_apply();
         return;
@@ -4132,7 +4142,7 @@ void app_frame(void)
 
             for (i = 0; i < 3; i++) {
                 int32_t cx = 44 + i * 76;
-                uint8_t d = route_dest(src, (uint8_t)(4 + i));
+                uint8_t d = route_dest(src, (uint8_t)(3 + i));
                 int32_t ew = txt_w(ENC_NAME[i]);
                 int32_t nw = (d == ROUTE_NONE) ? 0 : txt_w(DEST_NAME[d]);
                 /* centred as a pair: "SELECT MORPH" reads as one label */
@@ -4147,7 +4157,7 @@ void app_frame(void)
         /* The rings sit at 52: 12 + 9 of text above them, then the ring's own name at 20,
          * then 47 px of ring. 52 + 23 = 75, inside the band's 92. */
         for (i = 0; i < 3; i++) {
-            uint8_t slot = (uint8_t)(4 + i);          /* 4 SELECT, 5 PRESET, 6 ALGO */
+            uint8_t slot = (uint8_t)(3 + i);          /* 3 SELECT, 4 PRESET, 5 ALGO */
             uint8_t d = route_dest(src, slot);
             int32_t cx = 44 + i * 76;
 
@@ -4553,19 +4563,29 @@ void app_frame(void)
          * word, and an abbreviation is not a label). */
         knob(4,   KNOB_TOP, 54, "CUT",     pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",     pct(k_res), k_res, 0);
-        /* Screen 2 is the route table: seven destination rings. The three above the
+        /* Screen 2 is the route table: six destinations and K3's RATE. The three above the
          * picture are drawn in the material band this screen covers; these are the four
-         * under it. All four are destinations now -- K3 was RATE while the table was six
-         * rings wide, and giving it back its slot is what made seven fit.
+         * under it. K3 is RATE in the same place it is on screen 1 -- so a player routing
+         * LFO 2 can still change its speed -- and that is why the table is six destinations
+         * and not seven.
          *
-         * The bottom row is slots 0..3 in order -- K1 K2 K3 K4 -- with nothing interrupting
-         * the run now that K3 is a destination and not RATE. */
+         * BOTTOM_SLOT maps a screen position to a table slot, written out rather than
+         * derived because K3 interrupts the run: the four positions are slots 0, 1, RATE
+         * and 2. */
         {
+            static const uint8_t BOTTOM_SLOT[4] = { 0, 1, ROUTE_SLOTS, 2 };
             int32_t p;
             for (p = 0; p < 4; p++) {
                 int32_t x = 4 + p * 58;
-                uint8_t slot = (uint8_t)p;
-                uint8_t d = route_dest(src, slot);
+                uint8_t slot = BOTTOM_SLOT[p];
+                uint8_t d;
+
+                if (slot == ROUTE_SLOTS) {
+                    knob(x, KNOB_TOP, 54, "RATE", lfo_rate_text(lfo_rate[lfo_edit]),
+                         lfo_rate[lfo_edit], 1);
+                    continue;
+                }
+                d = route_dest(src, slot);
                 if (d == ROUTE_NONE) {
                     route_absent(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
                     continue;

@@ -393,53 +393,57 @@ shot grn.png
     ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
        "and a third press wraps 2 -> 1: the LFO page is two screens again")
     # ── the LFO's second screen: the route table (spec 5c3) ──────────────────
-    # Screen 2 is seven rings and all seven are destinations: K1..K4 under the band and
-    # SELECT/PRESET/ALGO above it. Which destination sits in a slot depends on the source,
-    # so the assertions below are in SYNTH unless a line says otherwise.
+    # Screen 2 is seven rings: six destinations plus K3's RATE. K1 K2 K4 and
+    # SELECT/PRESET/ALGO are the routes; which destination sits in a slot depends on the
+    # source, so the assertions below are in SYNTH unless a line says otherwise.
     #
     # The rules being pinned:
     #   * a route is only reachable where its destination exists (no MORPH on SMPL)
-    #   * the BOTTOM row is the same in all three sources and matches every other page:
-    #     CUT RES SHAPE on K1-K3, PITCH on K4
+    #   * K3 is RATE, the SAME byte screen 1 writes: this page edits two LFOs, and a player
+    #     routing LFO 2 must be able to change its speed without leaving the table
     #   * K4 is SHAPE here, NOT screen 1's DEPTH -- the two are different bytes, so
     #     dialling a filter sweep does not silently add a waveshape sweep
-    #   * K3 is a DESTINATION here, not RATE: RATE is screen 1's K3, one press away
+    #   * PITCH is not on the table at all: it was dropped to pay for K3's rate, on the
+    #     player's argument that its value is already reachable from its own encoder and
+    #     from pitch bend
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2),
        "LFO's route screen is screen 2")
     ck(expect("tap LFO\ntap LFO\n", "lfo_edit", 0),
        "and it edits LFO 1 until REC says otherwise")
-    # SYNTH: K1 CUT / K2 RES / K3 SHAPE / K4 PITCH / SELECT MORPH / PRESET, ALGO none
-    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "amt_shape", 40),
-       "screen 2: K3 sets SHAPE's amount in SYNTH")
-    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "lfo_depth", 0),
+    # SYNTH: K1 CUT / K2 RES / K4 SHAPE / SELECT MORPH / PRESET, ALGO none / K3 RATE
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 40),
+       "screen 2: K4 sets SHAPE's amount in SYNTH")
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 0),
        "and it does NOT set CUT's depth")
-    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "lfo_rate", 0),
-       "nor RATE, which this screen no longer carries")
-    ck(expect("tap LFO\nturn K3 10\n", "lfo_rate", 40),
-       "screen 1's K3 is still RATE")
     ck(expect("tap LFO\nturn K4 10\n", "amt_shape", 0),
        "screen 1's K4 is still DEPTH, not a route amount")
+    # K3 is RATE on BOTH screens and it is one byte, which is what makes it worth
+    # repeating: the second LFO's speed has to be reachable from where its routes are.
+    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "lfo_rate", 40),
+       "screen 2's K3 is RATE")
+    ck(expect("tap LFO\ntap LFO\nturn K3 10\n", "amt_shape", 0),
+       "and it is NOT SHAPE's amount: RATE and the routes are different bytes")
     ck(expect("tap LFO\ntap LFO\nturn ALGO 10\n", "amt_morph", 0),
        "ALGO has no route in SYNTH, so turning it moves nothing there")
-    # PITCH is at K4 in all three sources (player, this session: the one destination every
-    # source has must not be the one ring that moves when the source changes), so SYNTH's
-    # MORPH -- which only SYNTH can route -- sits on the top row, at SELECT.
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_pitch", 40),
-       "K4 is PITCH in SYNTH")
+    # The top row carries the routes that exist only in one source: MORPH is SYNTH's.
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
-       "and SELECT is MORPH, which is the route the DSP gained")
+       "SELECT is MORPH, which is the route the DSP gained")
+    # PITCH left the table to pay for K3's RATE. The DSP still routes it -- only the ring
+    # is gone -- so what is asserted is that nothing on this screen reaches it.
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_pitch", 0),
+       "and no knob on the table routes PITCH any more")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "bank", 0),
        "and turning SELECT there does not change the bank")
-    # The bottom row is the same row the other five pages draw, so a player who knows this
-    # instrument does not have to read it. Asserted for the two sources that differ on top.
+    # The bottom row is cut / res / RATE / shape in every source: the two filter knobs stay
+    # where the other five pages put them, and the rate is in reach from the routes.
     ck(expect("tap LFO\ntap LFO\n", "route2", 2),
-       "SYNTH slot 2 (K3) is SHAPE")
+       "SYNTH slot 2 (K4) is SHAPE")
     ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route2", 2),
-       "SMPL's K3 is SHAPE too")
+       "SMPL's K4 is SHAPE too")
     ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route2", 2),
        "and so is GRAN's")
-    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route3", 6),
-       "GRAN's K4 is PITCH, like the other two")
+    ck(expect("tap SEL\ntap SEL\ntap LFO\ntap LFO\n", "route4", 5),
+       "GRAN's PRESET is SPRAY, the last route it has")
     # A source with fewer destinations: SMPL reads no wavetable frame and has no cloud, so
     # it has CUT/RES/SHAPE/PITCH and THREE empty slots (SELECT, PRESET, ALGO). The assertion that matters is that a
     # slot with no route neither takes an amount nor reports one -- and each of these runs
@@ -450,8 +454,8 @@ shot grn.png
        "SMPL slot 4 (SELECT) has no destination and says so")
     ck(expect("tap SEL\ntap LFO\ntap LFO\nturn PRESET 10\n", "amt_pitch", 0),
        "and turning an empty slot's knob moves nothing")
-    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn K4 10\n", "amt_pitch", 40),
-       "SMPL's K4 is PITCH, so the same knob turned there does move it")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 40),
+       "SMPL's K4 is SHAPE, so the same knob turned there does move it")
     ck(expect("turn K1 10\ntap LFO\ntap LFO\nturn K1 10\n", "amt_cut", 40),
        "K1 is CUT's AMOUNT in every source")
     # The consequence of a seven-ring table, written down because it is a real trade: on
@@ -488,9 +492,9 @@ shot grn.png
        "and LFO 1's rate is still 0")
     ck(expect("tap LFO\nturn K3 8\ntap REC\n", "lfo_rate2", 0),
        "turning LFO 1's rate does not reach LFO 2")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn K4 10\n", "amt_pitch", 40),
-       "the route table follows REC: K4 is LFO 2's PITCH amount")
-    ck(expect("tap REC\ntap LFO\ntap LFO\nturn K4 10\ntap REC\n", "amt_pitch", 0),
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "the route table follows REC: SELECT is LFO 2's MORPH amount")
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\ntap REC\n", "amt_morph", 0),
        "and the same knob on LFO 1's table is a different amount")
     # REC's lamp is the only panel signal for which LFO is selected, so it is asserted
     # rather than assumed: lit for LFO 2 and dark for LFO 1.
