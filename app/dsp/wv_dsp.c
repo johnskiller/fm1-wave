@@ -1076,8 +1076,59 @@ static void voice_block(wv_state *s, const wv_bank *b, float *out, uint32_t n,
  * It also cannot live inside voice_block: with the pool split across two cores each
  * half would limit its own partial sum, and tanh(a) + tanh(b) != tanh(a + b) — the
  * split would change the sound, not just the speed. */
-/* Tap, then the listening level, then the limiter -- in that order. See
- * render_split_tap's comment: this order is the fix for the hiss a chord had. */
+/* ─── the bus limiter ─────────────────────────────────────────────────────────
+ *
+ * A LIMITER, NOT A DISTORTION PEDAL. It used to be `tanhf(out[k] * m)` with `m` the
+ * listening level, and that made MASTER a drive control: the louder the instrument
+ * was turned up, the more the bus bent, so a quiet single note was nearly clean and
+ * any chord at a loud setting was not. Two things were wrong with it and only one was
+ * the level.
+ *
+ * 1. tanh IS NEVER LINEAR. Even at m = 1 it bends every sample a little: a tone whose
+ *    2nd partial sits 6.02 dB down came out 6.33 dB down at an input of 0.30 and
+ *    7.21 dB down at 0.60, and at m = 4 those became 10.07 and 17.24 dB. That is the
+ *    chord the player described as "复音频率低沉" -- the partials that were being
+ *    compressed were not the same ones, so the spectrum tilted and the note lost its
+ *    identity. Measured on the host: a three-note chord at MASTER 16384 had 45% of its
+ *    samples clipped flat, and C4's 2nd and 3rd partials were 19 and 40 dB down.
+ * 2. Putting the LISTENING LEVEL in front of the limiter means the limiter's operating
+ *    point is chosen by the volume knob. The limiter has to work at a fixed point and
+ *    the volume has to come after it, or "how loud" and "how clean" cannot be set
+ *    independently -- and on an instrument, they must be.
+ *
+ * So: the limiter runs at a FIXED working point, on the summed voices before MASTER,
+ * and it is LINEAR below TH. Below the knee a sample passes through untouched, bit for
+ * bit, so the quiet end of the instrument keeps its exact timbre; above it the excess
+ * is compressed by tanh so the output approaches full scale instead of reaching it.
+ * Continuous in value and slope at TH, so there is no kink to hear.
+ *
+ * TH is -0.9 dBFS, and that number comes from the instrument rather than from a
+ * preference: the PEAK of the loudest chord the panel can build at unity (three notes,
+ * velocity 127, measured 0.78 pre-master) has to sit below the knee or the limiter is
+ * part of the sound. A three-note chord is the case the player reported and the one that
+ * must be exactly linear. What is left above 0.90 is the eighth voice at full velocity,
+ * where the partial sums reach 1.4 and something has to give -- that is the one job.
+ *
+ * The old code could not make this distinction at all, because the knee moved with
+ * MASTER: at a loud setting the knee sat below the chord and the limiter coloured it,
+ * at a quiet one it sat above and it did not. That is why the same chord was clean with
+ * the volume down and wrong with it up.
+ */
+#define WV_LIM_TH  0.90f            /* -0.9 dBFS: the loudest normal chord stays linear */
+
+static float bus_limit(float x)
+{
+    float a = x < 0.0f ? -x : x;
+    float s = x < 0.0f ? -1.0f : 1.0f;
+
+    if (a <= WV_LIM_TH)
+        return x;                   /* untouched: the timbre of a quiet note is exact */
+    return s * (WV_LIM_TH + (1.0f - WV_LIM_TH) * fm_tanhf((a - WV_LIM_TH) / (1.0f - WV_LIM_TH)));
+}
+
+/* Tap, then the limiter, then the listening level. The order matters twice over: the
+ * tap must not shrink with MASTER (the scope shows the sum), and the limiter must not
+ * see MASTER (its working point is fixed). */
 static void bus_apply(float *out, uint32_t n, float master, float *tap)
 {
     uint32_t k;
@@ -1087,14 +1138,8 @@ static void bus_apply(float *out, uint32_t n, float master, float *tap)
         for (k = 0; k < n; k++)
             tap[k] = out[k];
     }
-    for (k = 0; k < n; k++) {
-        float b = fm_tanhf(out[k] * m);
-        if (b > 1.0f)
-            b = 1.0f;
-        else if (b < -1.0f)
-            b = -1.0f;
-        out[k] = b;
-    }
+    for (k = 0; k < n; k++)
+        out[k] = bus_limit(out[k]) * m;
 }
 
 

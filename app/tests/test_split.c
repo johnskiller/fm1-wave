@@ -669,11 +669,18 @@ static void test_limiter_sees_the_master(void)
     /* tanh squashes peaks harder than it squashes the mean, so a bent bus has a
      * HIGHER mean-to-peak ratio. Master before the limiter: 4096 reaches the knee and
      * 1024 does not, so loud is the more bent of the two. Limiter first: both see the
-     * same full-scale sum, are bent identically, and the two ratios match. */
+     * same full-scale sum, are bent identically, and the two ratios match.
+     *
+     * THE ASSERTION WAS THE OTHER WAY ROUND, AND THAT WAS THE BUG. `loud > quiet`
+     * passes only when the pot decides how bent the bus is -- which is exactly the
+     * defect the player heard as "音量开大第二个复音就出问题了". A test that requires the
+     * defect is worse than no test: it makes the fix look like a regression. So it is
+     * inverted, and the tolerance says what "the same" means here: the two renders
+     * differ only by the limiter's knee being crossed by the same samples in both. */
     snprintf(what, sizeof what,
-             "master 4096 is more bent than 1024 (crest %.4f vs %.4f): the limiter saw the pot",
-             loud, quiet);
-    ck(loud > quiet + 0.002, what);
+             "master does not change how bent the bus is (crest %.4f at 4096 vs %.4f at 1024,"
+             " delta %.4f): the limiter must not see the pot", loud, quiet, loud - quiet);
+    ck(fabsf(loud - quiet) < 0.005f, what);
 }
 
 int main(void)
