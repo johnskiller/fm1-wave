@@ -159,7 +159,7 @@ tap GLO
 turn K4 3
 tap LFO
 tap LFO
-turn K4 3
+turn SELECT 3
 tap ARP
 turn K1 2
 turn K2 1
@@ -271,8 +271,22 @@ ok(probe(out, "saved") == 0,
    "a version-1 record is refused: the layout gained morph_mod, so its bytes are off by one field")
 ok(probe(out, "cut") == 127, "and the defaults boot instead of that record's values")
 
+# A version-2 record is ALSO refused, and this is the assertion that keeps the version
+# bump honest: version 3 gave every LFO its own rate/shape/trig/sync and seven amounts, so
+# a v2 record's single lfo_depth sits where v3 reads lfo_shape[0] -- a record that would
+# boot with a plausible but wrong LFO rather than with defaults.
 out = run("""
 plant 2
+reboot
+expect saved 0
+expect cut 127
+""", "plant_v2_record")
+ok(probe(out, "saved") == 0,
+   "a version-2 record is refused: two LFOs reshaped the LFO fields, so its bytes mean something else")
+ok(probe(out, "cut") == 127, "and the defaults boot instead of that record's values")
+
+out = run("""
+plant 3
 reboot
 expect saved 1
 expect cut 3

@@ -15,9 +15,14 @@
  * one field out of register and every knob after it would land on the wrong parameter.
  * The version gate is what makes that a refused load with the defaults booting, instead of
  * an instrument that comes back sounding wrong for no visible reason. */
-#define SAVE_VERSION  2u
+#define SAVE_VERSION  3u
 #define SAVE_SLOTS    8                    /* == SMP_MAX in app.c */
 #define SAVE_BANKS    8                    /* == WV_BANK_COUNT */
+/* The LFO's two dimensions. Plain numbers rather than taken from wv_dsp.h because the
+ * persistence layer does not otherwise know the DSP exists; app.c asserts at compile time
+ * that they still match WV_LFOS / WV_DESTS. */
+#define SAVE_LFOS     2                    /* == WV_LFOS */
+#define SAVE_DESTS    7                    /* == WV_DESTS */
 
 typedef struct {
     uint32_t start, end, loop_s, loop_e;
@@ -34,11 +39,21 @@ typedef struct {
     uint8_t  morph;
     uint8_t  grain, spray;
     uint8_t  eg_a, eg_d, eg_s, eg_r;
-    uint8_t  lfo_rate, lfo_depth;
-    /* MORPH's own modulation amount (spec 5c3). Its own byte rather than a share of
-     * lfo_depth: one LFO feeding two parameters from one amount makes a filter sweep add
-     * a wavetable sweep silently. Added in version 2 -- see SAVE_VERSION. */
-    uint8_t  morph_mod;
+    /* The two LFOs: a rate each and one amount per destination each. The amounts are a
+     * full row per LFO rather than the two named ones the version-2 record carried, because
+     * the route table can point any destination anywhere and a record that saved only CUT's
+     * and MORPH's would forget the other five on reload. 0 means the route is off, so a
+     * shorter record cannot be padded with zeroes and still mean the same thing -- which is
+     * why this is version 3 and not version 2 plus slack.
+     *
+     * lfo_edit is saved too: it is which LFO the page shows, and a patch that comes back
+     * with the other one on screen is not wrong, only confusing. */
+    uint8_t  lfo_rate[SAVE_LFOS];
+    uint8_t  lfo_amt[SAVE_LFOS][SAVE_DESTS];
+    uint8_t  lfo_shape[SAVE_LFOS];
+    uint8_t  lfo_sync[SAVE_LFOS];
+    uint8_t  lfo_trig[SAVE_LFOS];
+    uint8_t  lfo_edit;
     /* the filter's tap and how far its corner follows the note. Both live in the
      * single-byte parameter run, so save_changes() counts each as one group without
      * being told. */

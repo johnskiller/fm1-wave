@@ -247,9 +247,37 @@ static uint8_t  bank_i;
 
 /* the panel's four live knobs, as 0..127 */
 static uint8_t k_cut = 127, k_res = 0, k_shape = WV_SHAPE_SOFT, k_amount = 0;
-/* The LFO page's two controls. RATE 0 is off, which is the default: a patch made
- * before the LFO existed must sound the same after it. */
-static uint8_t k_lfo_rate = 0, k_lfo_depth = 0;
+/* ── the two LFOs, as the panel holds them ──────────────────────────────────
+ *
+ * One set of names per LFO, indexed by lfo_edit (0 = LFO1, 1 = LFO2). It was three
+ * separate bytes -- k_lfo_rate, k_lfo_depth, k_morph_mod -- when there was one LFO and
+ * two routes; a second LFO multiplies every one of those by two and a table is the only
+ * shape that does not need a second set of ifs at every read site.
+ *
+ * RATE 0 is off, and that is the default for BOTH LFOs: a patch made before either LFO
+ * existed must sound the same after them. DEPTH is amt[WV_DEST_CUT] and MORPH is
+ * amt[WV_DEST_MORPH]; they keep their own names here because the pages that show them
+ * are written in those names, and because "DEPTH" is what the panel prints.
+ *
+ * The amounts are per destination and 0 means the route is off, so a route's presence
+ * IS its amount and there is no separate on/off bit that could get out of step with it. */
+static uint8_t lfo_rate[WV_LFOS] = { 0, 0 };
+static uint8_t lfo_amt[WV_LFOS][WV_DESTS];
+static uint8_t lfo_shape[WV_LFOS];            /* WV_LFOSH_*, 0 (SINE) by default */
+static uint8_t lfo_sync[WV_LFOS];             /* 0 = Hz, 1 = note division */
+static uint8_t lfo_trig[WV_LFOS] = { WV_LFO_FREE, WV_LFO_FREE };
+/* Which LFO the page is showing. B_REC switches it, and REC's lamp says which one is up
+ * (see the lights block): a red lamp is not available -- only PLAY has a second, green
+ * LED and only PLAY can be told to go red -- so the page says LFO 1/LFO 2 in words and
+ * REC is lit while LFO2 is selected. */
+static uint8_t lfo_edit = 0;
+#define K_LFO_DEPTH(i)  (lfo_amt[i][WV_DEST_CUT])
+#define K_MORPH_MOD(i)  (lfo_amt[i][WV_DEST_MORPH])
+
+/* The LFO page's route table: six destination rings (K1, K2, K4 and SELECT, PRESET, ALGO)
+ * beside K3's RATE, and ROUTE_NONE for a ring this source has no destination for. */
+#define ROUTE_SLOTS 6
+#define ROUTE_NONE  0xFF
 /* The FX page's two controls: the filter's tap and key tracking.
  *
  * TYPE starts at LP and KEY TRK at 0, which is exactly what the voice did before either
@@ -271,11 +299,59 @@ static const uint8_t KT_VALUES[5] = { 0, 25, 50, 75, 100 };
 #define KT_STEPS 5
 static uint8_t kt_index(uint8_t pct); /* the detent for a setting, defined with the table */
 static uint8_t k_morph = 0;
-/* MORPH's modulation amount, from the same LFO. Its own byte rather than CUT's DEPTH:
- * one LFO feeding two parameters from one amount makes a filter sweep add a wavetable
- * sweep, and the page would have no way to say so. Lives on the LFO page's second
- * screen, where the LFO's other per-route settings already are. */
-static uint8_t k_morph_mod = 0;
+
+/* ── the route table: which destination each ring carries ────────────────────
+ *
+ * Seven rings on the page, and six destinations plus RATE. RATE is a property of the LFO
+ * rather than a destination, so it owns K3 and the other six rings are the routes:
+ *
+ *   K1  K2  K3=RATE  K4        the bottom row (the four knobs under the screen)
+ *   SELECT  PRESET  ALGO       the row above, in the encoders' physical order
+ *
+ * SLOTS ARE POSITIONS, NOT PRIORITIES. Slot 0 is K1, 1 is K2, 2 is K4, 3 is SELECT,
+ * 4 is PRESET, 5 is ALGO. The drawing and the knob handling both index this table, so
+ * there is no second place that could disagree about which ring is which.
+ *
+ * WHICH destination a slot carries depends on the source, because a route to a parameter
+ * the source does not read is a knob that does nothing:
+ *
+ *   SYNTH  wave + shaper + filter: no cloud, so no GRAIN/SPRAY
+ *   SMPL   a sample reads no wavetable frame, so no MORPH, and has no cloud
+ *   GRAN   a cloud never reaches wv_table_read, so no MORPH; everything else lives
+ *
+ * CUT, RES and SHAPE are at K1, K2 and K4 in every source -- the parameters the instrument
+ * always has. SHAPE is at K4 rather than K3 because K3 is RATE here; the same three are at
+ * K1/K2/K3 on every other page, and moving the filter's two knobs would make this page
+ * disagree with the five about where the filter lives.
+ *
+ * A slot the source does not have draws as a dim OFF ring, not an empty hole: a hole is a
+ * knob that looks broken, and OFF says "not in this source". */
+static const uint8_t ROUTE_ORDER[3][ROUTE_SLOTS] = {
+    /* K1            K2             K4              SELECT          PRESET          ALGO */
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_MORPH, WV_DEST_PITCH, ROUTE_NONE },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_PITCH, ROUTE_NONE,    ROUTE_NONE },
+    { WV_DEST_CUT, WV_DEST_RES, WV_DEST_SHAPE, WV_DEST_GRAIN, WV_DEST_SPRAY, WV_DEST_PITCH },
+};
+
+/* the slot's destination for a source, or ROUTE_NONE */
+static uint8_t route_dest(uint8_t source, uint8_t slot)
+{
+    return ROUTE_ORDER[source][slot];
+}
+
+/* the same, in the form the host probe prints: -1 for a slot the source does not have */
+static int route_or_minus1(uint8_t source, uint8_t slot)
+{
+    uint8_t d = route_dest(source, slot);
+    return d == ROUTE_NONE ? -1 : (int)d;
+}
+
+/* The name in the ring: as short as a 54 px cell allows and no shorter. All seven fit --
+ * "SHAPE" is 30 px at FONT_XS and "SPRAY" 33 -- so none is abbreviated. */
+static const char *const DEST_NAME[WV_DESTS] = {
+    "CUT", "RES", "SHAPE", "MORPH", "GRAIN", "SPRAY", "PITCH",
+};
+
 /* granular: grain length and scatter. SPRAY is on EN_SELECT in GRAN (the only free
  * encoder) so that every other knob stays where it is in every mode. */
 static uint8_t k_grain = 64;      /* 0..127: 10..200 ms */
@@ -627,16 +703,24 @@ static void ui_apply(void)
     dsp.res = k_res;
     dsp.shape = k_shape;
     dsp.sh_amount = k_amount;
-    /* The LFO page's knobs drive LFO 1 only, until screen 2's route table (and the REC
-     * LFO 1/2 switch) exists: the page shows one LFO at a time and it starts on the one
-     * the panel had before there were two. The rate and the CUT amount are the two routes
-     * the page still presents, so they map to l[0]; the other five amounts stay at the
-     * wv_init value (0 = route off) and l[1] is left alone because nothing on the panel
-     * writes it yet. Mapping only what the panel owns is the point -- ui_apply runs every
-     * frame, and a write to l[1] here would stomp whatever the page eventually sets it to. */
-    dsp.l[0].rate = k_lfo_rate;
-    dsp.l[0].amt[WV_DEST_CUT]   = k_lfo_depth;
-    dsp.l[0].amt[WV_DEST_MORPH] = k_morph_mod;
+    /* Both LFOs, every field the panel owns. A loop rather than two copies: the panel holds
+     * them as arrays and a second copy is where a field gets forgotten. The phase and the
+     * cycle counter are the DSP's and are deliberately not written here, so turning a knob
+     * does not restart a sweep.
+     *
+     * RATE 0 is off and the DSP agrees (wv_lfo_hz returns 0), so "no LFO" needs no flag of
+     * its own on this side either. */
+    {
+        uint8_t i, d;
+        for (i = 0; i < WV_LFOS; i++) {
+            dsp.l[i].rate  = lfo_rate[i];
+            dsp.l[i].shape = lfo_shape[i];
+            dsp.l[i].trig  = lfo_trig[i];
+            dsp.l[i].sync  = lfo_sync[i];
+            for (d = 0; d < WV_DESTS; d++)
+                dsp.l[i].amt[d] = lfo_amt[i][d];
+        }
+    }
     dsp.ftype = k_ftype;
     dsp.ktrack = k_ktrack;
     dsp.morph = k_morph;
@@ -1241,6 +1325,23 @@ static void input(void)
         page_press(PAGE_GLO);
     if (btn_pressed(btn, B_LFO))
         page_press(PAGE_LFO);
+    /* B_REC: which of the two LFOs the page shows.
+     *
+     * REC had no job -- the FM-1 has no recorder, and the panel map lists it among the free
+     * buttons -- so it became a selector rather than a page. It switches on every press,
+     * whether the LFO page is up or not, because both useful readings of "the other LFO"
+     * are the same state, and REC's lamp says which one it is. Pressing it with the page
+     * closed changes which LFO the next visit shows; that is not a hidden mode, it is a
+     * setting the lamp reports.
+     *
+     * A page of its own was the alternative and it is worse: the two LFOs are the same
+     * object with the same seven rings, so a second page would be this page twice, and the
+     * player's own proposal -- a key that switches, plus a lamp -- costs one button and no
+     * screen space. */
+    if (btn_pressed(btn, B_REC)) {
+        lfo_edit = (uint8_t)((lfo_edit + 1u) % WV_LFOS);
+        app_note(lfo_edit ? "LFO 2" : "LFO 1");
+    }
     /* B_ARP: the same page mechanism. The panel has had the button since the
      * beginning (plat.h's B_ARP) and nothing used it. */
     if (btn_pressed(btn, B_ARP))
@@ -1293,6 +1394,36 @@ static void input(void)
      * stronger one: RATE doubles as the on/off switch, so the page needs a parameter
      * that stays useful while the arp is off -- a page where every knob does nothing
      * until one of them has been turned is a page you cannot see the state of. */
+    /* The route table takes all six destination encoders, and it takes them FIRST: on that
+     * screen the six rings ARE the six knobs, so a turn of SELECT while the table is up has
+     * to move MORPH's amount and not the bank. K3 stays RATE, in the same place as screen 1,
+     * which is why the table is six destinations and not seven.
+     *
+     * The detents are drained unconditionally further down (see the note at EN_PRESET), so
+     * nothing accumulates while the table is not showing. */
+    if (lfo_mod) {
+        static const uint8_t ROUTE_ENC[ROUTE_SLOTS] = { EN_K1, EN_K2, EN_K4, EN_SELECT,
+                                                       EN_PRESET, EN_ALGO };
+        uint8_t slot;
+
+        for (slot = 0; slot < ROUTE_SLOTS; slot++) {
+            uint8_t d = route_dest(src, slot);
+            int32_t t = plat_enc(ROUTE_ENC[slot]);
+            if (d == ROUTE_NONE || t == 0)
+                continue;
+            lfo_amt[lfo_edit][d] =
+                (uint8_t)clamp((int32_t)lfo_amt[lfo_edit][d] + t * 4, 0, 127);
+        }
+        if ((e = plat_enc(EN_K3)) != 0)
+            lfo_rate[lfo_edit] = (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
+        /* No drain pass needed: plat_enc() takes the detent as it reads it, and the loop
+         * reads all six before it decides to skip any of them -- so a slot with no route
+         * still clears its knob rather than banking the turn for the next screen. */
+        btn_prev = btn;
+        ui_apply();
+        return;
+    }
+
     if ((e = plat_enc(EN_K1)) != 0) {
         if (edit_page && src == SRC_SYNTH) {
             /* The frame the offset knobs act on. It wraps: a frame is a place in a
@@ -1344,7 +1475,8 @@ static void input(void)
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_s = (uint8_t)clamp((int32_t)k_eg_s + e * 4, 0, 127);
-        else if (lfo_main)  k_lfo_rate = (uint8_t)clamp((int32_t)k_lfo_rate + e * 4, 0, 127);
+        else if (lfo_main)  lfo_rate[lfo_edit] =
+                                (uint8_t)clamp((int32_t)lfo_rate[lfo_edit] + e * 4, 0, 127);
         else if (glo_page) k_ftype = (uint8_t)((k_ftype + (e > 0 ? 1 : WV_FTYPE_N - 1)) % WV_FTYPE_N);
         else if (arp_page) k_arp_oct = (uint8_t)clamp((int32_t)k_arp_oct + (e > 0 ? 1 : -1), 1, 4);
         else               k_shape = (uint8_t)((k_shape + (e > 0 ? 1 : WV_SHAPE_N - 1)) % WV_SHAPE_N);
@@ -1362,7 +1494,8 @@ static void input(void)
             if (d) region_fix(smp_i);
         }
         else if (env_page)      k_eg_r = (uint8_t)clamp((int32_t)k_eg_r + e * 4, 0, 127);
-        else if (lfo_main)  k_lfo_depth = (uint8_t)clamp((int32_t)k_lfo_depth + e * 4, 0, 127);
+        else if (lfo_main)  K_LFO_DEPTH(lfo_edit) =
+                                (uint8_t)clamp((int32_t)K_LFO_DEPTH(lfo_edit) + e * 4, 0, 127);
         /* KEY TRK: five detents, wrapping, not a 0..127 sweep. The setting is a choice
          * out of five and the DSP test asserts the five values; a continuous knob here
          * would let the panel produce a 37 % that save_load then refuses to load. */
@@ -1373,7 +1506,6 @@ static void input(void)
         }
         /* K4 on screen 3. Screen 1 already owns CUT's DEPTH on this same encoder, and the
          * two are separate bytes so a filter sweep does not drag the wavetable with it. */
-        else if (lfo_mod)   k_morph_mod = (uint8_t)clamp((int32_t)k_morph_mod + e * 4, 0, 127);
         else if (arp_page) k_arp_gate = (uint8_t)clamp((int32_t)k_arp_gate + e * 4, 1, 127);
         else               k_amount = (uint8_t)clamp((int32_t)k_amount + e * 4, 0, 127);
     }
@@ -1904,6 +2036,75 @@ static char *morph_mod_text(uint8_t v)
     b[2] = (char)('0' + t % 10);
     b[3] = 0;
     return b;
+}
+
+/* Each destination's amount, in its OWN unit, because that is what the amount means:
+ *
+ *   CUT    octaves      +2.0  the filter's span, exponential like the corner
+ *   RES    percent            what the damping is being moved by
+ *   SHAPE  percent            the drive
+ *   MORPH  frames        3.5  the travel is 0..7 frames; "3.5" says more than "50 %"
+ *   GRAIN  percent
+ *   SPRAY  percent
+ *   PITCH  semitones    +12.0 at full it is an octave either way
+ *
+ * The spans have to match lfo_route()'s own span arguments in wv_dsp.c or the ring would
+ * promise a sweep the DSP does not make: CUT 4 octaves, MORPH 7 frames, PITCH 12 semitones.
+ * A zero amount prints "-" rather than "+0.0": a route that is off says so. */
+static char *dest_text(uint8_t dest, uint8_t v)
+{
+    static char ring[3][8];
+    static uint8_t turn;
+    char *b = ring[turn++ % 3];
+    int32_t t;
+
+    if (v == 0) {
+        b[0] = '-'; b[1] = 0;
+        return b;
+    }
+    switch (dest) {
+    case WV_DEST_CUT:
+        t = (int32_t)(4.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
+        b[0] = '+'; b[1] = (char)('0' + t / 10); b[2] = '.'; b[3] = (char)('0' + t % 10); b[4] = 0;
+        return b;
+    case WV_DEST_MORPH:
+        t = (int32_t)((float)v / 127.0f * (float)(WV_FRAMES - 1u) * 10.0f + 0.5f);
+        b[0] = (char)('0' + t / 10); b[1] = '.'; b[2] = (char)('0' + t % 10); b[3] = 0;
+        return b;
+    case WV_DEST_PITCH:
+        t = (int32_t)(12.0f * ((float)v / 127.0f) * 10.0f + 0.5f);
+        b[0] = '+';
+        if (t >= 100) {
+            b[1] = (char)('0' + t / 100); b[2] = (char)('0' + (t / 10) % 10);
+            b[3] = '.'; b[4] = (char)('0' + t % 10); b[5] = 0;
+        } else {
+            b[1] = (char)('0' + t / 10); b[2] = '.'; b[3] = (char)('0' + t % 10); b[4] = 0;
+        }
+        return b;
+    default:
+        /* RES / SHAPE / GRAIN / SPRAY: a percentage of the destination's own range */
+        t = (int32_t)((float)v / 127.0f * 100.0f + 0.5f);
+        if (t >= 100)      { b[0] = '1'; b[1] = '0'; b[2] = '0'; b[3] = 0; }
+        else if (t >= 10)  { b[0] = (char)('0' + t / 10); b[1] = (char)('0' + t % 10); b[2] = 0; }
+        else               { b[0] = (char)('0' + t); b[1] = 0; }
+        return b;
+    }
+}
+
+/* Is this LFO audibly doing anything? Rate is the arm switch and an amount is what makes a
+ * sweep reach a parameter, so both are needed -- the same pair the single-LFO lamp used,
+ * now per LFO. Every destination counts, not only CUT: an LFO with a MORPH amount and a
+ * zero DEPTH is working, and a lamp that looked only at DEPTH would call it idle (which is
+ * the same defect the DSP's phase advance had). */
+static int lfo_running(uint8_t i)
+{
+    uint8_t d;
+    if (lfo_rate[i] == 0)
+        return 0;
+    for (d = 0; d < WV_DESTS; d++)
+        if (lfo_amt[i][d] != 0)
+            return 1;
+    return 0;
 }
 
 static char *sel_time(uint8_t v, int which)
@@ -3134,6 +3335,49 @@ static void knob(int32_t x, int32_t y, int32_t w, const char *name, const char *
     knob_c(x, y, w, name, val, v127, lit, 0);
 }
 
+/* ── the route table's own drawing pieces ───────────────────────────────────
+ *
+ * These live here, after knob_arc, because they use it. Everything above this point that
+ * calls them is a page whose drawing runs later, at frame time, so the order inside the
+ * file is "definitions before their users" and nothing more.
+ */
+
+/* The same ring at an arbitrary place on the band.
+ *
+ * knob_c puts the ring at a fixed offset below its top (KNOB_ARC_TOP + KNOB_ARC_R, the knob
+ * band's own 21 + 23) because the four knobs under the screen are always in the same place.
+ * The route table's upper three rings sit inside the MATERIAL band, a different strip with
+ * its own origin, so the ring's centre has to be an argument. The name goes above and the
+ * value in the hole, in the same order knob_c uses: a page whose rings were labelled
+ * differently from every other page would be a second visual language for the same object. */
+static void knob_at(int32_t cx, int32_t cy, const char *name, const char *val,
+                    int32_t v127, int lit)
+{
+    cv_text(cx - txt_w(name) / 2, cy - KNOB_ARC_R - FONT_XS.h - 1, &FONT_XS, name,
+            lit ? sk.ink_hi : sk.ink);
+    knob_arc(cx, cy, v127, lit ? sk.ink_hi : sk.ink, dim(sk.ink, 1, 5));
+    cv_text(cx - txt_w(val) / 2, cy - FONT_XS.h / 2, &FONT_XS, val,
+            lit ? sk.acc : sk.ink);
+}
+
+/* A ring this source has no route for: its own circle, dim, with OFF in the hole.
+ *
+ * Not an empty hole -- an empty hole reads as a broken knob -- and not a ring with a slash
+ * through it, which at 47 px reads as a scribble rather than as a word.
+ *
+ * No name, because there is nothing to name: a slot's destination is a property of the
+ * SOURCE, so this ring is not "SPRAY with no amount", it is a position this source does not
+ * fill. Naming it would have to name the other source's destination, which is worse than a
+ * dim OFF -- the row already reads as a row of rings, and one short of the others says
+ * "fewer destinations here" without claiming which. */
+static void route_absent(int32_t cx, int32_t cy)
+{
+    uint16_t c = dim(sk.ink, 2, 5);
+
+    knob_arc(cx, cy, 0, c, c);
+    cv_text(cx - txt_w("OFF") / 2, cy - FONT_XS.h / 2, &FONT_XS, "OFF", c);
+}
+
 
 /* ---------------------------------------------------------------- scope --- */
 
@@ -3826,7 +4070,37 @@ void app_frame(void)
      * nearest the bottom row of keys. K1..K4 sit in the physical order left to right,
      * which is the rule this panel has kept since the first layout. */
     cv_begin(240, MAT_H, sk.bg);
-    {
+    /* ── the route table covers the material band ──────────────────────────────
+     *
+     * Rule 3 of the page model: a page behind the picture may borrow the band, but only by
+     * covering it whole -- no half a wave with three knobs on top of it. So this fills the
+     * band and skips everything between here and the blit: the picture, the corner labels
+     * and the page caption below. That is also why it sits here and not inside the
+     * picture's own branch, because the things being replaced all live in between.
+     *
+     * Drawn in the band's own coordinates (the band is its own blit), which is why the
+     * ring's centre is an argument for knob_at and a constant for knob_c. */
+    if (lfo_mod) {
+        int32_t i;
+        for (i = 0; i < 3; i++) {
+            uint8_t slot = (uint8_t)(3 + i);          /* 3 SELECT, 4 PRESET, 5 ALGO */
+            uint8_t d = route_dest(src, slot);
+            int32_t cx = 44 + i * 76;
+
+            if (d == ROUTE_NONE)
+                route_absent(cx, 54);
+            else
+                knob_at(cx, 54, DEST_NAME[d], dest_text(d, lfo_amt[lfo_edit][d]),
+                        (int32_t)lfo_amt[lfo_edit][d], 1);
+        }
+        /* The band is its own blit and cv_blit ends it, so the rest of this block -- the
+         * picture, the corner labels, the caption -- is skipped without a jump: the blit
+         * below sends the whole 240 x 92 strip at once, and nothing after this point
+         * touches it. That is why there is no `goto` here: an earlier version jumped past
+         * the knob band's own drawing to the bottom label, which left the four rings under
+         * the screen undrawn and three stale ones on the picture. */
+        cv_blit(0, SCOPE_H + MAT_H);
+    } else {
         /* ── the save line ──────────────────────────────────────────────────────
          *
          * Two pixels under the scope, in the padding the band already had.
@@ -4042,13 +4316,11 @@ void app_frame(void)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ENV PAGE", sk.ink);
             else if (glo_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "GLO PAGE", sk.ink);
-            else if (lfo_mod)
-                /* The route table's own caption. Screen 1 says "LFO PAGE"; this one has
-                 * to say which screen it is, because its knobs are rows in a list and a
-                 * player who came from screen 1 needs to know why CUT is not on K1. */
-                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO ROUTES", sk.ink);
-            else if (lfo_page)
-                cv_text(MAT_X0 + 2, ypage, &FONT_XS, "LFO PAGE", sk.ink);
+            /* Both LFO screens name the LFO being shown: B_REC can change it from the panel
+             * and the only other signal is REC's lamp. "LFO PAGE" said nothing a player did
+             * not already know from having pressed LFO. */
+            else if (lfo_page || lfo_mod)
+                cv_text(MAT_X0 + 2, ypage, &FONT_XS, lfo_edit ? "LFO 2" : "LFO 1", sk.ink);
             else if (arp_page)
                 cv_text(MAT_X0 + 2, ypage, &FONT_XS, "ARP PAGE", sk.ink);
             else if (edit_page && src != SRC_SYNTH)
@@ -4156,8 +4428,10 @@ void app_frame(void)
          * a rate; DEPTH prints octaves, because CUT is exponential. */
         knob(4,   KNOB_TOP, 54, "CUT",   pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",   pct(k_res), k_res, 0);
-        knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(k_lfo_rate), k_lfo_rate, 1);
-        knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
+        knob(120, KNOB_TOP, 54, "RATE",  lfo_rate_text(lfo_rate[lfo_edit]),
+             lfo_rate[lfo_edit], 1);
+        knob(178, KNOB_TOP, 54, "DEPTH", lfo_depth_text(K_LFO_DEPTH(lfo_edit)),
+             K_LFO_DEPTH(lfo_edit), 1);
     } else if (glo_page) {
         /* GLO: the settings that are true of the whole instrument, on K3 and K4.
          *
@@ -4212,8 +4486,37 @@ void app_frame(void)
          * word, and an abbreviation is not a label). */
         knob(4,   KNOB_TOP, 54, "CUT",     pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",     pct(k_res), k_res, 0);
-        knob(120, KNOB_TOP, 54, "DEPTH", lfo_depth_text(k_lfo_depth), k_lfo_depth, 1);
-        knob(178, KNOB_TOP, 54, "MORPH", morph_mod_text(k_morph_mod), k_morph_mod, 1);
+        /* Screen 2 is the route table: six destination rings and K3's RATE. The three
+         * above the picture are drawn in the material band this screen covers; these are
+         * the four under it. K3 is RATE in the same place it is on screen 1 -- the
+         * player's own condition for the layout, and the reason the table has six
+         * destinations and not seven.
+         *
+         * BOTTOM_SLOT maps a screen position to a table slot, and it is written out rather
+         * than derived because K3 interrupts the run: the four positions are slots 0, 1,
+         * RATE and 2. */
+        {
+            static const uint8_t BOTTOM_SLOT[4] = { 0, 1, ROUTE_SLOTS, 2 };
+            int32_t p;
+            for (p = 0; p < 4; p++) {
+                int32_t x = 4 + p * 58;
+                uint8_t slot = BOTTOM_SLOT[p];
+                uint8_t d;
+
+                if (slot == ROUTE_SLOTS) {
+                    knob(x, KNOB_TOP, 54, "RATE", lfo_rate_text(lfo_rate[lfo_edit]),
+                         lfo_rate[lfo_edit], 1);
+                    continue;
+                }
+                d = route_dest(src, slot);
+                if (d == ROUTE_NONE) {
+                    route_absent(x + 27, KNOB_ARC_TOP + KNOB_ARC_R);
+                    continue;
+                }
+                knob(x, KNOB_TOP, 54, DEST_NAME[d], dest_text(d, lfo_amt[lfo_edit][d]),
+                     (int32_t)lfo_amt[lfo_edit][d], 1);
+            }
+        }
     } else {
         knob(4,   KNOB_TOP, 54, "CUT",    pct(k_cut), k_cut, 0);
         knob(62,  KNOB_TOP, 54, "RES",    pct(k_res), k_res, 0);
@@ -4273,8 +4576,20 @@ void app_frame(void)
          * instrument from hiding a modulator that is audibly working. */
         if (lfo_page)
             lit |= 1u << B_LFO;
-        else if (k_lfo_rate != 0 && k_lfo_depth != 0 && ((now >> 8) & 1u))
+        else if ((lfo_running(0) || lfo_running(1)) && ((now >> 8) & 1u))
             lit |= 1u << B_LFO;
+        /* B_REC says which LFO the page is showing, and it says so whether the page is up
+         * or not -- that is the point of putting it on the panel instead of only in the
+         * caption. Solid while LFO2 is selected, dark for LFO1.
+         *
+         * The player asked for a RED lamp here and it cannot be done: the button matrix
+         * gives every button one bit and one colour, and only PLAY has a second, green LED
+         * and the platform's plat_play_red(). Lit versus unlit is the whole vocabulary this
+         * hardware has for a button that is not a page, so that is what distinguishes the
+         * two; the caption says LFO 1 / LFO 2 in words as well, so the lamp is a landmark
+         * and not the only signal. */
+        if (lfo_edit)
+            lit |= 1u << B_REC;
         /* B_ARP reads the same way B_LFO does, for the same reason: the page is a
          * view, the setting is a switch, and a closed page must not hide something
          * that is audibly working. Arpeggio is the worst case of the rule -- a player
@@ -4488,9 +4803,32 @@ int app_expect(const char *what, int *got)
         *got = mx;
         return 1;
     }
-    if (!strcmp(what, "lfo_rate"))   { *got = k_lfo_rate; return 1; }
-    if (!strcmp(what, "lfo_depth"))  { *got = k_lfo_depth; return 1; }
-    if (!strcmp(what, "morph_mod"))  { *got = k_morph_mod; return 1; }
+    /* The LFO probes. lfo_edit is which one the page shows; lfo_rate/lfo_depth/morph_mod
+     * are that one's; the numbered forms reach the other, so a test can tell a second LFO
+     * that is independent from one that is a copy. The amt_* probes are every destination by
+     * name, which is what the route table's six rings need. */
+    if (!strcmp(what, "lfo_edit"))   { *got = lfo_edit; return 1; }
+    if (!strcmp(what, "lfo_rate"))   { *got = lfo_rate[lfo_edit]; return 1; }
+    if (!strcmp(what, "lfo_rate1"))  { *got = lfo_rate[0]; return 1; }
+    if (!strcmp(what, "lfo_rate2"))  { *got = lfo_rate[1]; return 1; }
+    if (!strcmp(what, "lfo_depth"))  { *got = K_LFO_DEPTH(lfo_edit); return 1; }
+    if (!strcmp(what, "morph_mod"))  { *got = K_MORPH_MOD(lfo_edit); return 1; }
+    if (!strcmp(what, "lfo_sync"))   { *got = lfo_sync[lfo_edit]; return 1; }
+    if (!strcmp(what, "lfo_trig"))   { *got = lfo_trig[lfo_edit]; return 1; }
+    if (!strcmp(what, "lfo_shape"))  { *got = lfo_shape[lfo_edit]; return 1; }
+    if (!strcmp(what, "amt_cut"))    { *got = lfo_amt[lfo_edit][WV_DEST_CUT];   return 1; }
+    if (!strcmp(what, "amt_res"))    { *got = lfo_amt[lfo_edit][WV_DEST_RES];   return 1; }
+    if (!strcmp(what, "amt_shape"))  { *got = lfo_amt[lfo_edit][WV_DEST_SHAPE]; return 1; }
+    if (!strcmp(what, "amt_morph"))  { *got = lfo_amt[lfo_edit][WV_DEST_MORPH]; return 1; }
+    if (!strcmp(what, "amt_grain"))  { *got = lfo_amt[lfo_edit][WV_DEST_GRAIN]; return 1; }
+    if (!strcmp(what, "amt_spray"))  { *got = lfo_amt[lfo_edit][WV_DEST_SPRAY]; return 1; }
+    if (!strcmp(what, "amt_pitch"))  { *got = lfo_amt[lfo_edit][WV_DEST_PITCH]; return 1; }
+    if (!strcmp(what, "route0"))     { *got = route_or_minus1(src, 0); return 1; }
+    if (!strcmp(what, "route1"))     { *got = route_or_minus1(src, 1); return 1; }
+    if (!strcmp(what, "route2"))     { *got = route_or_minus1(src, 2); return 1; }
+    if (!strcmp(what, "route3"))     { *got = route_or_minus1(src, 3); return 1; }
+    if (!strcmp(what, "route4"))     { *got = route_or_minus1(src, 4); return 1; }
+    if (!strcmp(what, "route5"))     { *got = route_or_minus1(src, 5); return 1; }
     if (!strcmp(what, "bank"))       { *got = bank_i;   return 1; }
     if (!strcmp(what, "slot"))       { *got = smp_i;    return 1; }
     /* The EDIT page's own numbers. A picture can be right about a region the engine
@@ -4736,9 +5074,18 @@ static void save_snapshot(save_rec *r)
     r->eg_d = k_eg_d;
     r->eg_s = k_eg_s;
     r->eg_r = k_eg_r;
-    r->lfo_rate = k_lfo_rate;
-    r->lfo_depth = k_lfo_depth;
-    r->morph_mod = k_morph_mod;
+    {
+        uint8_t i, d;
+        for (i = 0; i < WV_LFOS; i++) {
+            r->lfo_rate[i]  = lfo_rate[i];
+            r->lfo_shape[i] = lfo_shape[i];
+            r->lfo_sync[i]  = lfo_sync[i];
+            r->lfo_trig[i]  = lfo_trig[i];
+            for (d = 0; d < WV_DESTS; d++)
+                r->lfo_amt[i][d] = lfo_amt[i][d];
+        }
+        r->lfo_edit = lfo_edit;
+    }
     r->ftype = k_ftype;
     r->ktrack = k_ktrack;
     r->arp_rate = k_arp_rate;
@@ -4784,9 +5131,23 @@ static void save_apply(const save_rec *r)
     k_eg_d = r->eg_d;
     k_eg_s = r->eg_s;
     k_eg_r = r->eg_r;
-    k_lfo_rate = r->lfo_rate;
-    k_lfo_depth = r->lfo_depth;
-    k_morph_mod = r->morph_mod;
+    {
+        uint8_t i, d;
+        for (i = 0; i < WV_LFOS; i++) {
+            lfo_rate[i]  = r->lfo_rate[i];
+            lfo_shape[i] = r->lfo_shape[i];
+            lfo_sync[i]  = r->lfo_sync[i];
+            lfo_trig[i]  = r->lfo_trig[i];
+            for (d = 0; d < WV_DESTS; d++)
+                lfo_amt[i][d] = r->lfo_amt[i][d];
+            /* Out-of-range values are clamped rather than trusted: the version gate
+             * checks the record's shape, not the range of every field in it. */
+            if (lfo_shape[i] >= WV_LFOSH_N)    lfo_shape[i] = WV_LFOSH_SINE;
+            if (lfo_trig[i]  >= WV_LFO_TRIG_N) lfo_trig[i]  = WV_LFO_FREE;
+            if (lfo_sync[i]  > 1)              lfo_sync[i]  = 0;
+        }
+        lfo_edit = (uint8_t)(r->lfo_edit < WV_LFOS ? r->lfo_edit : 0);
+    }
     k_ftype = r->ftype;
     k_ktrack = r->ktrack;
     k_arp_rate = r->arp_rate;

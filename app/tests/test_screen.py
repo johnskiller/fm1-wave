@@ -392,18 +392,62 @@ shot grn.png
     # last one cannot be a dead end (player, this session).
     ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
        "and a third press wraps 2 -> 1: the LFO page is two screens again")
-    # ── the LFO's second screen: what else the LFO moves (spec 5c3) ──────────
-    # K4 here is MORPH's own amount, and the assertion that matters is that it is NOT
-    # CUT's DEPTH: screen 1 already owns that encoder for DEPTH, and if the two shared a
-    # byte then dialling a filter sweep would silently add a wavetable sweep.
+    # ── the LFO's second screen: the route table (spec 5c3) ──────────────────
+    # Screen 2 is seven rings: K3 is RATE in the same place as screen 1, and the other six
+    # are destinations. Which destination sits in a slot depends on the source, so the
+    # assertions below are in SYNTH unless a line says otherwise.
+    #
+    # The rules being pinned:
+    #   * a route is only reachable where its destination exists (no MORPH on SMPL)
+    #   * K4 here is SHAPE, NOT screen 1's DEPTH -- the two must not share a byte, or
+    #     dialling a filter sweep would silently add a waveshape sweep
+    #   * RATE stays on K3 and stays the SAME byte as screen 1's, because it is one LFO
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2),
        "LFO's route screen is screen 2")
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "morph_mod", 40),
-       "screen 3: K4 sets MORPH's amount")
+    ck(expect("tap LFO\ntap LFO\n", "lfo_edit", 0),
+       "and it edits LFO 1 until REC says otherwise")
+    # SYNTH: K1 CUT / K2 RES / K4 SHAPE / SELECT MORPH / PRESET PITCH / ALGO none
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "amt_shape", 40),
+       "screen 2: K4 sets SHAPE's amount in SYNTH")
     ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 0),
        "and it does NOT set CUT's depth")
-    ck(expect("tap LFO\nturn K4 10\n", "morph_mod", 0),
-       "screen 1's K4 still sets DEPTH, not MORPH")
+    ck(expect("tap LFO\nturn K4 10\n", "amt_shape", 0),
+       "screen 1's K4 still sets DEPTH, not a route amount")
+    ck(expect("tap LFO\ntap LFO\nturn ALGO 10\n", "amt_morph", 0),
+       "ALGO has no route in SYNTH, so turning it moves nothing there")
+    ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "SELECT is MORPH's amount, which is the route the DSP gained")
+    ck(expect("tap LFO\ntap LFO\nturn PRESET 10\n", "amt_pitch", 40),
+       "PRESET is PITCH")
+    ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "bank", 0),
+       "and turning SELECT there does not change the bank")
+    # RATE on K3 is one byte across both screens: screen 2 repeats it so a player can dial
+    # a rate without leaving the routes, not because it is a second setting.
+    ck(expect("tap LFO\ntap LFO\nturn K3 8\n", "lfo_rate", 32),
+       "screen 2's K3 is RATE")
+    ck(expect("tap LFO\nturn K3 8\n", "lfo_rate", 32),
+       "and it is the same RATE screen 1 sets")
+    # A source with fewer destinations: SMPL reads no wavetable frame and has no cloud, so
+    # it has CUT/RES/SHAPE/PITCH and two empty slots. The assertion that matters is that a
+    # slot with no route neither takes an amount nor reports one -- and each of these runs
+    # in a fresh process, so nothing carries over from the lines above.
+    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route0", 0),
+       "SMPL slot 0 is CUT")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\n", "route4", -1),
+       "SMPL slot 4 has no destination and says so")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn PRESET 10\n", "amt_pitch", 0),
+       "and turning an empty slot's knob moves nothing")
+    ck(expect("tap SEL\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_pitch", 40),
+       "SMPL's SELECT is PITCH, so the same knob turned there does move it")
+    ck(expect("turn K1 10\ntap LFO\ntap LFO\nturn K1 10\n", "amt_cut", 40),
+       "K1 is CUT's AMOUNT in every source")
+    # The consequence of a seven-ring table, written down because it is a real trade: on
+    # this screen K1 is CUT's modulation amount, NOT the filter corner, so the corner is
+    # one press away on any other screen. That is rule 3 of the page model -- a page that
+    # covers the picture may borrow the knobs that were on it -- and the alternative (CUT
+    # the value here, CUT's amount nowhere) would leave the table with five rings.
+    ck(expect("turn K1 10\ntap LFO\ntap LFO\nturn K1 10\n", "cut", 127),
+       "and the corner itself is not moved by that knob while the table is up")
     # KEY TRK left this page for GLO (it is the FILTER's setting, shared by all eight
     # voices, not one LFO's). So the assertion moves with it: K4 sets it there, and
     # K4 here does not.
@@ -414,10 +458,43 @@ shot grn.png
        "KEY TRK sets on GLO's page, where it now lives")
     ck(expect("tap GLO\nturn K4 2\n", "morph_mod", 0),
        "and GLO's K4 does not touch MORPH")
-    ck(expect("tap LFO\ntap LFO\nturn K1 -6\n", "cut", 103),
-       "screen 3 keeps CUT on K1, like the other two")
+    # Screen 2 does NOT keep CUT's value on K1 -- the table borrows every knob including
+    # that one, and the line above asserts the corner does not move. What wraps is the
+    # page: a third press returns to screen 1, where K4 is DEPTH again.
     ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
-       "the fourth press is back on screen 1, where K4 is DEPTH again")
+       "a third press is back on screen 1, where K4 is DEPTH again")
+    # ── two LFOs, one page: REC is the selector ─────────────────────────────
+    # The player's own shape for this: a key that switches and a lamp that says which.
+    # What must hold is that the two are INDEPENDENT -- a shared rate or a shared amount
+    # would make the second LFO a copy, which is not modulation.
+    ck(expect("tap REC\n", "lfo_edit", 1), "REC selects LFO 2")
+    ck(expect("tap REC\ntap REC\n", "lfo_edit", 0), "and REC again goes back to LFO 1")
+    ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate2", 32),
+       "with LFO 2 selected, screen 1's K3 sets LFO 2's rate")
+    ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate1", 0),
+       "and LFO 1's rate is still 0")
+    ck(expect("tap LFO\nturn K3 8\ntap REC\n", "lfo_rate2", 0),
+       "turning LFO 1's rate does not reach LFO 2")
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\n", "amt_morph", 40),
+       "the route table follows REC: SELECT is LFO 2's MORPH amount")
+    ck(expect("tap REC\ntap LFO\ntap LFO\nturn SELECT 10\ntap REC\n", "amt_morph", 0),
+       "and the same knob on LFO 1's table is a different amount")
+    # REC's lamp is the only panel signal for which LFO is selected, so it is asserted
+    # rather than assumed: lit for LFO 2 and dark for LFO 1.
+    def leds(script):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(script + "\nleds\n")
+            path = f.name
+        try:
+            r = subprocess.run([HOST, path, out], capture_output=True, text=True,
+                               timeout=120, cwd=out)
+        finally:
+            os.unlink(path)
+        return r.stdout
+
+    ck("REC" in leds("tap REC\n"), "REC's lamp is lit while LFO 2 is selected")
+    ck("REC" not in leds(""), "and dark for LFO 1")
+    ck("LFO" in leds("tap LFO\ntap LFO\n"), "B_LFO is solid on its own page")
     ck(expect("tap LFO\ntap LFO\ntap HOME\n", "lfo", 0),
        "HOME closes it from screen 2")
     ck(expect("tap LFO\ntap LFO\ntap HOME\ntap LFO\n", "page_no", 1),
