@@ -2282,6 +2282,51 @@ static int32_t  save_led;       /* B_SAVE's lamp: 0 saved, 1 mid, 2 lit */
  * waits for the previous one, so an extra blit is an extra 8 ms of the frame spent
  * sending pixels that are already on the glass. A probe, not a setting. */
 static int32_t  frame_blits;
+
+/* WHERE those transfers went, and how far each reached down.
+ *
+ * frame_blits counts; it does not say anything about the rows. That mattered: the LFO
+ * route table was blitted twice, once at the band's own row (84) and once at
+ * SCOPE_H + MAT_H (176, the first row of the knob band), and the second one ran to row
+ * 267 of a 240-row panel. The query "is the table on screen" answered yes and the
+ * screenshot looked right, because the host's lcd_blit clips at 240 and threw the
+ * overflow away. The panel does not clip -- it programs RASET to 267 and streams -- so
+ * the player saw the table across the bottom knobs (after flashing 4b3ea8c).
+ *
+ * A test on the host therefore cannot see this by looking at pixels, and the screens
+ * are only as tall as the screen here. So the transfers are recorded: a band that is
+ * sent twice in a frame, and a horizontal band whose rows leave the panel, both become
+ * visible to probe_ui without a display. */
+#define BLIT_LOG_MAX 6
+static int32_t  blit_y[BLIT_LOG_MAX];
+static int32_t  blit_h[BLIT_LOG_MAX];
+static int32_t  blit_n;         /* entries used this frame */
+static int32_t  blit_off;       /* transfers that reached past the panel's last row */
+
+/* The one way a band reaches the glass. Every cv_blit in this file goes through it. */
+static void band_blit(int32_t x, int32_t y, int32_t h)
+{
+    if (blit_n < BLIT_LOG_MAX) {
+        blit_y[blit_n] = y;
+        blit_h[blit_n] = h;
+    }
+    blit_n++;
+    if (y < 0 || h < 0 || y + h > 240)      /* the bands have to add up to the panel: line 649 */
+        blit_off++;
+    cv_blit((uint32_t)x, (uint32_t)y);
+    frame_blits++;
+}
+
+/* Does any transfer in this frame put rows on the panel that start below it? */
+static int32_t  band_was_drawn(int32_t y)
+{
+    int32_t i;
+    for (i = 0; i < BLIT_LOG_MAX && i < blit_n; i++)
+        if (blit_y[i] == y)
+            return 1;
+    return 0;
+}
+
 static int      unsaved_live;   /* unsaved_at holds a start time */
 
 /* A few words on the glass, for a moment.
@@ -4157,8 +4202,8 @@ void app_frame(void)
     }
     dbg_draw(&sk);
     frame_blits = 0;
-    cv_blit(0, 0);                 /* without this the band is drawn and never shown */
-    frame_blits++;
+    blit_n = 0;            /* the log is per frame: what the last frame sent, and where */
+    band_blit(0, 0, SCOPE_H);      /* without this the band is drawn and never shown */
 
     /* ─── the panel body ──────────────────────────────────────────────────────
      *
@@ -4297,13 +4342,28 @@ void app_frame(void)
                 knob_at(cx, 52, "", dest_text(d, lfo_amt[lfo_edit][d]),
                         (int32_t)lfo_amt[lfo_edit][d], 1);
         }
-        /* The band is its own blit and cv_blit ends it, so the rest of this block -- the
-         * picture, the corner labels, the caption -- is skipped without a jump: the blit
-         * below sends the whole 240 x 92 strip at once, and nothing after this point
-         * touches it. That is why there is no `goto` here: an earlier version jumped past
-         * the knob band's own drawing to the bottom label, which left the four rings under
-         * the screen undrawn and three stale ones on the picture. */
-        cv_blit(0, SCOPE_H + MAT_H);
+        /* ── NOTE: no blit here ────────────────────────────────────────────────
+         * This block leaves after drawing the table, and the band's ONE transfer is
+         * further down (cv_blit(0, SCOPE_H)). There used to be a cv_blit here, and every
+         * word of the comment that justified it was wrong:
+         *
+         *   "cv_blit ends it"        -- it does not. It is lcd_blit(x, y, w, h, px) and
+         *                               nothing more; the next statement runs.
+         *   "skipped without a jump" -- so the picture, the corner labels and the caption
+         *                               were NOT skipped: the else branch did not run
+         *                               (this is the if), but nothing returned either.
+         *   SCOPE_H + MAT_H = 176    -- that is the KNOB band's first row, not this
+         *                               band's. 176 + 92 = 268 of a 240-row panel.
+         *
+         * On the host that overflow was invisible: plat_host.c's lcd_blit clips with
+         * `y + j < 240u` and threw the last 28 rows away. On the panel lcd_blit does no
+         * such thing -- it programs RASET to row 267 and streams the pixels -- and the
+         * table appeared twice, once in the band and once across the bottom knobs
+         * (player, after flashing 4b3ea8c). The host clipping is the reason emu never showed
+         * it, so this cannot be caught by a screenshot test that runs on the host; the
+         * guard is that a band has exactly one blit.
+         *
+         * The table reaches the screen through the single blit below, at the right row. */
     } else {
         /* ── the save line ──────────────────────────────────────────────────────
          *
@@ -4575,8 +4635,7 @@ void app_frame(void)
      * DMA) before it starts, so those four were four full 240x92 transfers of pixels
      * already on the glass, ~8 ms each at the measured ~44 MHz. The last one wins and
      * it is the same buffer every time, so nothing on screen depended on the rest. */
-    cv_blit(0, SCOPE_H);
-    frame_blits++;
+    band_blit(0, SCOPE_H, MAT_H);
 
     cv_begin(240, KNOB_H, sk.bg);
     if (env_page) {
@@ -4759,8 +4818,7 @@ void app_frame(void)
         knob(120, KNOB_TOP, 54, "SHAPE",  SHAPE_NAME[k_shape], k_shape * 42, 0);
         knob(178, KNOB_TOP, 54, "AMOUNT", pct(k_amount), k_amount, 0);
     }
-    cv_blit(0, SCOPE_H + MAT_H);
-    frame_blits++;
+    band_blit(0, SCOPE_H + MAT_H, KNOB_H);
 
     /* The lights, at 30 Hz rather than every frame: the matrix scan and the audio
      * want different rhythms, and the platform's own comment warns that driving the
@@ -4934,6 +4992,17 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "saved"))       { *got = save_loaded(); return 1; }
     if (!strcmp(what, "save_dirty"))  { *got = save_dirty(); return 1; }
     if (!strcmp(what, "frame_blits")) { *got = frame_blits;    return 1; }
+    /* The blit log: what the last frame sent and where. `blit_off` is the one that would
+     * have caught the double-drawn LFO table without a panel to look at -- the host clips,
+     * the panel does not. See the comment on band_blit. */
+    if (!strcmp(what, "blit_n"))      { *got = blit_n;        return 1; }
+    if (!strcmp(what, "blit_off"))    { *got = blit_off;      return 1; }
+    if (!strcmp(what, "blit_y0"))     { *got = blit_y[0];     return 1; }
+    if (!strcmp(what, "blit_y1"))     { *got = blit_y[1];     return 1; }
+    if (!strcmp(what, "blit_y2"))     { *got = blit_y[2];     return 1; }
+    if (!strcmp(what, "blit_h0"))     { *got = blit_h[0];     return 1; }
+    if (!strcmp(what, "blit_h1"))     { *got = blit_h[1];     return 1; }
+    if (!strcmp(what, "blit_h2"))     { *got = blit_h[2];     return 1; }
     if (!strcmp(what, "save_line"))   { *got = save_line_len;  return 1; }
     if (!strcmp(what, "save_ink"))    { *got = save_line_step; return 1; }
     if (!strcmp(what, "save_age"))    { *got = (int)save_line_age; return 1; }

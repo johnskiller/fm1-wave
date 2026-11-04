@@ -452,6 +452,39 @@ shot grn.png
        "and no knob on the table routes PITCH any more")
     ck(expect("tap LFO\ntap LFO\nturn SELECT 10\n", "bank", 0),
        "and turning SELECT there does not change the bank")
+    # ── every band is sent once, and none of them reaches past the panel ──────
+    #
+    # This is the guard for the defect the player found on hardware and the emulator
+    # could not: the LFO route table was blitted twice, and the spare one went to
+    # SCOPE_H + MAT_H (176, the knob band's first row) reaching row 267 of a 240-row
+    # panel. host lcd_blit clips at 240 and threw the overflow away, so emu looked
+    # right and every screenshot test passed. lcd_blit on the panel does NOT clip -- it
+    # programs RASET to 267 and streams -- so the table appeared across the bottom knobs.
+    #
+    # Asserted through the app's own log of where its bands went, because pixels cannot
+    # answer this on a host that clips. Three bands (0 / 84 / 176) is the whole screen;
+    # a fourth entry or a nonzero overflow is the defect, on any page.
+    for name, script in (("voice", ""),
+                         ("LFO 1", "tap LFO\n"),
+                         ("LFO 1 routes", "tap LFO\ntap LFO\n"),
+                         ("LFO 2 routes", "tap LFO\ntap LFO\ntap LFO\n"),
+                         ("ENV", "tap ENV\n"),
+                         ("EDIT", "tap EDIT\n"),
+                         ("ARP", "tap ARP\n"),
+                         ("GLO", "tap GLO\n")):
+        stem = script + "master 200\nwait 300\n"
+        ck(show_val(stem, "blit_n") == 3,
+           "%s: the frame sends three bands, once each (was 4 when the table was drawn"
+           " twice)" % name)
+        ck(show_val(stem, "blit_off") == 0,
+           "%s: no band reaches past the panel's last row (the host clips, the panel does"
+           " not)" % name)
+        ck(show_val(stem, "blit_y0") == 0 and show_val(stem, "blit_y1") == 84
+           and show_val(stem, "blit_y2") == 176,
+           "%s: the bands are at the scope, the material band and the knobs -- not at 176"
+           " twice" % name)
+
+
     # The bottom row is cut / res / RATE / shape in every source: the two filter knobs stay
     # where the other five pages put them, and the rate is in reach from the routes.
     ck(expect("tap LFO\ntap LFO\n", "route2", 2),
