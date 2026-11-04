@@ -4968,6 +4968,19 @@ int app_expect(const char *what, int *got)
      * that is independent from one that is a copy. The amt_* probes are every destination by
      * name, which is what the route table's six rings need. */
     if (!strcmp(what, "lfo_edit"))   { *got = lfo_edit; return 1; }
+    /* What the DSP is actually holding, not what the panel holds. The two are written by
+     * ui_apply(), and a probe on the panel's copy cannot tell whether that copy ever
+     * arrived -- which is exactly the question "UI现在连接DSP了吗？" asks. */
+    if (!strcmp(what, "dsp_amt_cut"))   { *got = dsp.l[lfo_edit].amt[WV_DEST_CUT];   return 1; }
+    if (!strcmp(what, "dsp_amt_pitch")) { *got = dsp.l[lfo_edit].amt[WV_DEST_PITCH]; return 1; }
+    if (!strcmp(what, "dsp_amt_morph")) { *got = dsp.l[lfo_edit].amt[WV_DEST_MORPH]; return 1; }
+    if (!strcmp(what, "dsp_amt_shape")) { *got = dsp.l[lfo_edit].amt[WV_DEST_SHAPE]; return 1; }
+    if (!strcmp(what, "dsp_amt_res"))   { *got = dsp.l[lfo_edit].amt[WV_DEST_RES];   return 1; }
+    if (!strcmp(what, "dsp_amt_grain")) { *got = dsp.l[lfo_edit].amt[WV_DEST_GRAIN]; return 1; }
+    if (!strcmp(what, "dsp_amt_spray")) { *got = dsp.l[lfo_edit].amt[WV_DEST_SPRAY]; return 1; }
+    if (!strcmp(what, "dsp_rate0"))     { *got = dsp.l[0].rate; return 1; }
+    if (!strcmp(what, "dsp_rate1"))     { *got = dsp.l[1].rate; return 1; }
+    if (!strcmp(what, "dsp_cut"))       { *got = dsp.cut;       return 1; }
     if (!strcmp(what, "lfo_rate"))   { *got = lfo_rate[lfo_edit]; return 1; }
     if (!strcmp(what, "lfo_rate1"))  { *got = lfo_rate[0]; return 1; }
     if (!strcmp(what, "lfo_rate2"))  { *got = lfo_rate[1]; return 1; }

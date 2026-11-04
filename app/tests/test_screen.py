@@ -525,6 +525,24 @@ shot grn.png
     ck(expect("tap REC\ntap LFO\nturn K3 8\n", "lfo_rate1", 32),
        "REC no longer selects an LFO")
     ck(expect("tap LFO\n", "lfo_edit", 0), "lfo_edit is a property of the screen, not a byte")
+    # ── the panel's copy and the DSP's copy are the same number ─────────────────
+    # Every probe above reads lfo_amt, which is the PANEL's byte. A panel byte that never
+    # reaches dsp.l[i].amt would pass all of them and be silent, which is the one failure
+    # this page cannot show. These read what the DSP is actually holding.
+    ck(expect("tap LFO\nturn K4 6\n", "dsp_amt_cut", 24),
+       "screen 1's DEPTH arrives in the DSP as the CUT amount")
+    ck(expect("tap LFO\ntap LFO\nturn K1 5\n", "dsp_amt_cut", 20),
+       "and screen 2's K1 arrives in the same place")
+    ck(expect("tap LFO\ntap LFO\nturn K3 7\n", "dsp_amt_pitch", 28),
+       "screen 2's K3 arrives as PITCH, not as RATE")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 4\n", "dsp_rate1", 16),
+       "screen 3's K3 arrives as LFO 2's rate")
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K3 4\n", "dsp_amt_pitch", 0),
+       "and does not overwrite PITCH on the way")
+    ck(expect("tap LFO\ntap LFO\nturn SELECT 3\n", "dsp_amt_morph", 12),
+       "MORPH's route arrives too")
+    ck(expect("tap LFO\ntap LFO\nturn K4 3\n", "dsp_amt_shape", 12),
+       "and SHAPE's")
     # ── B_SEL must mean the same thing on every screen of the page ──────────────
     # It did not: the route table took the knobs and then `return`ed out of update(), which
     # skipped every button handler below it -- B_SEL's among them. So the same key switched
