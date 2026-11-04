@@ -86,10 +86,10 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     # ── the page, and exclusivity ────────────────────────────────────────────────
-    # The filter's deep settings live on the LFO page's SECOND SCREEN now (player's
-    # call: they are how the LFO's filter behaves, not a subject of their own). So the
-    # way in is LFO twice, and the way out is HOME -- the LFO button advances rather
-    # than closing, which is the panel rule the player set in the same session.
+    # The filter's own settings live on GLO's page now (player's call, this session):
+    # TYPE and KEY TRK are the FILTER's, shared by all eight voices, and they apply with
+    # the LFO off -- so the page that owns them is the instrument-wide one, not the LFO's.
+    # The way out is HOME, or any other page button: a page button never closes a page.
     o = run("""wait 300
 expect page_no 1
 tap LFO
@@ -109,11 +109,10 @@ expect page 2
 tap ENV
 master 300
 expect page 1
-tap LFO
-tap LFO
+tap GLO
 master 300
-expect page 2
-expect page_no 2
+expect page 6
+expect page_no 1
 tap ARP
 master 300
 expect page 3
@@ -123,13 +122,13 @@ expect page_no 1
         if line.startswith("  ok") or line.startswith("FAIL"):
             ck("FAIL" not in line, line.strip()[3:])
 
-    # ── the second screen is still the LFO's page, and says so ───────────────────
+    # ── GLO is a page of its own, and its lamp says so ──────────────────────────
     # The lamp belongs to the PAGE, not the screen: both screens are the LFO, so the
     # button stays lit while you are on screen 2. A lamp that went out there would say
     # the LFO had closed while its filter settings were on the screen.
     o = run("""wait 300
 leds
-tap LFO
+tap GLO
 master 300
 leds
 tap LFO
@@ -138,16 +137,16 @@ leds
 """, out)
     seen = [l.split("leds:")[1].split("|")[0].strip()
             for l in o.splitlines() if "leds:" in l]
-    ck("LFO" not in seen[0], f"nothing is lit at rest [{seen[0]}]")
-    ck("LFO" in seen[1], f"screen 1 lights the LFO button [{seen[1]}]")
-    ck("LFO" in seen[2], f"and screen 2 keeps it lit: same page, other screen [{seen[2]}]")
+    ck("GLO" not in seen[0], f"nothing is lit at rest [{seen[0]}]")
+    ck("GLO" in seen[1], f"GLO lights its own button [{seen[1]}]")
+    ck("GLO" not in seen[2] and "LFO" in seen[2],
+       f"and LFO closes it: one page at a time [{seen[2]}]")
 
     # ── K3 and K4 step, wrap, and reach the DSP ──────────────────────────────────
     o = run("""wait 300
 expect ftype 0
 expect ktrack 0
-tap LFO
-tap LFO
+tap GLO
 master 300
 turn K3 1
 master 200
@@ -194,8 +193,7 @@ expect ktrack 100
 turn K1 -6
 master 200
 expect cut 103
-tap LFO
-tap LFO
+tap GLO
 master 400
 expect cut 103
 turn K2 4
@@ -211,8 +209,7 @@ expect res 16
 
     # ── the rings show the setting, and differ between 25 % and 100 % ───────────
     o = run("""wait 400
-tap LFO
-tap LFO
+tap GLO
 master 400
 shot kt000.png
 turn K4 1
@@ -266,8 +263,7 @@ shot type_hp.png
     # come back as whatever the last RAM write left). ftype=2 / ktrack=75 are picked
     # because neither is the default: a broken path would return 0 and 0.
     o = run("""wait 300
-tap LFO
-tap LFO
+tap GLO
 master 300
 turn K3 1
 turn K3 1

@@ -390,27 +390,33 @@ shot grn.png
     ck(expect("tap LFO\ntap LFO\n", "page_no", 2), "pressing LFO again goes to screen 2")
     # Round, not stop: the page button is the only way to walk a page's screens, so the
     # last one cannot be a dead end (player, this session).
-    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3),
-       "and a third press rounds to screen 3, not back to 1")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
-       "so the fourth press wraps 3 -> 1: a three-screen cycle")
-    # ── the LFO's third screen: what else the LFO moves (spec 5c3) ───────────
+    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 1),
+       "and a third press wraps 2 -> 1: the LFO page is two screens again")
+    # ── the LFO's second screen: what else the LFO moves (spec 5c3) ──────────
     # K4 here is MORPH's own amount, and the assertion that matters is that it is NOT
     # CUT's DEPTH: screen 1 already owns that encoder for DEPTH, and if the two shared a
     # byte then dialling a filter sweep would silently add a wavetable sweep.
-    ck(expect("tap LFO\ntap LFO\ntap LFO\n", "page_no", 3),
-       "LFO has a third screen")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "morph_mod", 40),
+    ck(expect("tap LFO\ntap LFO\n", "page_no", 2),
+       "LFO's route screen is screen 2")
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "morph_mod", 40),
        "screen 3: K4 sets MORPH's amount")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 0),
+    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 0),
        "and it does NOT set CUT's depth")
     ck(expect("tap LFO\nturn K4 10\n", "morph_mod", 0),
        "screen 1's K4 still sets DEPTH, not MORPH")
-    ck(expect("tap LFO\ntap LFO\nturn K4 10\n", "morph_mod", 0),
-       "screen 2's K4 still sets KEY TRK, not MORPH")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K1 -6\n", "cut", 103),
+    # KEY TRK left this page for GLO (it is the FILTER's setting, shared by all eight
+    # voices, not one LFO's). So the assertion moves with it: K4 sets it there, and
+    # K4 here does not.
+    # Two detents, not ten: KEY TRK is five discrete stops, so ten detents is two whole
+    # laps and lands back on 0 -- an assertion of "50" there would have been the test
+    # telling me the knob moves when it does not.
+    ck(expect("tap GLO\nturn K4 2\n", "ktrack", 50),
+       "KEY TRK sets on GLO's page, where it now lives")
+    ck(expect("tap GLO\nturn K4 2\n", "morph_mod", 0),
+       "and GLO's K4 does not touch MORPH")
+    ck(expect("tap LFO\ntap LFO\nturn K1 -6\n", "cut", 103),
        "screen 3 keeps CUT on K1, like the other two")
-    ck(expect("tap LFO\ntap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
+    ck(expect("tap LFO\ntap LFO\ntap LFO\nturn K4 10\n", "lfo_depth", 40),
        "the fourth press is back on screen 1, where K4 is DEPTH again")
     ck(expect("tap LFO\ntap LFO\ntap HOME\n", "lfo", 0),
        "HOME closes it from screen 2")

@@ -155,10 +155,11 @@ tap ENV
 tap LFO
 turn K3 7
 turn K4 5
+tap GLO
+turn K4 3
 tap LFO
 tap LFO
 turn K4 3
-tap LFO
 tap ARP
 turn K1 2
 turn K2 1
